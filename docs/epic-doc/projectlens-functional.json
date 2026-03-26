@@ -1,0 +1,26 @@
+{
+  "theme": "tech",
+  "meta": {
+    "title": "ProjectLens 功能设计（V1.1）",
+    "author": "AI-KA",
+    "subject": "ProjectLens",
+    "description": "由 AI-KA 生成的功能设计文档（块结构），用于 epic-doc 导出 docx。"
+  },
+  "header": { "text": "ProjectLens 功能设计（V1.1）", "align": "right" },
+  "footer": { "text": "AI-KA", "page_number": true, "align": "center" },
+  "blocks": [
+    { "type": "heading", "text": "ProjectLens（AI-KA）", "level": 1, "align": "center" },
+    { "type": "paragraph", "text": "智能项目分析与评审平台" },
+    { "type": "paragraph", "text": "功能设计文档（Functional Design）" },
+    { "type": "paragraph", "text": "V1.1 | 2026-03-25" },
+    { "type": "hr" },
+    { "type": "heading", "text": "说明", "level": 2 },
+    {
+      "type": "callout",
+      "style": "info",
+      "title": "生成说明",
+      "text": "本 JSON 为 epic-doc blocks 示例，用于导出 docx。权威内容以 docs/ProjectLens_功能设计_V1.1.md 为准。"
+    }
+  ]
+}
+

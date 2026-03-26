@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-ka"
+version = "0.1.0"
+description = "ProjectLens (AI-KA) CLI: indexing and doc pipeline baseline."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "docs2md @ git+https://github.com/Grant-Huang/docs2md.git",
+  "epic-doc @ git+https://github.com/Grant-Huang/epic-doc.git",
+]
+
+[project.scripts]
+aika = "aika.cli:main"
+aika-web = "backend.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src", "web"]
+
+[tool.setuptools.package-data]
+frontend_dist = ["dist/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+

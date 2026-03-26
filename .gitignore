@@ -1,0 +1,28 @@
+# Ignore sample input documents (not for commit)
+sample-docs/
+
+# Workspace temp artifacts (not for commit)
+.tmp/
+tmp/
+
+# Python caches / virtualenvs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+*.tsbuildinfo
+
+# Node / frontend build
+web/frontend/node_modules/
+web/frontend/dist/
+web/frontend_dist/dist/
+
+# Generated documents / exports
+docs/epic-doc/out/
+

@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: "web/frontend/package-lock.json"
+
+      - name: Build frontend (Vite)
+        working-directory: web/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Copy dist into wheel package
+        run: |
+          rm -rf web/frontend_dist/dist
+          mkdir -p web/frontend_dist/dist
+          cp -R web/frontend/dist/. web/frontend_dist/dist/
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        run: |
+          python -m pip install -U pip
+          python -m pip install -e . --no-build-isolation
+
+      - name: Test
+        run: |
+          python -m pytest
+
+      - name: Build wheel
+        run: |
+          python -m pip install -U build
+          python -m build
+

@@ -1,0 +1,25 @@
+{
+  "theme": "professional",
+  "meta": {
+    "title": "ProjectLens 行动计划（V1.0）",
+    "author": "AI-KA",
+    "subject": "ProjectLens",
+    "description": "由 AI-KA 生成的行动计划（块结构），用于 epic-doc 导出 docx。"
+  },
+  "header": { "text": "ProjectLens 行动计划（V1.0）", "align": "right" },
+  "footer": { "text": "AI-KA", "page_number": true, "align": "center" },
+  "blocks": [
+    { "type": "heading", "text": "ProjectLens（AI-KA）", "level": 1, "align": "center" },
+    { "type": "paragraph", "text": "智能项目分析与评审平台" },
+    { "type": "paragraph", "text": "行动计划（Milestones & Execution Plan）" },
+    { "type": "paragraph", "text": "V1.0 | 2026-03-25" },
+    { "type": "hr" },
+    {
+      "type": "callout",
+      "style": "info",
+      "title": "生成说明",
+      "text": "本 JSON 为 epic-doc blocks 示例，用于导出 docx。权威内容以 docs/ProjectLens_行动计划_V1.0.md 为准。"
+    }
+  ]
+}
+
