@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any, Iterator
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,10 +47,94 @@ app.add_middleware(
 
 _repo_root = repository_root()
 
+DEFAULT_FOCUS_POINTS: list[dict[str, str]] = [
+    {"id": "req", "name": "需求", "prompt": "重点关注需求完整性、需求边界与缺失项。"},
+    {"id": "risk", "name": "风险", "prompt": "识别高/中/低风险，给出证据和影响。"},
+    {"id": "integration", "name": "接口与集成", "prompt": "关注系统接口、数据流、上下游依赖与一致性。"},
+    {"id": "scope", "name": "范围蔓延", "prompt": "识别超范围需求和变更影响。"},
+    {"id": "progress", "name": "进度", "prompt": "关注里程碑、任务时序与延期风险。"},
+    {"id": "quality", "name": "质量", "prompt": "关注测试覆盖、缺陷闭环与质量门禁。"},
+    {"id": "acceptance", "name": "验收", "prompt": "关注验收标准定义、证据闭环和未决事项。"},
+    {"id": "data", "name": "数据一致性", "prompt": "关注关键主数据、口径与跨系统一致性问题。"},
+]
+DEFAULT_CHUNK_LIMIT = 40
+_RULES_MD_JSON_BEGIN = "<!-- AIKA_SETTINGS_JSON_BEGIN -->"
+_RULES_MD_JSON_END = "<!-- AIKA_SETTINGS_JSON_END -->"
+
 
 @app.get("/api/v1/health")
 def health() -> dict[str, Any]:
     return ok({"ok": True})
+
+
+def _rules_md_path() -> Path:
+    return repository_root() / "rules.md"
+
+
+def _build_settings_payload(conn: Any) -> dict[str, Any]:
+    return {"focus_points": _get_focus_points(conn), "chunk_limit": _get_chunk_limit(conn)}
+
+
+def _read_settings_from_rules_md() -> dict[str, Any] | None:
+    p = _rules_md_path()
+    if not p.is_file():
+        return None
+    text = p.read_text(encoding="utf-8", errors="replace")
+    start = text.find(_RULES_MD_JSON_BEGIN)
+    end = text.find(_RULES_MD_JSON_END)
+    if start < 0 or end < 0 or end <= start:
+        return None
+    body = text[start + len(_RULES_MD_JSON_BEGIN) : end].strip()
+    if not body:
+        return None
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _write_settings_to_rules_md(payload: dict[str, Any]) -> None:
+    p = _rules_md_path()
+    md = (
+        "# 分析规则配置\n\n"
+        "该文件由 AI-KA 自动维护，用于保存关注点与 chunk 上限。\n\n"
+        f"{_RULES_MD_JSON_BEGIN}\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
+        f"{_RULES_MD_JSON_END}\n"
+    )
+    p.write_text(md, encoding="utf-8")
+
+
+def _get_focus_points(conn: Any) -> list[dict[str, str]]:
+    v = dbm.get_app_setting_json(conn, "focus_points")
+    if isinstance(v, list):
+        out: list[dict[str, str]] = []
+        for item in v:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            out.append(
+                {
+                    "id": str(item.get("id") or name),
+                    "name": name,
+                    "prompt": str(item.get("prompt") or "").strip(),
+                }
+            )
+        if out:
+            return out
+    return DEFAULT_FOCUS_POINTS
+
+
+def _get_chunk_limit(conn: Any) -> int:
+    v = dbm.get_app_setting_json(conn, "chunk_limit")
+    if isinstance(v, int) and 1 <= v <= 500:
+        return v
+    return DEFAULT_CHUNK_LIMIT
 
 
 def _client_is_localhost(request: Request) -> bool:
@@ -113,6 +198,58 @@ def detect_projects(payload: dict[str, Any]) -> JSONResponse:
     return JSONResponse(ok(layout))
 
 
+@app.get("/api/v1/settings")
+def get_app_settings() -> JSONResponse:
+    conn = _conn()
+    file_data = _read_settings_from_rules_md()
+    if isinstance(file_data, dict):
+        fp = file_data.get("focus_points")
+        cl = file_data.get("chunk_limit")
+        if isinstance(fp, list):
+            dbm.set_app_setting_json(conn, "focus_points", fp)
+        if isinstance(cl, int):
+            dbm.set_app_setting_json(conn, "chunk_limit", cl)
+    return JSONResponse(ok(_build_settings_payload(conn)))
+
+
+@app.post("/api/v1/settings")
+def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
+    conn = _conn()
+    if "chunk_limit" in payload:
+        raw = payload.get("chunk_limit")
+        try:
+            val = int(raw)
+        except (TypeError, ValueError):
+            return JSONResponse(err("chunk_limit must be integer"), status_code=400)
+        if val < 1 or val > 500:
+            return JSONResponse(err("chunk_limit must be between 1 and 500"), status_code=400)
+        dbm.set_app_setting_json(conn, "chunk_limit", val)
+    if "focus_points" in payload:
+        raw_fp = payload.get("focus_points")
+        if not isinstance(raw_fp, list):
+            return JSONResponse(err("focus_points must be a list"), status_code=400)
+        out: list[dict[str, str]] = []
+        for item in raw_fp:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            out.append(
+                {
+                    "id": str(item.get("id") or name),
+                    "name": name,
+                    "prompt": str(item.get("prompt") or "").strip(),
+                }
+            )
+        if not out:
+            return JSONResponse(err("focus_points cannot be empty"), status_code=400)
+        dbm.set_app_setting_json(conn, "focus_points", out)
+    current = _build_settings_payload(conn)
+    _write_settings_to_rules_md(current)
+    return JSONResponse(ok(current))
+
+
 @app.post("/api/v1/projects")
 def create_project(payload: dict[str, Any]) -> JSONResponse:
     name = str(payload.get("name") or "").strip()
@@ -134,6 +271,32 @@ def create_project(payload: dict[str, Any]) -> JSONResponse:
             return JSONResponse(err("project name already exists"), status_code=409)
         raise
     return JSONResponse(ok({"id": prj.id, "name": prj.name, "root_path": prj.root_path}))
+
+
+@app.post("/api/v1/projects/ensure")
+def ensure_project(payload: dict[str, Any]) -> JSONResponse:
+    root_path = str(payload.get("root_path") or "").strip()
+    req_name = str(payload.get("name") or "").strip()
+    if not root_path:
+        return JSONResponse(err("root_path is required"), status_code=400)
+    try:
+        validated = validate_project_root(root_path)
+    except PathValidationError as e:
+        return JSONResponse(err(str(e)), status_code=400)
+
+    conn = _conn()
+    existed = dbm.get_project_by_root_path(conn, validated.as_posix())
+    if existed is not None:
+        return JSONResponse(ok({"id": existed.id, "name": existed.name, "root_path": existed.root_path, "created": False}))
+
+    base = req_name or Path(validated).name or "project"
+    name = base
+    suffix = 2
+    while dbm.get_project_by_name(conn, name) is not None:
+        name = f"{base}-{suffix}"
+        suffix += 1
+    prj = dbm.create_project(conn, name, validated.as_posix())
+    return JSONResponse(ok({"id": prj.id, "name": prj.name, "root_path": prj.root_path, "created": True}))
 
 
 @app.get("/api/v1/projects")
@@ -263,7 +426,7 @@ def _coerce_rules_obj(obj: Any, focus_points: list[str], focus_note: str) -> dic
 
 
 def _rules_generate_prompts(
-    prj: Any, focus_points: list[str], focus_note: str
+    conn: Any, prj: Any, focus_points: list[str], focus_note: str
 ) -> tuple[str, str, LLMConfig, Any]:
     st = get_settings()
     cfg = LLMConfig(
@@ -274,6 +437,12 @@ def _rules_generate_prompts(
         timeout_s=180.0,
     )
     provider = get_provider(cfg.provider)
+    fp_defs = _get_focus_points(conn)
+    prompt_by_name = {x["name"]: x.get("prompt", "") for x in fp_defs}
+    selected_focus = [
+        {"name": n, "prompt": prompt_by_name.get(n, "")}
+        for n in focus_points
+    ]
     system = (
         "你是资深 IT 实施顾问。请基于用户给出的分析关注点，输出 analysis rules JSON。"
         "只输出 JSON 对象，不要 Markdown。"
@@ -281,7 +450,7 @@ def _rules_generate_prompts(
     )
     user = (
         f"项目名：{prj.name}\n"
-        f"用户选择关注点：{json.dumps(focus_points, ensure_ascii=False)}\n"
+        f"用户选择关注点：{json.dumps(selected_focus, ensure_ascii=False)}\n"
         f"用户补充说明：{focus_note}\n"
         "要求：\n"
         "1) dimensions 必须覆盖所有关注点；\n"
@@ -312,7 +481,7 @@ def generate_rules(project_id: int, payload: dict[str, Any]) -> JSONResponse:
     if not focus_points and not focus_note:
         return JSONResponse(err("focus_points or focus_note is required"), status_code=400)
 
-    system, user, cfg, provider = _rules_generate_prompts(prj, focus_points, focus_note)
+    system, user, cfg, provider = _rules_generate_prompts(conn, prj, focus_points, focus_note)
     try:
         chunks: list[str] = []
         for piece in provider.chat_stream(system=system, user=user, config=cfg):
@@ -339,7 +508,7 @@ def generate_rules_stream(project_id: int, payload: dict[str, Any]) -> Streaming
     if not focus_points and not focus_note:
         raise HTTPException(status_code=400, detail="focus_points or focus_note is required")
 
-    system, user, cfg, provider = _rules_generate_prompts(prj, focus_points, focus_note)
+    system, user, cfg, provider = _rules_generate_prompts(conn, prj, focus_points, focus_note)
 
     def gen() -> Iterator[str]:
         try:

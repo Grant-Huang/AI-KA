@@ -93,6 +93,12 @@ CREATE TABLE IF NOT EXISTS annotations (
 
 CREATE INDEX IF NOT EXISTS idx_annotations_project_type ON annotations(project_id, type);
 CREATE INDEX IF NOT EXISTS idx_annotations_project_verified ON annotations(project_id, is_verified);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -191,6 +197,16 @@ def get_project_by_id(conn: sqlite3.Connection, project_id: int) -> ProjectRow |
     row = conn.execute(
         "SELECT id, name, root_path, rules_json FROM projects WHERE id=?",
         (project_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return _row_to_project(row)
+
+
+def get_project_by_root_path(conn: sqlite3.Connection, root_path: str) -> ProjectRow | None:
+    row = conn.execute(
+        "SELECT id, name, root_path, rules_json FROM projects WHERE root_path=? ORDER BY id LIMIT 1",
+        (root_path,),
     ).fetchone()
     if row is None:
         return None
@@ -588,4 +604,28 @@ def list_annotations_with_evidence(
             (project_id, type_, int(limit)),
         ).fetchall()
     return list(rows)
+
+
+def get_app_setting_json(conn: sqlite3.Connection, key: str) -> Any | None:
+    row = conn.execute("SELECT value_json FROM app_settings WHERE key=?", (key,)).fetchone()
+    if row is None:
+        return None
+    try:
+        return json.loads(str(row["value_json"]))
+    except json.JSONDecodeError:
+        return None
+
+
+def set_app_setting_json(conn: sqlite3.Connection, key: str, value: Any) -> None:
+    conn.execute(
+        """
+        INSERT INTO app_settings(key, value_json, updated_at)
+        VALUES (?, ?, datetime('now'))
+        ON CONFLICT(key) DO UPDATE SET
+          value_json=excluded.value_json,
+          updated_at=datetime('now')
+        """,
+        (key, json.dumps(value, ensure_ascii=False)),
+    )
+    conn.commit()
 

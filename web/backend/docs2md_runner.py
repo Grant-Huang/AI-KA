@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -10,6 +11,16 @@ from backend.config import get_settings
 
 class Docs2MdError(RuntimeError):
     pass
+
+
+def _vl_api_key_present() -> bool:
+    keys = (
+        "AIKA_VL_API_KEY",
+        "VL_API_KEY",
+        "OPENAI_VL_API_KEY",
+        "QWEN_VL_API_KEY",
+    )
+    return any((os.environ.get(k) or "").strip() for k in keys)
 
 
 def all2md_script_path() -> Path:
@@ -47,6 +58,14 @@ def run_convert_directory(
     else:
         cmd = [sys.executable, "-m", "docs2md.cli", str(input_dir), "-o", str(output_dir), "--format", format_]
 
+    child_env = dict(os.environ)
+    if not _vl_api_key_present():
+        # Best-effort flag: if docs2md supports these envs, image/VL parsing will be skipped.
+        child_env["DOCS2MD_DISABLE_IMAGE_PARSE"] = "1"
+        child_env["DOCS2MD_SKIP_IMAGE"] = "1"
+        child_env["DOCS2MD_VL_ENABLED"] = "0"
+        yield "[hint] 未检测到 VL API Key：将跳过图片解析环节（若 docs2md 支持该开关）。\n"
+
     yield f"[cmd] {' '.join(cmd)}\n"
 
     proc = subprocess.Popen(
@@ -57,6 +76,7 @@ def run_convert_directory(
         encoding="utf-8",
         errors="replace",
         cwd=cwd,
+        env=child_env,
     )
     assert proc.stdout is not None
     for line in proc.stdout:

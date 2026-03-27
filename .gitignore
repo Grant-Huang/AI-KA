@@ -26,3 +26,13 @@ web/frontend_dist/dist/
 # Generated documents / exports
 docs/epic-doc/out/
 
+# macOS metadata
+.DS_Store
+**/.DS_Store
+
+# Local docs source files (not for commit)
+docs/*.docx
+
+# Local focus-point settings file
+rules.md
+
