@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +17,7 @@ from aika.paths import db_path
 
 from backend.config import get_settings
 from backend.docs2md_runner import Docs2MdError, run_convert_directory
+from backend.folder_picker import FolderPickerError, pick_folder_native
 from backend.epic_mapper import analysis_to_epic_doc_config, dump_epic_config_json
 from backend.frontend_static import dev_dist_dir, packaged_dist_dir
 from backend.path_validate import PathValidationError, validate_path_under_dir, validate_project_root
@@ -48,6 +49,56 @@ _repo_root = repository_root()
 @app.get("/api/v1/health")
 def health() -> dict[str, Any]:
     return ok({"ok": True})
+
+
+def _client_is_localhost(request: Request) -> bool:
+    host = (request.client.host if request.client else "") or ""
+    if host in ("127.0.0.1", "::1", "localhost", "testclient"):
+        return True
+    ff = (request.headers.get("x-forwarded-for") or "").strip()
+    if ff:
+        first = ff.split(",")[0].strip()
+        if first in ("127.0.0.1", "::1"):
+            return True
+    return False
+
+
+@app.get("/api/v1/fs/capabilities")
+def fs_capabilities(request: Request) -> JSONResponse:
+    st = get_settings()
+    local = _client_is_localhost(request)
+    enabled = st.enable_native_folder_picker and (not st.fs_picker_localhost_only or local)
+    return JSONResponse(
+        ok(
+            {
+                "native_folder_picker": enabled,
+                "localhost_only": st.fs_picker_localhost_only,
+            }
+        )
+    )
+
+
+@app.post("/api/v1/fs/pick-directory")
+def pick_directory(request: Request) -> JSONResponse:
+    st = get_settings()
+    if not st.enable_native_folder_picker:
+        return JSONResponse(err("native folder picker is disabled"), status_code=403)
+    if st.fs_picker_localhost_only and not _client_is_localhost(request):
+        return JSONResponse(
+            err("folder picker is only available when accessing the API from localhost"),
+            status_code=403,
+        )
+    try:
+        chosen = pick_folder_native()
+    except FolderPickerError as e:
+        return JSONResponse(err(str(e)), status_code=503)
+    if chosen is None:
+        return JSONResponse(err("directory selection cancelled"), status_code=400)
+    try:
+        validated = validate_project_root(chosen)
+    except PathValidationError as e:
+        return JSONResponse(err(str(e)), status_code=400)
+    return JSONResponse(ok({"path": validated.as_posix()}))
 
 
 @app.post("/api/v1/projects")
@@ -138,6 +189,86 @@ def save_rules(project_id: int, payload: dict[str, Any]) -> JSONResponse:
 
 def _sse_line(obj: dict[str, Any]) -> str:
     return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+
+
+def _clean_json_text(raw: str) -> str:
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+    return cleaned.strip()
+
+
+def _coerce_rules_obj(obj: Any, focus_points: list[str], focus_note: str) -> dict[str, Any]:
+    merged_focus = [x for x in focus_points if x]
+    if focus_note:
+        merged_focus.append(focus_note)
+    if not isinstance(obj, dict):
+        return merge_rules({"dimensions": merged_focus})
+    goal = str(obj.get("goal") or "").strip() or "基于转换后的 Markdown 做项目风险与需求梳理"
+    dimensions = obj.get("dimensions")
+    if not isinstance(dimensions, list):
+        dimensions = []
+    dimensions_clean = [str(x).strip() for x in dimensions if str(x).strip()]
+    for item in merged_focus:
+        if item not in dimensions_clean:
+            dimensions_clean.append(item)
+    if not dimensions_clean:
+        dimensions_clean = ["需求", "风险", "接口与集成"]
+    style = obj.get("style")
+    if not isinstance(style, dict):
+        style = {"prefer": ["cards", "table", "tabs"]}
+    return {"goal": goal, "dimensions": dimensions_clean, "style": style}
+
+
+@app.post("/api/v1/projects/{project_id}/rules/generate")
+def generate_rules(project_id: int, payload: dict[str, Any]) -> JSONResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+
+    points_raw = payload.get("focus_points")
+    focus_points = [str(x).strip() for x in (points_raw if isinstance(points_raw, list) else []) if str(x).strip()]
+    focus_note = str(payload.get("focus_note") or "").strip()
+    if not focus_points and not focus_note:
+        return JSONResponse(err("focus_points or focus_note is required"), status_code=400)
+
+    st = get_settings()
+    cfg = LLMConfig(
+        provider=st.llm_provider,
+        model=st.llm_model,
+        base_url=st.llm_base_url,
+        api_key=st.llm_api_key,
+        timeout_s=180.0,
+    )
+    provider = get_provider(cfg.provider)
+    system = (
+        "你是资深 IT 实施顾问。请基于用户给出的分析关注点，输出 analysis rules JSON。"
+        "只输出 JSON 对象，不要 Markdown。"
+        '格式：{"goal":"...","dimensions":["..."],"style":{"prefer":["cards","table","tabs"]}}'
+    )
+    user = (
+        f"项目名：{prj.name}\n"
+        f"用户选择关注点：{json.dumps(focus_points, ensure_ascii=False)}\n"
+        f"用户补充说明：{focus_note}\n"
+        "要求：\n"
+        "1) dimensions 必须覆盖所有关注点；\n"
+        "2) goal 一句话且可执行；\n"
+        "3) 输出必须是合法 JSON。"
+    )
+    try:
+        chunks: list[str] = []
+        for piece in provider.chat_stream(system=system, user=user, config=cfg):
+            chunks.append(piece)
+        raw = "".join(chunks)
+        parsed = json.loads(_clean_json_text(raw))
+    except (LLMError, json.JSONDecodeError):
+        parsed = {}
+
+    rules = _coerce_rules_obj(parsed, focus_points=focus_points, focus_note=focus_note)
+    dbm.update_project_rules(conn, project_id, json.dumps(rules, ensure_ascii=False))
+    return JSONResponse(ok({"rules": rules, "saved": True}))
 
 
 def _normalize_analysis_for_ui(obj: Any) -> dict[str, Any]:

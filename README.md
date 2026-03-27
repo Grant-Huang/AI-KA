@@ -56,6 +56,8 @@ npm run dev
 | `DOCS2MD_ROOT` | 可选：本地克隆的 [docs2md](https://github.com/Grant-Huang/docs2md) 仓库根目录（用于覆盖默认安装的 docs2md；需含 `all2md.py`） |
 | `DOCS2MD_PYTHON` | 可选，默认 `python` |
 | `AIKA_PROJECTS_ALLOW_PREFIX` | 可选，限制用户只能注册该前缀下的目录 |
+| `AIKA_ENABLE_NATIVE_FOLDER_PICKER` | 可选，默认开启：由本机后端弹出系统文件夹对话框并返回绝对路径（`/api/v1/fs/pick-directory`） |
+| `AIKA_FS_PICKER_LOCALHOST_ONLY` | 可选，默认开启：仅当从本机访问 API 时允许目录选择（防止远端触发服务器弹窗） |
 | `AIKA_LLM_PROVIDER` | `openai_compatible` 或 `mock`（离线演示） |
 | `AIKA_LLM_BASE_URL` | OpenAI 兼容 API 根 URL |
 | `AIKA_LLM_API_KEY` | API Key（或使用 `OPENAI_API_KEY`） |
@@ -75,7 +77,7 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8765
 
 ### 3.4 使用流程
 
-1. 在页面创建项目并填写**本机绝对路径**（后端进程必须可读）。
+1. 在页面创建项目：点击「选择目录」由本机后端弹出系统文件夹对话框并回填**绝对路径**（或手动填写；后端进程必须可读）。
 2. **开始转换**：调用 docs2md 子进程，SSE 显示日志；输出在 `.tmp/aika/projects/{id}/md_out/`。
 3. **索引 Markdown**：将 md 扫描入库并分块。
 4. 编辑并**保存规则**（JSON），**开始分析**：SSE 流式输出；前端解析最终 JSON 为卡片/表格/Tabs。

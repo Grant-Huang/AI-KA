@@ -17,6 +17,9 @@ import { BlockRenderer, type Block } from "./BlockRenderer";
 const { Text } = Typography;
 
 type Project = { id: number; name: string; root_path: string };
+type RulesObj = { goal?: string; dimensions?: string[]; style?: { prefer?: string[] } };
+
+const focusOptions = ["需求", "风险", "接口与集成", "范围蔓延", "进度", "质量", "验收", "数据一致性"];
 
 const defaultRulesText = JSON.stringify(
   {
@@ -29,6 +32,7 @@ const defaultRulesText = JSON.stringify(
 );
 
 export default function App() {
+  const [form] = Form.useForm<{ name: string; root_path: string }>();
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [convertLog, setConvertLog] = useState("");
@@ -36,6 +40,12 @@ export default function App() {
   const [analysis, setAnalysis] = useState<{ title?: string; blocks?: Block[] } | null>(null);
   const [rulesText, setRulesText] = useState(defaultRulesText);
   const [chunkLimit, setChunkLimit] = useState(40);
+  const [nativePickerAvailable, setNativePickerAvailable] = useState(true);
+  const [pickLoading, setPickLoading] = useState(false);
+  const [focusPoints, setFocusPoints] = useState<string[]>([]);
+  const [focusNote, setFocusNote] = useState("");
+  const [rulesReadyForConvert, setRulesReadyForConvert] = useState(false);
+  const [genRulesLoading, setGenRulesLoading] = useState(false);
 
   const loadProjects = useCallback(async () => {
     const data = await apiJson<{ projects: Project[] }>("/api/v1/projects");
@@ -48,6 +58,16 @@ export default function App() {
   useEffect(() => {
     loadProjects().catch((e) => message.error(String(e.message)));
   }, [loadProjects]);
+
+  useEffect(() => {
+    apiJson<{ native_folder_picker: boolean }>("/api/v1/fs/capabilities")
+      .then((d) => setNativePickerAvailable(!!d.native_folder_picker))
+      .catch(() => setNativePickerAvailable(false));
+  }, []);
+
+  useEffect(() => {
+    setRulesReadyForConvert(false);
+  }, [selectedId]);
 
   const selected = useMemo(
     () => projects.find((p) => p.id === selectedId) || null,
@@ -68,6 +88,19 @@ export default function App() {
     }
   };
 
+  const onPickDirectory = async () => {
+    setPickLoading(true);
+    try {
+      const data = await apiJson<{ path: string }>("/api/v1/fs/pick-directory", { method: "POST" });
+      form.setFieldValue("root_path", data.path);
+      message.success("已选择目录");
+    } catch (e) {
+      message.error(String((e as Error).message));
+    } finally {
+      setPickLoading(false);
+    }
+  };
+
   const onSaveRules = async () => {
     if (selectedId == null) return;
     let rules: object;
@@ -82,6 +115,7 @@ export default function App() {
         method: "POST",
         body: JSON.stringify({ rules }),
       });
+      setRulesReadyForConvert(true);
       message.success("规则已保存");
     } catch (e) {
       message.error(String((e as Error).message));
@@ -90,6 +124,10 @@ export default function App() {
 
   const runConvert = () => {
     if (selectedId == null) return;
+    if (!rulesReadyForConvert) {
+      message.warning("请先填写或选择关注点，并点击“生成规则JSON”");
+      return;
+    }
     setConvertLog("");
     const stop = openConvertStream(
       selectedId,
@@ -107,6 +145,38 @@ export default function App() {
       (e) => message.error(e.message),
     );
     setTimeout(stop, 600_000);
+  };
+
+  const onGenerateRules = async () => {
+    if (selectedId == null) {
+      message.warning("请先选择项目");
+      return;
+    }
+    if (focusPoints.length === 0 && !focusNote.trim()) {
+      message.warning("请至少填写或选择一个关注点");
+      return;
+    }
+    setGenRulesLoading(true);
+    try {
+      const data = await apiJson<{ rules: RulesObj; saved: boolean }>(
+        "/api/v1/projects/" + selectedId + "/rules/generate",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            focus_points: focusPoints,
+            focus_note: focusNote.trim(),
+          }),
+        },
+      );
+      setRulesText(JSON.stringify(data.rules, null, 2));
+      setRulesReadyForConvert(true);
+      message.success("规则 JSON 已生成并保存");
+    } catch (e) {
+      setRulesReadyForConvert(false);
+      message.error(String((e as Error).message));
+    } finally {
+      setGenRulesLoading(false);
+    }
   };
 
   const runIndex = async () => {
@@ -177,16 +247,32 @@ export default function App() {
   return (
     <div className="app-shell">
       <Typography.Title level={2}>AI-KA ProjectLens</Typography.Title>
-      <Text type="secondary">本机后端 + 浏览器：请填写服务器可访问的项目绝对路径；需配置 DOCS2MD_ROOT 与 LLM 环境变量。</Text>
+      <Text type="secondary">
+        本机后端 + 浏览器：项目根目录须为后端进程可读的绝对路径；点击「选择目录」由本机后端弹出系统文件夹对话框并回填路径。需配置 DOCS2MD_ROOT 与 LLM 环境变量。
+      </Text>
       <Divider />
 
       <Card title="新建项目" style={{ marginBottom: 16 }}>
-        <Form layout="inline" onFinish={onCreate}>
+        <Form form={form} layout="inline" onFinish={onCreate}>
           <Form.Item name="name" rules={[{ required: true }]}>
             <Input placeholder="项目名称" style={{ width: 160 }} />
           </Form.Item>
           <Form.Item name="root_path" rules={[{ required: true }]}>
-            <Input placeholder="绝对路径，如 D:/workspace/myproject" style={{ width: 420 }} />
+            <Input
+              placeholder="绝对路径，如 D:/workspace/myproject"
+              style={{ width: 420 }}
+              addonAfter={
+                <Button
+                  type="link"
+                  size="small"
+                  loading={pickLoading}
+                  disabled={!nativePickerAvailable}
+                  onClick={onPickDirectory}
+                >
+                  选择目录
+                </Button>
+              }
+            />
           </Form.Item>
           <Form.Item>
             <Button type="primary" htmlType="submit">
@@ -210,8 +296,38 @@ export default function App() {
       </Card>
 
       <Card title="1. docs2md 转换（SSE 日志）" style={{ marginBottom: 16 }}>
+        <Space direction="vertical" style={{ width: "100%" }} size={8}>
+          <Text strong>转换前：先填写或选择分析关注点，再生成规则 JSON</Text>
+          <Space wrap>
+            <Select
+              mode="multiple"
+              allowClear
+              style={{ minWidth: 420 }}
+              placeholder="选择关注点（可多选）"
+              value={focusPoints}
+              options={focusOptions.map((x) => ({ value: x, label: x }))}
+              onChange={(v) => {
+                setFocusPoints(v as string[]);
+                setRulesReadyForConvert(false);
+              }}
+            />
+            <Input
+              placeholder="补充关注点（可选）"
+              style={{ width: 320 }}
+              value={focusNote}
+              onChange={(e) => {
+                setFocusNote(e.target.value);
+                setRulesReadyForConvert(false);
+              }}
+            />
+            <Button type="primary" loading={genRulesLoading} onClick={onGenerateRules} disabled={selectedId == null}>
+              生成规则JSON
+            </Button>
+          </Space>
+        </Space>
+        <Divider style={{ margin: "12px 0" }} />
         <Space wrap>
-          <Button onClick={runConvert} disabled={selectedId == null}>
+          <Button onClick={runConvert} disabled={selectedId == null || !rulesReadyForConvert}>
             开始转换
           </Button>
           <Button onClick={runIndex} disabled={selectedId == null}>
