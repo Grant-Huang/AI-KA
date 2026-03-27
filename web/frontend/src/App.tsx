@@ -7,7 +7,7 @@ const { Text } = Typography;
 
 type Project = { id: number; name: string; root_path: string };
 type FocusPoint = { id: string; name: string; prompt: string };
-type SettingsData = { focus_points: FocusPoint[]; chunk_limit: number };
+type SettingsData = { focus_points: FocusPoint[]; chunk_limit: number; rules_md_error?: string | null };
 type LayoutData = { mode: "single" | "multi"; root_label: string; candidates: { id: string; name: string; path: string }[]; warnings: string[] };
 
 export default function App() {
@@ -30,6 +30,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<SettingsData>({ focus_points: [], chunk_limit: 40 });
+  const [rulesMdError, setRulesMdError] = useState<string | null>(null);
 
   const loadProjects = useCallback(async () => {
     const data = await apiJson<{ projects: Project[] }>("/api/v1/projects");
@@ -45,6 +46,7 @@ export default function App() {
     setChunkLimit(data.chunk_limit);
     setFocusDefs(data.focus_points);
     setSettingsDraft(data);
+    setRulesMdError(data.rules_md_error || null);
   }, []);
 
   useEffect(() => {
@@ -127,6 +129,7 @@ export default function App() {
       });
       setChunkLimit(data.chunk_limit);
       setFocusDefs(data.focus_points);
+      setRulesMdError(data.rules_md_error || null);
       setSettingsOpen(false);
       message.success("设置已保存");
     } catch (e) {
@@ -225,6 +228,14 @@ export default function App() {
 
       <Card title="项目选择" style={{ marginBottom: 16 }}>
         <Space direction="vertical" style={{ width: "100%" }} size={8}>
+          {rulesMdError ? (
+            <Alert
+              type="error"
+              showIcon
+              message={`rules.md 格式异常：${rulesMdError}`}
+              description="系统已自动回退到数据库中的上次有效设置。请修复 rules.md 后刷新页面，或在设置页保存一次。"
+            />
+          ) : null}
           <Space wrap>
             <Button type="primary" loading={pickLoading} disabled={!nativePickerAvailable} onClick={onPickDirectory}>
               选择目录并自动加载

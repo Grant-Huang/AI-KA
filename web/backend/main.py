@@ -58,8 +58,6 @@ DEFAULT_FOCUS_POINTS: list[dict[str, str]] = [
     {"id": "data", "name": "数据一致性", "prompt": "关注关键主数据、口径与跨系统一致性问题。"},
 ]
 DEFAULT_CHUNK_LIMIT = 40
-_RULES_MD_JSON_BEGIN = "<!-- AIKA_SETTINGS_JSON_BEGIN -->"
-_RULES_MD_JSON_END = "<!-- AIKA_SETTINGS_JSON_END -->"
 
 
 @app.get("/api/v1/health")
@@ -75,35 +73,95 @@ def _build_settings_payload(conn: Any) -> dict[str, Any]:
     return {"focus_points": _get_focus_points(conn), "chunk_limit": _get_chunk_limit(conn)}
 
 
-def _read_settings_from_rules_md() -> dict[str, Any] | None:
+def _read_settings_from_rules_md() -> tuple[dict[str, Any] | None, str | None]:
     p = _rules_md_path()
     if not p.is_file():
-        return None
+        return None, None
     text = p.read_text(encoding="utf-8", errors="replace")
-    start = text.find(_RULES_MD_JSON_BEGIN)
-    end = text.find(_RULES_MD_JSON_END)
-    if start < 0 or end < 0 or end <= start:
-        return None
-    body = text[start + len(_RULES_MD_JSON_BEGIN) : end].strip()
-    if not body:
-        return None
-    try:
-        data = json.loads(body)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    return data
+    lines = text.splitlines()
+
+    chunk_limit: int | None = None
+    focus_rows: list[tuple[str, str]] = []
+    prompts: dict[str, str] = {}
+
+    in_table = False
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if line.startswith("- chunk_limit:"):
+            raw = line.split(":", 1)[1].strip()
+            try:
+                val = int(raw)
+            except ValueError:
+                val = None
+            if val is not None and 1 <= val <= 500:
+                chunk_limit = val
+        if line == "| id | name |":
+            in_table = True
+            i += 2  # skip separator
+            continue
+        if in_table:
+            if not line.startswith("|"):
+                in_table = False
+            else:
+                cells = [x.strip() for x in line.strip("|").split("|")]
+                if len(cells) >= 2 and cells[0] and cells[1]:
+                    focus_rows.append((cells[0], cells[1]))
+        if line.startswith("### prompt:"):
+            pid = line.split(":", 1)[1].strip()
+            j = i + 1
+            buf: list[str] = []
+            while j < len(lines):
+                nxt = lines[j]
+                if nxt.strip().startswith("### prompt:"):
+                    break
+                buf.append(nxt)
+                j += 1
+            prompts[pid] = "\n".join(buf).strip()
+            i = j
+            continue
+        i += 1
+
+    if not focus_rows:
+        return None, "rules.md 格式无效：未找到“关注点列表”表格（| id | name |）"
+    focus_points = [{"id": fid, "name": name, "prompt": prompts.get(fid, "")} for fid, name in focus_rows]
+    out: dict[str, Any] = {"focus_points": focus_points}
+    if chunk_limit is not None:
+        out["chunk_limit"] = chunk_limit
+    return out, None
 
 
 def _write_settings_to_rules_md(payload: dict[str, Any]) -> None:
     p = _rules_md_path()
+    focus_points = payload.get("focus_points")
+    if not isinstance(focus_points, list):
+        focus_points = DEFAULT_FOCUS_POINTS
+    chunk_limit = payload.get("chunk_limit")
+    if not isinstance(chunk_limit, int):
+        chunk_limit = DEFAULT_CHUNK_LIMIT
+
+    table_lines = ["| id | name |", "| --- | --- |"]
+    prompt_lines: list[str] = []
+    for item in focus_points:
+        if not isinstance(item, dict):
+            continue
+        fid = str(item.get("id") or "").strip()
+        name = str(item.get("name") or "").strip()
+        prm = str(item.get("prompt") or "").strip()
+        if not fid or not name:
+            continue
+        table_lines.append(f"| {fid} | {name} |")
+        prompt_lines.append(f"### prompt:{fid}\n{prm}\n")
+
     md = (
         "# 分析规则配置\n\n"
         "该文件由 AI-KA 自动维护，用于保存关注点与 chunk 上限。\n\n"
-        f"{_RULES_MD_JSON_BEGIN}\n"
-        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
-        f"{_RULES_MD_JSON_END}\n"
+        "## chunk 设置\n\n"
+        f"- chunk_limit: {chunk_limit}\n\n"
+        "## 关注点列表\n\n"
+        + "\n".join(table_lines)
+        + "\n\n## 关注点 Prompt 详情\n\n"
+        + "\n".join(prompt_lines)
     )
     p.write_text(md, encoding="utf-8")
 
@@ -201,7 +259,7 @@ def detect_projects(payload: dict[str, Any]) -> JSONResponse:
 @app.get("/api/v1/settings")
 def get_app_settings() -> JSONResponse:
     conn = _conn()
-    file_data = _read_settings_from_rules_md()
+    file_data, parse_error = _read_settings_from_rules_md()
     if isinstance(file_data, dict):
         fp = file_data.get("focus_points")
         cl = file_data.get("chunk_limit")
@@ -209,7 +267,9 @@ def get_app_settings() -> JSONResponse:
             dbm.set_app_setting_json(conn, "focus_points", fp)
         if isinstance(cl, int):
             dbm.set_app_setting_json(conn, "chunk_limit", cl)
-    return JSONResponse(ok(_build_settings_payload(conn)))
+    payload = _build_settings_payload(conn)
+    payload["rules_md_error"] = parse_error
+    return JSONResponse(ok(payload))
 
 
 @app.post("/api/v1/settings")
@@ -247,6 +307,7 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
         dbm.set_app_setting_json(conn, "focus_points", out)
     current = _build_settings_payload(conn)
     _write_settings_to_rules_md(current)
+    current["rules_md_error"] = None
     return JSONResponse(ok(current))
 
 
