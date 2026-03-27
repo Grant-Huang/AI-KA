@@ -262,7 +262,11 @@ export default function App() {
       }
       message.success("全流程完成");
     } catch (e) {
-      message.error(String((e as Error).message));
+      const msg = String((e as Error).message);
+      appendProcess(`\n[error] ${msg}\n`);
+      appendBackend(`\n[error] ${msg}\n`);
+      setOutputTab("log");
+      message.error(msg);
     } finally {
       setPipelineRunning(false);
     }

@@ -72,6 +72,13 @@ class OpenAICompatibleProvider(LLMProvider):
     仅使用标准库 urllib，避免强依赖。
     """
 
+    @staticmethod
+    def _chat_completions_url(base_url: str) -> str:
+        base = base_url.rstrip("/")
+        if base.endswith("/v1"):
+            return f"{base}/chat/completions"
+        return f"{base}/v1/chat/completions"
+
     def chat(self, *, system: str, user: str, config: LLMConfig) -> LLMResult:
         base = (config.base_url or "").rstrip("/")
         if not base:
@@ -86,7 +93,7 @@ class OpenAICompatibleProvider(LLMProvider):
         if not api_key:
             raise LLMError("api_key missing (set in config or env OPENAI_API_KEY/AIKA_LLM_API_KEY)")
 
-        url = f"{base}/v1/chat/completions"
+        url = self._chat_completions_url(base)
         payload = {
             "model": model,
             "messages": [
@@ -131,7 +138,7 @@ class OpenAICompatibleProvider(LLMProvider):
         if not api_key:
             raise LLMError("api_key missing (set in config or env OPENAI_API_KEY/AIKA_LLM_API_KEY)")
 
-        url = f"{base}/v1/chat/completions"
+        url = self._chat_completions_url(base)
         payload = {
             "model": model,
             "messages": [
