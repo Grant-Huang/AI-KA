@@ -289,12 +289,20 @@ def _get_vl_model(conn: Any) -> str:
     return DEFAULT_VL_MODEL
 
 
+def _get_vl_base_url(conn: Any) -> str:
+    v = dbm.get_app_setting_json(conn, "llm_vl_base_url")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    return str(get_settings().llm_base_url or "").strip()
+
+
 def _get_llm_settings(conn: Any) -> dict[str, Any]:
     return {
         "text_provider": _get_text_provider(conn),
         "text_base_url": _get_text_base_url(conn),
         "text_model": _get_text_model(conn),
         "vl_model": _get_vl_model(conn),
+        "vl_base_url": _get_vl_base_url(conn),
         "has_text_api_key": bool(_get_text_llm_api_key_effective(conn)),
         "has_vl_api_key": bool(_get_vl_llm_api_key_effective(conn)),
     }
@@ -419,10 +427,12 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
         text_base_url = str(raw_llm.get("text_base_url") or "").strip()
         text_model = str(raw_llm.get("text_model") or "").strip() or DEFAULT_TEXT_MODEL
         vl_model = str(raw_llm.get("vl_model") or "").strip() or DEFAULT_VL_MODEL
+        vl_base_url = str(raw_llm.get("vl_base_url") or "").strip()
         dbm.set_app_setting_json(conn, "llm_text_provider", text_provider)
         dbm.set_app_setting_json(conn, "llm_text_base_url", text_base_url or None)
         dbm.set_app_setting_json(conn, "llm_text_model", text_model)
         dbm.set_app_setting_json(conn, "llm_vl_model", vl_model)
+        dbm.set_app_setting_json(conn, "llm_vl_base_url", vl_base_url or None)
     # Backward compatibility: legacy llm_api_key sets both text/vl keys.
     if "llm_api_key" in payload:
         raw_key = payload.get("llm_api_key")
@@ -789,6 +799,7 @@ def convert_md_stream(project_id: int) -> StreamingResponse:
                 format_="md",
                 vl_api_key=_get_vl_llm_api_key_effective(conn),
                 vl_model=_get_vl_model(conn),
+                vl_base_url=_get_vl_base_url(conn),
             ):
                 yield _sse_line({"type": "log", "text": line.rstrip("\n")})
             yield _sse_line({"type": "complete", "md_out": str(out_dir)})

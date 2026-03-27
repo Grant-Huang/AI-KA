@@ -13,6 +13,7 @@ type LlmSettings = {
   text_base_url: string;
   text_model: string;
   vl_model: string;
+  vl_base_url: string;
   has_text_api_key?: boolean;
   has_vl_api_key?: boolean;
 };
@@ -26,6 +27,8 @@ type SettingsData = {
 };
 
 export default function App() {
+  const TEXT_MODEL_OPTIONS = ["qwen3", "MiniMax-M2.5"];
+  const VL_MODEL_OPTIONS = ["qwen3-vl-plus"];
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [pickedRootPath, setPickedRootPath] = useState<string>("");
@@ -50,6 +53,7 @@ export default function App() {
       text_base_url: "",
       text_model: "qwen3",
       vl_model: "qwen3-vl-plus",
+      vl_base_url: "",
       has_text_api_key: false,
       has_vl_api_key: false,
     },
@@ -60,7 +64,6 @@ export default function App() {
   const [vlApiKeyDraft, setVlApiKeyDraft] = useState("");
   const [vlApiKeyTouched, setVlApiKeyTouched] = useState(false);
   const [focusSelectedIndex, setFocusSelectedIndex] = useState(0);
-  const [newFocusName, setNewFocusName] = useState("");
   const rulesFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadProjects = useCallback(async () => {
@@ -164,12 +167,12 @@ export default function App() {
     }
   };
 
-  const updateSelectedFocus = (patch: Partial<FocusPoint>) => {
+  const updateSelectedFocusPrompt = (prompt: string) => {
     setSettingsDraft((s) => {
       if (!s.focus_points.length) return s;
       const idx = Math.max(0, Math.min(focusSelectedIndex, s.focus_points.length - 1));
       const next = [...s.focus_points];
-      next[idx] = { ...next[idx], ...patch };
+      next[idx] = { ...next[idx], prompt };
       return { ...s, focus_points: next };
     });
   };
@@ -411,76 +414,44 @@ export default function App() {
             </Space>
             <input ref={rulesFileInputRef} type="file" accept=".md,text/markdown" style={{ display: "none" }} onChange={onRulesFileChosen} />
             <div style={{ display: "flex", gap: 12, marginTop: 8, alignItems: "stretch" }}>
-              <div style={{ width: 280 }}>
-                <Select
-                  style={{ width: "100%" }}
-                  value={settingsDraft.focus_points[focusSelectedIndex]?.id}
-                  options={settingsDraft.focus_points.map((fp) => ({ value: fp.id, label: fp.name || fp.id }))}
-                  onChange={(v) => {
-                    const idx = settingsDraft.focus_points.findIndex((x) => x.id === v);
-                    if (idx >= 0) setFocusSelectedIndex(idx);
-                  }}
-                />
-                <Space style={{ marginTop: 8 }} wrap>
-                  <Input
-                    placeholder="新增关注点名称"
-                    style={{ width: 170 }}
-                    value={newFocusName}
-                    onChange={(e) => setNewFocusName(e.target.value)}
-                  />
-                  <Button
-                    onClick={() => {
-                      const name = newFocusName.trim();
-                      if (!name) {
-                        message.warning("请先输入关注点名称");
-                        return;
-                      }
-                      setSettingsDraft((s) => {
-                        const id = `custom-${Date.now()}`;
-                        return {
-                          ...s,
-                          focus_points: [...s.focus_points, { id, name, prompt: "" }],
-                        };
-                      });
-                      setFocusSelectedIndex(settingsDraft.focus_points.length);
-                      setNewFocusName("");
-                    }}
-                  >
-                    新增
-                  </Button>
-                  <Button
-                    danger
-                    disabled={!settingsDraft.focus_points.length}
-                    onClick={() => {
-                      if (!settingsDraft.focus_points.length) return;
-                      setSettingsDraft((s) => ({
-                        ...s,
-                        focus_points: s.focus_points.filter((_, idx) => idx !== focusSelectedIndex),
-                      }));
-                      setFocusSelectedIndex((prev) => Math.max(0, prev - 1));
-                    }}
-                  >
-                    删除
-                  </Button>
+              <div style={{ width: 280, border: "1px solid #d9dfd7", borderRadius: 8, padding: 8, minHeight: 320, maxHeight: 320, overflow: "auto", background: "#f7f9f6" }}>
+                <Space direction="vertical" style={{ width: "100%" }} size={6}>
+                  {settingsDraft.focus_points.map((fp, idx) => (
+                    <Button
+                      key={fp.id}
+                      type="text"
+                      className={idx === focusSelectedIndex ? "focus-chip focus-chip-active" : "focus-chip"}
+                      style={{
+                        textAlign: "left",
+                        justifyContent: "flex-start",
+                        width: "100%",
+                        borderRadius: 14,
+                        border: idx === focusSelectedIndex ? "1px solid #4f7f67" : "1px solid #d9dfd7",
+                        background: idx === focusSelectedIndex ? "#dbeadf" : "#eef3ed",
+                        color: idx === focusSelectedIndex ? "#2e5f49" : "#3e4a40",
+                        fontWeight: idx === focusSelectedIndex ? 600 : 500,
+                        boxShadow: idx === focusSelectedIndex ? "0 0 0 1px rgba(79,127,103,0.15)" : "none",
+                      }}
+                      onClick={() => setFocusSelectedIndex(idx)}
+                    >
+                      {fp.name || fp.id}
+                    </Button>
+                  ))}
                 </Space>
               </div>
-              <div style={{ flex: 1, border: "1px solid #f0f0f0", padding: 10, borderRadius: 8 }}>
+              <div style={{ flex: 1, border: "1px solid #d9dfd7", padding: 10, borderRadius: 8, minHeight: 320, maxHeight: 320, background: "#f7f9f6" }}>
                 {settingsDraft.focus_points.length ? (
                   <Space direction="vertical" style={{ width: "100%" }}>
-                    <Input
-                      placeholder="关注点名称"
-                      value={settingsDraft.focus_points[focusSelectedIndex]?.name}
-                      onChange={(e) => updateSelectedFocus({ name: e.target.value })}
-                    />
                     <Input.TextArea
-                      rows={8}
+                      rows={12}
                       placeholder="该关注点对应的提示词（prompt）"
                       value={settingsDraft.focus_points[focusSelectedIndex]?.prompt}
-                      onChange={(e) => updateSelectedFocus({ prompt: e.target.value })}
+                      onChange={(e) => updateSelectedFocusPrompt(e.target.value)}
+                      style={{ minHeight: 290, maxHeight: 290 }}
                     />
                   </Space>
                 ) : (
-                  <Text type="secondary">请先新增一个关注点</Text>
+                  <Text type="secondary">rules.md 未提供可用关注点</Text>
                 )}
               </div>
             </div>
@@ -489,172 +460,184 @@ export default function App() {
           <div>
             <Text strong>Model</Text>
             <Space direction="vertical" style={{ width: "100%", marginTop: 8 }} size={8}>
-              <Space wrap style={{ width: "100%" }}>
-                <Input
-                  style={{ width: 220 }}
-                  addonBefore="Provider"
-                  placeholder="openai_compatible"
-                  value={settingsDraft.llm_settings?.text_provider}
-                  onChange={(e) =>
-                    setSettingsDraft((s) => ({
-                      ...s,
-                      llm_settings: {
-                        ...(s.llm_settings || {
-                          text_provider: "openai_compatible",
-                          text_base_url: "",
-                          text_model: "qwen3",
-                          vl_model: "qwen3-vl-plus",
-                        }),
-                        text_provider: e.target.value,
-                      },
-                    }))
-                  }
-                />
-                <Input
-                  style={{ width: 360 }}
-                  addonBefore="Text Base URL"
-                  placeholder="https://api.minimax.chat"
-                  value={settingsDraft.llm_settings?.text_base_url}
-                  onChange={(e) =>
-                    setSettingsDraft((s) => ({
-                      ...s,
-                      llm_settings: {
-                        ...(s.llm_settings || {
-                          text_provider: "openai_compatible",
-                          text_base_url: "",
-                          text_model: "qwen3",
-                          vl_model: "qwen3-vl-plus",
-                        }),
-                        text_base_url: e.target.value,
-                      },
-                    }))
-                  }
-                />
-                <Input
-                  style={{ width: 260 }}
-                  addonBefore="文本模型"
-                  placeholder="qwen3"
-                  value={settingsDraft.llm_settings?.text_model}
-                  onChange={(e) =>
-                    setSettingsDraft((s) => ({
-                      ...s,
-                      llm_settings: {
-                        ...(s.llm_settings || {
-                          text_provider: "openai_compatible",
-                          text_base_url: "",
-                          text_model: "qwen3",
-                          vl_model: "qwen3-vl-plus",
-                        }),
-                        text_model: e.target.value,
-                      },
-                    }))
-                  }
-                />
-                <Input
-                  style={{ width: 320 }}
-                  addonBefore="VL 模型"
-                  placeholder="qwen3-vl-plus"
-                  value={settingsDraft.llm_settings?.vl_model}
-                  onChange={(e) =>
-                    setSettingsDraft((s) => ({
-                      ...s,
-                      llm_settings: {
-                        ...(s.llm_settings || {
-                          text_provider: "openai_compatible",
-                          text_base_url: "",
-                          text_model: "qwen3",
-                          vl_model: "qwen3-vl-plus",
-                        }),
-                        vl_model: e.target.value,
-                      },
-                    }))
-                  }
-                />
-              </Space>
-              <Space wrap style={{ width: "100%" }}>
-                <Input.Password
-                  style={{ width: 520 }}
-                  addonBefore="文本 Key"
-                  placeholder={settingsDraft.llm_settings?.has_text_api_key ? "已配置（如需更新请粘贴新 Key）" : "粘贴文本 API Key"}
-                  value={textApiKeyDraft}
-                  visibilityToggle={false}
-                  autoComplete="off"
-                  onChange={(e) => {
-                    setTextApiKeyDraft(e.target.value);
-                    setTextApiKeyTouched(true);
-                  }}
-                  onCopy={(e) => e.preventDefault()}
-                  onCut={(e) => e.preventDefault()}
-                  onKeyDown={(e) => {
-                    const withMeta = e.metaKey || e.ctrlKey;
-                    const k = e.key.toLowerCase();
-                    if (withMeta && (k === "v" || k === "a")) return;
-                    if (withMeta && (k === "c" || k === "x")) {
-                      e.preventDefault();
-                      return;
+              <div style={{ border: "1px solid #f0f0f0", borderRadius: 8, padding: 10 }}>
+                <Text strong>文本大模型</Text>
+                <Space wrap style={{ width: "100%", marginTop: 8 }}>
+                  <Input
+                    style={{ width: 220 }}
+                    addonBefore="Provider"
+                    placeholder="openai_compatible"
+                    value={settingsDraft.llm_settings?.text_provider}
+                    onChange={(e) =>
+                      setSettingsDraft((s) => ({
+                        ...s,
+                        llm_settings: {
+                          ...(s.llm_settings || {
+                            text_provider: "openai_compatible",
+                            text_base_url: "",
+                            text_model: "qwen3",
+                            vl_model: "qwen3-vl-plus",
+                            vl_base_url: "",
+                          }),
+                          text_provider: e.target.value,
+                        },
+                      }))
                     }
-                    if (["backspace", "delete", "arrowleft", "arrowright", "tab", "enter"].includes(k)) return;
-                    if (!withMeta && k.length === 1) {
-                      e.preventDefault();
+                  />
+                  <Input
+                    style={{ width: 360 }}
+                    addonBefore="Text Base URL"
+                    placeholder="https://api.minimaxi.com/v1"
+                    value={settingsDraft.llm_settings?.text_base_url}
+                    onChange={(e) =>
+                      setSettingsDraft((s) => ({
+                        ...s,
+                        llm_settings: {
+                          ...(s.llm_settings || {
+                            text_provider: "openai_compatible",
+                            text_base_url: "",
+                            text_model: "qwen3",
+                            vl_model: "qwen3-vl-plus",
+                            vl_base_url: "",
+                          }),
+                          text_base_url: e.target.value,
+                        },
+                      }))
                     }
-                  }}
-                  onContextMenu={(e) => e.preventDefault()}
-                />
-                <Button
-                  onClick={() => {
-                    setTextApiKeyDraft("");
-                    setTextApiKeyTouched(true);
-                  }}
-                >
-                  清空文本 Key
-                </Button>
-                <Text type="secondary">
-                  {settingsDraft.llm_settings?.has_text_api_key ? "文本 Key 已配置（不回显）" : "文本 Key 未配置"}
-                </Text>
-              </Space>
-              <Space wrap style={{ width: "100%" }}>
-                <Input.Password
-                  style={{ width: 520 }}
-                  addonBefore="VL Key"
-                  placeholder={settingsDraft.llm_settings?.has_vl_api_key ? "已配置（如需更新请粘贴新 Key）" : "粘贴 VL API Key"}
-                  value={vlApiKeyDraft}
-                  visibilityToggle={false}
-                  autoComplete="off"
-                  onChange={(e) => {
-                    setVlApiKeyDraft(e.target.value);
-                    setVlApiKeyTouched(true);
-                  }}
-                  onCopy={(e) => e.preventDefault()}
-                  onCut={(e) => e.preventDefault()}
-                  onKeyDown={(e) => {
-                    const withMeta = e.metaKey || e.ctrlKey;
-                    const k = e.key.toLowerCase();
-                    if (withMeta && (k === "v" || k === "a")) return;
-                    if (withMeta && (k === "c" || k === "x")) {
-                      e.preventDefault();
-                      return;
+                  />
+                  <Select
+                    mode="tags"
+                    maxCount={1}
+                    style={{ width: 280 }}
+                    placeholder="选择或输入文本模型"
+                    value={settingsDraft.llm_settings?.text_model ? [settingsDraft.llm_settings.text_model] : []}
+                    options={TEXT_MODEL_OPTIONS.map((m) => ({ value: m, label: m }))}
+                    onChange={(vals) =>
+                      setSettingsDraft((s) => ({
+                        ...s,
+                        llm_settings: { ...s.llm_settings, text_model: String(vals?.[0] || "") || "qwen3" },
+                      }))
                     }
-                    if (["backspace", "delete", "arrowleft", "arrowright", "tab", "enter"].includes(k)) return;
-                    if (!withMeta && k.length === 1) {
-                      e.preventDefault();
+                  />
+                </Space>
+                <Space wrap style={{ width: "100%", marginTop: 8 }}>
+                  <Input.Password
+                    style={{ width: 520 }}
+                    addonBefore="文本 Key"
+                    placeholder={settingsDraft.llm_settings?.has_text_api_key ? "已配置（如需更新请粘贴新 Key）" : "粘贴文本 API Key"}
+                    value={textApiKeyDraft}
+                    visibilityToggle={false}
+                    autoComplete="off"
+                    onChange={(e) => {
+                      setTextApiKeyDraft(e.target.value);
+                      setTextApiKeyTouched(true);
+                    }}
+                    onCopy={(e) => e.preventDefault()}
+                    onCut={(e) => e.preventDefault()}
+                    onKeyDown={(e) => {
+                      const withMeta = e.metaKey || e.ctrlKey;
+                      const k = e.key.toLowerCase();
+                      if (withMeta && (k === "v" || k === "a")) return;
+                      if (withMeta && (k === "c" || k === "x")) {
+                        e.preventDefault();
+                        return;
+                      }
+                      if (["backspace", "delete", "arrowleft", "arrowright", "tab", "enter"].includes(k)) return;
+                      if (!withMeta && k.length === 1) {
+                        e.preventDefault();
+                      }
+                    }}
+                    onContextMenu={(e) => e.preventDefault()}
+                  />
+                  <Button
+                    onClick={() => {
+                      setTextApiKeyDraft("");
+                      setTextApiKeyTouched(true);
+                    }}
+                  >
+                    清空文本 Key
+                  </Button>
+                  <Text type="secondary">
+                    {settingsDraft.llm_settings?.has_text_api_key ? "文本 Key 已配置（不回显）" : "文本 Key 未配置"}
+                  </Text>
+                </Space>
+              </div>
+
+              <div style={{ border: "1px solid #f0f0f0", borderRadius: 8, padding: 10 }}>
+                <Text strong>VL 大模型</Text>
+                <Space wrap style={{ width: "100%", marginTop: 8 }}>
+                  <Select
+                    mode="tags"
+                    maxCount={1}
+                    style={{ width: 320 }}
+                    placeholder="选择或输入 VL 模型"
+                    value={settingsDraft.llm_settings?.vl_model ? [settingsDraft.llm_settings.vl_model] : []}
+                    options={VL_MODEL_OPTIONS.map((m) => ({ value: m, label: m }))}
+                    onChange={(vals) =>
+                      setSettingsDraft((s) => ({
+                        ...s,
+                        llm_settings: { ...s.llm_settings, vl_model: String(vals?.[0] || "") || "qwen3-vl-plus" },
+                      }))
                     }
-                  }}
-                  onContextMenu={(e) => e.preventDefault()}
-                />
-                <Button
-                  onClick={() => {
-                    setVlApiKeyDraft("");
-                    setVlApiKeyTouched(true);
-                  }}
-                >
-                  清空 VL Key
-                </Button>
-                <Text type="secondary">
-                  {settingsDraft.llm_settings?.has_vl_api_key ? "VL Key 已配置（不回显）" : "VL Key 未配置"}
-                </Text>
-              </Space>
+                  />
+                  <Input
+                    style={{ width: 360 }}
+                    addonBefore="VL Base URL"
+                    placeholder="可选，未填则沿用文本 Base URL/环境配置"
+                    value={settingsDraft.llm_settings?.vl_base_url}
+                    onChange={(e) =>
+                      setSettingsDraft((s) => ({
+                        ...s,
+                        llm_settings: { ...s.llm_settings, vl_base_url: e.target.value },
+                      }))
+                    }
+                  />
+                </Space>
+                <Space wrap style={{ width: "100%", marginTop: 8 }}>
+                  <Input.Password
+                    style={{ width: 520 }}
+                    addonBefore="VL Key"
+                    placeholder={settingsDraft.llm_settings?.has_vl_api_key ? "已配置（如需更新请粘贴新 Key）" : "粘贴 VL API Key"}
+                    value={vlApiKeyDraft}
+                    visibilityToggle={false}
+                    autoComplete="off"
+                    onChange={(e) => {
+                      setVlApiKeyDraft(e.target.value);
+                      setVlApiKeyTouched(true);
+                    }}
+                    onCopy={(e) => e.preventDefault()}
+                    onCut={(e) => e.preventDefault()}
+                    onKeyDown={(e) => {
+                      const withMeta = e.metaKey || e.ctrlKey;
+                      const k = e.key.toLowerCase();
+                      if (withMeta && (k === "v" || k === "a")) return;
+                      if (withMeta && (k === "c" || k === "x")) {
+                        e.preventDefault();
+                        return;
+                      }
+                      if (["backspace", "delete", "arrowleft", "arrowright", "tab", "enter"].includes(k)) return;
+                      if (!withMeta && k.length === 1) {
+                        e.preventDefault();
+                      }
+                    }}
+                    onContextMenu={(e) => e.preventDefault()}
+                  />
+                  <Button
+                    onClick={() => {
+                      setVlApiKeyDraft("");
+                      setVlApiKeyTouched(true);
+                    }}
+                  >
+                    清空 VL Key
+                  </Button>
+                  <Text type="secondary">
+                    {settingsDraft.llm_settings?.has_vl_api_key ? "VL Key 已配置（不回显）" : "VL Key 未配置"}
+                  </Text>
+                </Space>
+              </div>
+
               <Text type="secondary">Key 输入框只允许粘贴与删除，且不可查看/复制。</Text>
-              <Text type="secondary">文本解析使用 Provider + Text Base URL + 文本模型 + 文本 Key；图片解析使用 VL 模型 + VL Key。</Text>
+              <Text type="secondary">文本解析使用 Provider + Text Base URL + 文本模型 + 文本 Key；图片解析使用 VL 模型 + VL Key +（可选）VL Base URL。</Text>
             </Space>
           </div>
         </Space>

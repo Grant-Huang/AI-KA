@@ -23,6 +23,7 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert "rules_md_error" in body["data"]
     assert body["data"]["llm_settings"]["text_model"] == "qwen3"
     assert body["data"]["llm_settings"]["vl_model"] == "qwen3-vl-plus"
+    assert body["data"]["llm_settings"]["vl_base_url"] == ""
     assert body["data"]["llm_settings"]["text_provider"] == "openai_compatible"
     assert body["data"]["llm_settings"]["text_base_url"] == ""
     assert body["data"]["llm_settings"]["has_text_api_key"] is False
@@ -40,6 +41,7 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
             "text_base_url": "https://api.minimax.chat",
             "text_model": "MiniMax-M2.5",
             "vl_model": "qwen3-vl-plus",
+            "vl_base_url": "https://vl.example.com/v1",
         },
         "llm_text_api_key": "sk-text-123",
         "llm_vl_api_key": "sk-vl-123",
@@ -54,6 +56,7 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert b2["llm_settings"]["text_base_url"] == "https://api.minimax.chat"
     assert b2["llm_settings"]["text_model"] == "MiniMax-M2.5"
     assert b2["llm_settings"]["vl_model"] == "qwen3-vl-plus"
+    assert b2["llm_settings"]["vl_base_url"] == "https://vl.example.com/v1"
     assert b2["llm_settings"]["has_text_api_key"] is True
     assert b2["llm_settings"]["has_vl_api_key"] is True
     rules_md = tmp_path / "rules.md"
@@ -82,7 +85,13 @@ def test_settings_clear_llm_api_key(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     s1 = client.post(
         "/api/v1/settings",
         json={
-            "llm_settings": {"text_provider": "openai_compatible", "text_base_url": "", "text_model": "qwen3", "vl_model": "qwen3-vl-plus"},
+            "llm_settings": {
+                "text_provider": "openai_compatible",
+                "text_base_url": "",
+                "text_model": "qwen3",
+                "vl_model": "qwen3-vl-plus",
+                "vl_base_url": "",
+            },
             "llm_text_api_key": "sk-text-abc",
             "llm_vl_api_key": "sk-vl-abc",
         },

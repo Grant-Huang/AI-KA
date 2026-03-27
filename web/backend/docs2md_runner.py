@@ -42,6 +42,7 @@ def run_convert_directory(
     format_: str = "md",
     vl_api_key: str | None = None,
     vl_model: str | None = None,
+    vl_base_url: str | None = None,
 ) -> Iterator[str]:
     """
     Stream lines from docs2md stdout/stderr (merged).
@@ -71,6 +72,11 @@ def run_convert_directory(
     if (vl_model or "").strip():
         child_env["AIKA_VL_MODEL"] = str(vl_model).strip()
         child_env["QWEN_VL_MODEL"] = str(vl_model).strip()
+    if (vl_base_url or "").strip():
+        child_env["AIKA_VL_BASE_URL"] = str(vl_base_url).strip()
+        child_env["VL_BASE_URL"] = str(vl_base_url).strip()
+        child_env["OPENAI_VL_BASE_URL"] = str(vl_base_url).strip()
+        child_env["QWEN_VL_BASE_URL"] = str(vl_base_url).strip()
 
     if not _vl_api_key_present(vl_api_key):
         # Best-effort flag: if docs2md supports these envs, image/VL parsing will be skipped.

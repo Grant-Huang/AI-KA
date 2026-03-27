@@ -1,23 +1,64 @@
 body {
   margin: 0;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  background: #f5f5f5;
+  background: #ecefe9;
+  color: #2f3a32;
+  font-size: 13px;
 }
 
 .app-shell {
   max-width: 1200px;
   margin: 0 auto;
-  padding: 24px;
+  padding: 20px;
+}
+
+.app-shell .ant-card {
+  background: #f3f5f0;
+  border: 1px solid #d9dfd7;
+  border-radius: 10px;
+}
+
+.app-shell .ant-card-head {
+  min-height: 44px;
+}
+
+.app-shell .ant-card-head-title {
+  font-size: 15px;
+}
+
+.app-shell .ant-btn {
+  border-radius: 8px;
+}
+
+.focus-chip {
+  transition: all 0.18s ease;
+}
+
+.focus-chip:hover {
+  border-color: #9cb8a8 !important;
+  background: #e7efe8 !important;
+}
+
+.focus-chip-active:hover {
+  border-color: #4f7f67 !important;
+  background: #dbeadf !important;
+}
+
+.app-shell .ant-select-selector,
+.app-shell .ant-input,
+.app-shell .ant-input-number,
+.app-shell .ant-input-affix-wrapper {
+  border-radius: 8px !important;
 }
 
 .stream-log {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
+  font-size: 11px;
   white-space: pre-wrap;
   max-height: 240px;
   overflow: auto;
-  background: #1e1e1e;
-  color: #d4d4d4;
+  background: #1f2421;
+  color: #d6ddd5;
   padding: 12px;
   border-radius: 8px;
 }
