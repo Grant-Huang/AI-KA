@@ -459,14 +459,14 @@ export default function App() {
     <div className="app-shell">
       <Space style={{ width: "100%", justifyContent: "space-between" }}>
         <Typography.Title level={2} style={{ margin: 0 }}>
-          AI-KA ProjectLens
+          AI-KA 业务关联审查平台
         </Typography.Title>
         <Space>
           <Button shape="circle" icon={<QuestionCircleOutlined />} onClick={() => setHelpOpen(true)} title="帮助" />
           <Button shape="circle" icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)} title="设置" />
         </Space>
       </Space>
-      <Text type="secondary">选择目录后自动加载项目并开始一键分析。</Text>
+      <Text type="secondary">选择项目目录与关注点，一键完成转换、索引与审查，并可导出报告。</Text>
       <Divider />
 
       <Space direction="vertical" style={{ width: "100%" }} size={10}>
