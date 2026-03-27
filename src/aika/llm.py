@@ -19,6 +19,7 @@ class LLMConfig:
     base_url: str | None = None
     api_key: str | None = None
     timeout_s: float = 60.0
+    response_format: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,36 @@ class OpenAICompatibleProvider(LLMProvider):
             return f"{base}/chat/completions"
         return f"{base}/v1/chat/completions"
 
+    @staticmethod
+    def _with_response_format(payload: dict[str, Any], config: LLMConfig) -> dict[str, Any]:
+        if isinstance(config.response_format, dict) and config.response_format:
+            return {**payload, "response_format": config.response_format}
+        return payload
+
+    @staticmethod
+    def _is_response_format_unsupported(err_text: str) -> bool:
+        lo = (err_text or "").lower()
+        return "response_format" in lo or "json_schema" in lo
+
+    def _request_chat(self, *, url: str, api_key: str, payload: dict[str, Any], timeout_s: float) -> tuple[str, dict[str, Any] | None]:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", f"Bearer {api_key}")
+        try:
+            with urllib.request.urlopen(req, timeout=float(timeout_s)) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            err = e.read().decode("utf-8", errors="replace")
+            raise LLMError(f"http error {e.code}: {err}") from e
+        except Exception as e:
+            raise LLMError(str(e)) from e
+        try:
+            raw = json.loads(body)
+        except Exception:
+            raw = None
+        return body, raw
+
     def chat(self, *, system: str, user: str, config: LLMConfig) -> LLMResult:
         base = (config.base_url or "").rstrip("/")
         if not base:
@@ -94,7 +125,7 @@ class OpenAICompatibleProvider(LLMProvider):
             raise LLMError("api_key missing (set in config or env OPENAI_API_KEY/AIKA_LLM_API_KEY)")
 
         url = self._chat_completions_url(base)
-        payload = {
+        payload0: dict[str, Any] = {
             "model": model,
             "messages": [
                 {"role": "system", "content": system},
@@ -102,22 +133,17 @@ class OpenAICompatibleProvider(LLMProvider):
             ],
             "temperature": 0.2,
         }
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=data, method="POST")
-        req.add_header("Content-Type", "application/json")
-        req.add_header("Authorization", f"Bearer {api_key}")
+        payload = self._with_response_format(payload0, config)
+        try:
+            body, raw = self._request_chat(url=url, api_key=api_key, payload=payload, timeout_s=float(config.timeout_s))
+        except LLMError as e:
+            msg = str(e)
+            if payload is not payload0 and self._is_response_format_unsupported(msg):
+                body, raw = self._request_chat(url=url, api_key=api_key, payload=payload0, timeout_s=float(config.timeout_s))
+            else:
+                raise
 
         try:
-            with urllib.request.urlopen(req, timeout=float(config.timeout_s)) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as e:
-            err = e.read().decode("utf-8", errors="replace")
-            raise LLMError(f"http error {e.code}: {err}") from e
-        except Exception as e:
-            raise LLMError(str(e)) from e
-
-        try:
-            raw = json.loads(body)
             text = raw["choices"][0]["message"]["content"]
         except Exception as e:
             raise LLMError(f"invalid response: {body[:300]}") from e
@@ -139,7 +165,7 @@ class OpenAICompatibleProvider(LLMProvider):
             raise LLMError("api_key missing (set in config or env OPENAI_API_KEY/AIKA_LLM_API_KEY)")
 
         url = self._chat_completions_url(base)
-        payload = {
+        payload0: dict[str, Any] = {
             "model": model,
             "messages": [
                 {"role": "system", "content": system},
@@ -148,6 +174,7 @@ class OpenAICompatibleProvider(LLMProvider):
             "temperature": 0.2,
             "stream": True,
         }
+        payload = self._with_response_format(payload0, config)
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Content-Type", "application/json")
@@ -158,7 +185,19 @@ class OpenAICompatibleProvider(LLMProvider):
             resp = urllib.request.urlopen(req, timeout=float(config.timeout_s))
         except urllib.error.HTTPError as e:
             err = e.read().decode("utf-8", errors="replace")
-            raise LLMError(f"http error {e.code}: {err}") from e
+            if payload is not payload0 and self._is_response_format_unsupported(err):
+                data2 = json.dumps(payload0).encode("utf-8")
+                req2 = urllib.request.Request(url, data=data2, method="POST")
+                req2.add_header("Content-Type", "application/json")
+                req2.add_header("Authorization", f"Bearer {api_key}")
+                req2.add_header("Accept", "text/event-stream")
+                try:
+                    resp = urllib.request.urlopen(req2, timeout=float(config.timeout_s))
+                except urllib.error.HTTPError as e2:
+                    err2 = e2.read().decode("utf-8", errors="replace")
+                    raise LLMError(f"http error {e2.code}: {err2}") from e2
+            else:
+                raise LLMError(f"http error {e.code}: {err}") from e
         except Exception as e:
             raise LLMError(str(e)) from e
 

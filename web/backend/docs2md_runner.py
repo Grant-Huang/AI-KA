@@ -87,6 +87,10 @@ def run_convert_directory(
         child_env["DOCS2MD_SKIP_IMAGE"] = "1"
         child_env["DOCS2MD_VL_ENABLED"] = "0"
         yield "[hint] 已配置为“不解析文件中的图片”：将跳过图片提取与解析。\n"
+        yield (
+            "[debug] 已设置环境变量："
+            "DOCS2MD_DISABLE_IMAGE_PARSE=1, DOCS2MD_SKIP_IMAGE=1, DOCS2MD_VL_ENABLED=0\n"
+        )
     elif not _vl_api_key_present(vl_api_key):
         # Best-effort flag: if docs2md supports these envs, image/VL parsing will be skipped.
         child_env["DOCS2MD_DISABLE_IMAGE_PARSE"] = "1"
@@ -94,6 +98,7 @@ def run_convert_directory(
         child_env["DOCS2MD_VL_ENABLED"] = "0"
         yield "[hint] 未检测到 VL API Key：将跳过图片解析环节（若 docs2md 支持该开关）。\n"
 
+    yield f"[debug] disable_image_parse={disable_image_parse}\n"
     yield f"[cmd] {' '.join(cmd)}\n"
 
     proc = subprocess.Popen(
@@ -109,6 +114,12 @@ def run_convert_directory(
     assert proc.stdout is not None
     for line in proc.stdout:
         yield line
+        if disable_image_parse and "解析图片（" in line:
+            yield (
+                "[warn] 已启用“不解析图片”，但 docs2md 仍在解析图片。"
+                "这通常表示运行的 docs2md 版本未支持该开关，或子进程未收到环境变量。"
+                "请检查是否使用了最新 docs2md，以及 AI-KA 的 DOCS2MD_ROOT 是否指向最新仓库根目录（含 all2md.py），然后重启后端。\n"
+            )
         lo = line.lower()
         if "missingdependencyexception" in lo and "xlsx" in lo:
             yield "[hint] 检测到缺少 xlsx 依赖：请在运行环境安装 markitdown[xlsx] 或 markitdown[all]，再重试。\n"
