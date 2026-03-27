@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Divider, Input, InputNumber, Popover, message, Modal, Select, Space, Spin, Table, Tabs, Typography } from "antd";
+import { Alert, Button, Card, Checkbox, Divider, Input, InputNumber, Popover, message, Modal, Select, Space, Spin, Table, Typography } from "antd";
 import { InfoCircleOutlined, QuestionCircleOutlined, SettingOutlined } from "@ant-design/icons";
 import { apiJson, openAnalyzeStream, openConvertStream, postRulesGenerateStream, waitAnalyzeStream, waitConvertStream } from "./api";
 import { BlockRenderer, type Block } from "./BlockRenderer";
+import SimpleMarkdown from "./SimpleMarkdown";
 
 const { Text } = Typography;
 
@@ -21,6 +22,7 @@ type FocusComboTip = { stage: string; recommended: string };
 type SettingsData = {
   focus_points: FocusPoint[];
   chunk_limit: number;
+  disable_image_parse?: boolean;
   llm_settings: LlmSettings;
   focus_combo_tips?: FocusComboTip[];
   rules_md_error?: string | null;
@@ -42,12 +44,15 @@ export default function App() {
   const [focusDefs, setFocusDefs] = useState<FocusPoint[]>([]);
   const [focusComboTips, setFocusComboTips] = useState<FocusComboTip[]>([]);
   const [pipelineRunning, setPipelineRunning] = useState(false);
-  const [outputTab, setOutputTab] = useState<string>("process");
+  const [logOpen, setLogOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [helpMarkdown, setHelpMarkdown] = useState<string>("");
+  const [helpLoading, setHelpLoading] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<SettingsData>({
     focus_points: [],
     chunk_limit: 40,
+    disable_image_parse: false,
     llm_settings: {
       text_provider: "openai_compatible",
       text_base_url: "",
@@ -99,6 +104,15 @@ export default function App() {
       .then((d) => setNativePickerAvailable(!!d.native_folder_picker))
       .catch(() => setNativePickerAvailable(false));
   }, []);
+
+  useEffect(() => {
+    if (!helpOpen) return;
+    setHelpLoading(true);
+    apiJson<{ markdown: string; source: string }>("/api/v1/helpme")
+      .then((d) => setHelpMarkdown(d.markdown || ""))
+      .catch((e) => setHelpMarkdown(`# 帮助加载失败\n\n${String((e as Error).message || e)}`))
+      .finally(() => setHelpLoading(false));
+  }, [helpOpen]);
 
   const selected = useMemo(() => projects.find((p) => p.id === selectedId) || null, [projects, selectedId]);
 
@@ -216,6 +230,23 @@ export default function App() {
 
   const appendProcess = (s: string) => setStreamText((prev) => prev + s);
   const appendBackend = (s: string) => setConvertLog((prev) => prev + s);
+  const renderBackendLog = (text: string) => {
+    const rows = text.split("\n");
+    return rows.map((line, idx) => {
+      const lo = line.toLowerCase();
+      const isErr =
+        lo.includes("[error]") ||
+        lo.includes(" error") ||
+        lo.includes("exception") ||
+        lo.includes("failed") ||
+        lo.includes("http error");
+      return (
+        <div key={`${idx}-${line.slice(0, 8)}`} className={isErr ? "log-line-error" : undefined}>
+          {line || " "}
+        </div>
+      );
+    });
+  };
 
   const runFullPipeline = async () => {
     if (selectedId == null) {
@@ -230,7 +261,6 @@ export default function App() {
     setStreamText("");
     setConvertLog("");
     setAnalysis(null);
-    setOutputTab("process");
     try {
       appendProcess("【规则生成】正在调用大模型生成分析规则 JSON…\n");
       await postRulesGenerateStream(
@@ -243,7 +273,6 @@ export default function App() {
       );
 
       appendBackend("【docs2md】开始转换…\n");
-      setOutputTab("log");
       await waitConvertStream(selectedId, (line) => appendBackend(line));
       appendBackend("【docs2md】转换完成。\n");
 
@@ -251,7 +280,6 @@ export default function App() {
       const idx = await apiJson<{ indexed_documents: number }>(`/api/v1/projects/${selectedId}/index-md`, { method: "POST" });
       appendBackend(`【索引】完成，已索引 ${idx.indexed_documents} 个文档。\n`);
 
-      setOutputTab("process");
       appendProcess("\n【大模型分析】开始流式输出…\n");
       const fin = await waitAnalyzeStream(selectedId, chunkLimit, (t) => appendProcess(t));
       if (fin.analysis && typeof fin.analysis === "object") {
@@ -265,7 +293,7 @@ export default function App() {
       const msg = String((e as Error).message);
       appendProcess(`\n[error] ${msg}\n`);
       appendBackend(`\n[error] ${msg}\n`);
-      setOutputTab("log");
+      setLogOpen(true);
       message.error(msg);
     } finally {
       setPipelineRunning(false);
@@ -355,6 +383,7 @@ export default function App() {
             <Button type="primary" loading={pipelineRunning} onClick={runFullPipeline} disabled={selectedId == null}>
               开始分析
             </Button>
+            <Button onClick={() => setLogOpen(true)}>后台日志</Button>
             <Button onClick={exportDocx} disabled={selectedId == null || !analysis}>
               导出 docx（epic-doc）
             </Button>
@@ -362,22 +391,9 @@ export default function App() {
         </Space>
         <div style={{ marginTop: 12 }}>
           <Spin spinning={pipelineRunning}>
-            <Tabs
-              activeKey={outputTab}
-              onChange={setOutputTab}
-              items={[
-                {
-                  key: "process",
-                  label: "过程流式输出",
-                  children: <div className="raw-stream stream-log" style={{ minHeight: 160 }}>{streamText || "（规则生成与大模型分析流式输出）"}</div>,
-                },
-                {
-                  key: "log",
-                  label: "后台日志",
-                  children: <div className="stream-log" style={{ minHeight: 160 }}>{convertLog || "（docs2md 与索引日志）"}</div>,
-                },
-              ]}
-            />
+            <div className="raw-stream stream-log" style={{ minHeight: 160 }}>
+              {streamText || "（规则生成与大模型分析流式输出）"}
+            </div>
           </Spin>
         </div>
       </Card>
@@ -394,10 +410,10 @@ export default function App() {
       </Card>
 
       <Modal title="设置" open={settingsOpen} onOk={saveSettings} onCancel={() => setSettingsOpen(false)} width={860} okText="保存">
-        <Space direction="vertical" style={{ width: "100%" }} size={12}>
+        <Space direction="vertical" style={{ width: "100%", fontSize: 12 }} size={12}>
           <div>
-            <Text strong>chunk 上限（全局）</Text>
-            <div style={{ marginTop: 8 }}>
+            <Space wrap align="center" style={{ marginTop: 4 }}>
+              <Text strong>chunk 上限（全局）</Text>
               <InputNumber
                 min={1}
                 max={500}
@@ -406,7 +422,13 @@ export default function App() {
                   setSettingsDraft((s) => ({ ...s, chunk_limit: Math.max(1, Math.min(500, Number(v) || 40)) }))
                 }
               />
-            </div>
+              <Checkbox
+                checked={!!settingsDraft.disable_image_parse}
+                onChange={(e) => setSettingsDraft((s) => ({ ...s, disable_image_parse: e.target.checked }))}
+              >
+                不解析文件中的图片
+              </Checkbox>
+            </Space>
           </div>
           <Divider style={{ margin: "8px 0" }} />
           <div>
@@ -561,9 +583,6 @@ export default function App() {
                   >
                     清空文本 Key
                   </Button>
-                  <Text type="secondary">
-                    {settingsDraft.llm_settings?.has_text_api_key ? "文本 Key 已配置（不回显）" : "文本 Key 未配置"}
-                  </Text>
                 </Space>
               </div>
 
@@ -634,27 +653,20 @@ export default function App() {
                   >
                     清空 VL Key
                   </Button>
-                  <Text type="secondary">
-                    {settingsDraft.llm_settings?.has_vl_api_key ? "VL Key 已配置（不回显）" : "VL Key 未配置"}
-                  </Text>
                 </Space>
               </div>
-
-              <Text type="secondary">Key 输入框只允许粘贴与删除，且不可查看/复制。</Text>
-              <Text type="secondary">文本解析使用 Provider + Text Base URL + 文本模型 + 文本 Key；图片解析使用 VL 模型 + VL Key +（可选）VL Base URL。</Text>
             </Space>
           </div>
         </Space>
       </Modal>
 
-      <Modal title="帮助" open={helpOpen} onCancel={() => setHelpOpen(false)} footer={null} width={760}>
-        <Space direction="vertical" size={10}>
-          <Text>1) 点击「选择项目」，系统会回填绝对路径并自动加载该项目。</Text>
-          <Text>2) 在首页选择分析关注点（可多选）；若 rules.md 提供“组合使用建议”，会在下拉框后显示 Tips。</Text>
-          <Text>3) 点击“开始分析”后，系统自动执行：规则生成 → docs2md 转换 → 索引 → 大模型分析。</Text>
-          <Text>4) 设置页分为三部分：chunk 上限、关注点维护、Model（文本模型与 VL 模型分别配置 Key）。</Text>
-          <Text>5) 可在设置页点击「加载 rules」导入完整规则文件，系统会先校验再确认保存。</Text>
-        </Space>
+      <Modal title="帮助" open={helpOpen} onCancel={() => setHelpOpen(false)} footer={null} width={760} styles={{ body: { fontSize: 12 } }}>
+        {helpLoading ? <Spin /> : <SimpleMarkdown markdown={helpMarkdown || "# 帮助\n\n暂无帮助内容。"} />}
+      </Modal>
+      <Modal title="后台日志" open={logOpen} onCancel={() => setLogOpen(false)} footer={null} width={860}>
+        <div className="stream-log" style={{ minHeight: 220, maxHeight: 420 }}>
+          {convertLog ? renderBackendLog(convertLog) : "（docs2md 与索引日志）"}
+        </div>
       </Modal>
     </div>
   );

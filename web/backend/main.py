@@ -71,10 +71,19 @@ def _rules_md_path() -> Path:
     return repository_root() / "rules.md"
 
 
+def _helpme_md_path() -> Path:
+    root = repository_root()
+    direct = root / "helpme.md"
+    if direct.is_file():
+        return direct
+    return root / "docs" / "helpme.md"
+
+
 def _build_settings_payload(conn: Any) -> dict[str, Any]:
     return {
         "focus_points": _get_focus_points(conn),
         "chunk_limit": _get_chunk_limit(conn),
+        "disable_image_parse": _get_disable_image_parse(conn),
         "llm_settings": _get_llm_settings(conn),
     }
 
@@ -223,6 +232,11 @@ def _get_chunk_limit(conn: Any) -> int:
     if isinstance(v, int) and 1 <= v <= 500:
         return v
     return DEFAULT_CHUNK_LIMIT
+
+
+def _get_disable_image_parse(conn: Any) -> bool:
+    v = dbm.get_app_setting_json(conn, "disable_image_parse")
+    return bool(v is True)
 
 
 def _get_llm_api_key_from_db(conn: Any) -> str | None:
@@ -386,6 +400,15 @@ def get_app_settings() -> JSONResponse:
     return JSONResponse(ok(payload))
 
 
+@app.get("/api/v1/helpme")
+def get_helpme_markdown() -> JSONResponse:
+    p = _helpme_md_path()
+    if not p.is_file():
+        return JSONResponse(err("helpme.md not found"), status_code=404)
+    text = p.read_text(encoding="utf-8", errors="replace")
+    return JSONResponse(ok({"markdown": text, "source": p.as_posix()}))
+
+
 @app.post("/api/v1/settings")
 def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
     conn = _conn()
@@ -398,6 +421,8 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
         if val < 1 or val > 500:
             return JSONResponse(err("chunk_limit must be between 1 and 500"), status_code=400)
         dbm.set_app_setting_json(conn, "chunk_limit", val)
+    if "disable_image_parse" in payload:
+        dbm.set_app_setting_json(conn, "disable_image_parse", bool(payload.get("disable_image_parse")))
     if "focus_points" in payload:
         raw_fp = payload.get("focus_points")
         if not isinstance(raw_fp, list):
@@ -640,6 +665,38 @@ def _clean_json_text(raw: str) -> str:
     return cleaned.strip()
 
 
+def _extract_first_json_object_text(raw: str) -> str | None:
+    s = raw.strip()
+    start = s.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_str:
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start : i + 1]
+    return None
+
+
 def _coerce_rules_obj(obj: Any, focus_points: list[str], focus_note: str) -> dict[str, Any]:
     merged_focus = [x for x in focus_points if x]
     if focus_note:
@@ -800,6 +857,7 @@ def convert_md_stream(project_id: int) -> StreamingResponse:
                 vl_api_key=_get_vl_llm_api_key_effective(conn),
                 vl_model=_get_vl_model(conn),
                 vl_base_url=_get_vl_base_url(conn),
+                disable_image_parse=_get_disable_image_parse(conn),
             ):
                 yield _sse_line({"type": "log", "text": line.rstrip("\n")})
             yield _sse_line({"type": "complete", "md_out": str(out_dir)})
@@ -860,7 +918,17 @@ def analyze_stream(
             try:
                 analysis = json.loads(cleaned)
             except json.JSONDecodeError:
-                yield _sse_line({"type": "final", "analysis": None, "raw": full})
+                extracted = _extract_first_json_object_text(cleaned)
+                if extracted:
+                    try:
+                        analysis = json.loads(extracted)
+                    except json.JSONDecodeError:
+                        yield _sse_line({"type": "final", "analysis": None, "raw": full})
+                    else:
+                        analysis = _normalize_analysis_for_ui(analysis)
+                        yield _sse_line({"type": "final", "analysis": analysis, "raw": None})
+                else:
+                    yield _sse_line({"type": "final", "analysis": None, "raw": full})
             else:
                 analysis = _normalize_analysis_for_ui(analysis)
                 yield _sse_line({"type": "final", "analysis": analysis, "raw": None})

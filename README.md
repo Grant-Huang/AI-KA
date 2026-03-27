@@ -87,6 +87,7 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8765
 - 设置页分为 3 个分区：`chunk 上限`、`关注点`、`Model`。
 - `Model` 支持分别配置文本链路与 VL 链路（Provider/Base URL/Model + 独立 API Key）。
 - 关注点支持从 `rules.md` 整体导入（先校验后确认保存）。
+- 帮助页内容来自仓库根目录 `helpme.md`（若不存在会回退读取 `docs/helpme.md`）。
 
 排障时可在「高级：分步执行」中单独运行 docs2md、索引或仅大模型分析。
 

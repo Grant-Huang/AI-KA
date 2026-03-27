@@ -20,6 +20,7 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert "focus_points" in body["data"]
     assert "focus_combo_tips" in body["data"]
     assert "chunk_limit" in body["data"]
+    assert "disable_image_parse" in body["data"]
     assert "rules_md_error" in body["data"]
     assert body["data"]["llm_settings"]["text_model"] == "qwen3"
     assert body["data"]["llm_settings"]["vl_model"] == "qwen3-vl-plus"
@@ -29,6 +30,7 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert body["data"]["llm_settings"]["has_text_api_key"] is False
     assert body["data"]["llm_settings"]["has_vl_api_key"] is False
     assert body["data"]["focus_combo_tips"] == []
+    assert body["data"]["disable_image_parse"] is False
 
     payload = {
         "chunk_limit": 55,
@@ -43,6 +45,7 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
             "vl_model": "qwen3-vl-plus",
             "vl_base_url": "https://vl.example.com/v1",
         },
+        "disable_image_parse": True,
         "llm_text_api_key": "sk-text-123",
         "llm_vl_api_key": "sk-vl-123",
     }
@@ -59,6 +62,7 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert b2["llm_settings"]["vl_base_url"] == "https://vl.example.com/v1"
     assert b2["llm_settings"]["has_text_api_key"] is True
     assert b2["llm_settings"]["has_vl_api_key"] is True
+    assert b2["disable_image_parse"] is True
     rules_md = tmp_path / "rules.md"
     assert rules_md.is_file()
     txt = rules_md.read_text(encoding="utf-8")

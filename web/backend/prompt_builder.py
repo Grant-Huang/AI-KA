@@ -39,6 +39,7 @@ def build_system_prompt(rules: dict[str, Any]) -> str:
     r = merge_rules(rules)
     return (
         "你是资深 IT 实施与项目评审顾问。基于用户提供的文档片段进行分析。\n"
+        "输出语言要求：除专有名词、英文缩写、代码/协议字段外，其余文本必须使用简体中文。\n"
         f"分析目标：{r.get('goal', '')}\n"
         f"关注维度：{json.dumps(r.get('dimensions', []), ensure_ascii=False)}\n"
         f"输出风格偏好：{json.dumps(r.get('style', {}), ensure_ascii=False)}\n"
@@ -55,4 +56,4 @@ def build_user_prompt(*, chunk_texts: list[str], max_chars: int = 120_000) -> st
             break
         parts.append(block)
         total += len(block)
-    return "以下是项目 Markdown 片段（可能经 docs2md 转换）：\n\n" + "\n".join(parts)
+    return "以下是项目 Markdown 片段（可能经 docs2md 转换）。请按系统要求输出中文 JSON：\n\n" + "\n".join(parts)

@@ -18,6 +18,7 @@ def _vl_api_key_present(explicit_key: str | None = None) -> bool:
         return True
     keys = (
         "AIKA_VL_API_KEY",
+        "DASHSCOPE_API_KEY",
         "VL_API_KEY",
         "OPENAI_VL_API_KEY",
         "QWEN_VL_API_KEY",
@@ -43,6 +44,7 @@ def run_convert_directory(
     vl_api_key: str | None = None,
     vl_model: str | None = None,
     vl_base_url: str | None = None,
+    disable_image_parse: bool = False,
 ) -> Iterator[str]:
     """
     Stream lines from docs2md stdout/stderr (merged).
@@ -66,6 +68,7 @@ def run_convert_directory(
     child_env = dict(os.environ)
     if (vl_api_key or "").strip():
         child_env["AIKA_VL_API_KEY"] = str(vl_api_key).strip()
+        child_env["DASHSCOPE_API_KEY"] = str(vl_api_key).strip()
         child_env["VL_API_KEY"] = str(vl_api_key).strip()
         child_env["OPENAI_VL_API_KEY"] = str(vl_api_key).strip()
         child_env["QWEN_VL_API_KEY"] = str(vl_api_key).strip()
@@ -74,11 +77,17 @@ def run_convert_directory(
         child_env["QWEN_VL_MODEL"] = str(vl_model).strip()
     if (vl_base_url or "").strip():
         child_env["AIKA_VL_BASE_URL"] = str(vl_base_url).strip()
+        child_env["DASHSCOPE_BASE_URL"] = str(vl_base_url).strip()
         child_env["VL_BASE_URL"] = str(vl_base_url).strip()
         child_env["OPENAI_VL_BASE_URL"] = str(vl_base_url).strip()
         child_env["QWEN_VL_BASE_URL"] = str(vl_base_url).strip()
 
-    if not _vl_api_key_present(vl_api_key):
+    if disable_image_parse:
+        child_env["DOCS2MD_DISABLE_IMAGE_PARSE"] = "1"
+        child_env["DOCS2MD_SKIP_IMAGE"] = "1"
+        child_env["DOCS2MD_VL_ENABLED"] = "0"
+        yield "[hint] 已配置为“不解析文件中的图片”：将跳过图片提取与解析。\n"
+    elif not _vl_api_key_present(vl_api_key):
         # Best-effort flag: if docs2md supports these envs, image/VL parsing will be skipped.
         child_env["DOCS2MD_DISABLE_IMAGE_PARSE"] = "1"
         child_env["DOCS2MD_SKIP_IMAGE"] = "1"
@@ -100,6 +109,9 @@ def run_convert_directory(
     assert proc.stdout is not None
     for line in proc.stdout:
         yield line
+        lo = line.lower()
+        if "missingdependencyexception" in lo and "xlsx" in lo:
+            yield "[hint] 检测到缺少 xlsx 依赖：请在运行环境安装 markitdown[xlsx] 或 markitdown[all]，再重试。\n"
     proc.wait()
     if proc.returncode != 0:
         raise Docs2MdError(f"docs2md exited with code {proc.returncode}")

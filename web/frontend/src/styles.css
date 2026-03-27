@@ -51,6 +51,55 @@ body {
   border-radius: 8px !important;
 }
 
+.simple-markdown {
+  font-size: 12px;
+  line-height: 1.7;
+  color: #2f3a32;
+}
+
+.simple-markdown h1,
+.simple-markdown h2,
+.simple-markdown h3 {
+  margin: 14px 0 8px;
+  color: #2f5f49;
+}
+
+.simple-markdown p {
+  margin: 6px 0;
+}
+
+.simple-markdown ul,
+.simple-markdown ol {
+  margin: 6px 0 10px 20px;
+}
+
+.simple-markdown code {
+  background: #e8eee7;
+  border: 1px solid #d9dfd7;
+  border-radius: 6px;
+  padding: 1px 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
+.simple-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 10px 0;
+}
+
+.simple-markdown th,
+.simple-markdown td {
+  border: 1px solid #d9dfd7;
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.simple-markdown th {
+  background: #e8eee7;
+}
+
 .stream-log {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 11px;
@@ -61,6 +110,11 @@ body {
   color: #d6ddd5;
   padding: 12px;
   border-radius: 8px;
+}
+
+.log-line-error {
+  color: #ff6b6b;
+  font-weight: 600;
 }
 
 .raw-stream {
