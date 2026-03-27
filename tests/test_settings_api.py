@@ -18,13 +18,16 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     body = g.json()
     assert body["status"] == "success"
     assert "focus_points" in body["data"]
+    assert "focus_combo_tips" in body["data"]
     assert "chunk_limit" in body["data"]
     assert "rules_md_error" in body["data"]
     assert body["data"]["llm_settings"]["text_model"] == "qwen3"
     assert body["data"]["llm_settings"]["vl_model"] == "qwen3-vl-plus"
     assert body["data"]["llm_settings"]["text_provider"] == "openai_compatible"
     assert body["data"]["llm_settings"]["text_base_url"] == ""
-    assert body["data"]["llm_settings"]["has_api_key"] is False
+    assert body["data"]["llm_settings"]["has_text_api_key"] is False
+    assert body["data"]["llm_settings"]["has_vl_api_key"] is False
+    assert body["data"]["focus_combo_tips"] == []
 
     payload = {
         "chunk_limit": 55,
@@ -38,7 +41,8 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
             "text_model": "MiniMax-M2.5",
             "vl_model": "qwen3-vl-plus",
         },
-        "llm_api_key": "sk-test-123",
+        "llm_text_api_key": "sk-text-123",
+        "llm_vl_api_key": "sk-vl-123",
     }
     s = client.post("/api/v1/settings", json=payload)
     assert s.status_code == 200
@@ -50,7 +54,8 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert b2["llm_settings"]["text_base_url"] == "https://api.minimax.chat"
     assert b2["llm_settings"]["text_model"] == "MiniMax-M2.5"
     assert b2["llm_settings"]["vl_model"] == "qwen3-vl-plus"
-    assert b2["llm_settings"]["has_api_key"] is True
+    assert b2["llm_settings"]["has_text_api_key"] is True
+    assert b2["llm_settings"]["has_vl_api_key"] is True
     rules_md = tmp_path / "rules.md"
     assert rules_md.is_file()
     txt = rules_md.read_text(encoding="utf-8")
@@ -78,15 +83,18 @@ def test_settings_clear_llm_api_key(monkeypatch: pytest.MonkeyPatch, tmp_path: P
         "/api/v1/settings",
         json={
             "llm_settings": {"text_provider": "openai_compatible", "text_base_url": "", "text_model": "qwen3", "vl_model": "qwen3-vl-plus"},
-            "llm_api_key": "sk-test-abc",
+            "llm_text_api_key": "sk-text-abc",
+            "llm_vl_api_key": "sk-vl-abc",
         },
     )
     assert s1.status_code == 200
-    assert s1.json()["data"]["llm_settings"]["has_api_key"] is True
+    assert s1.json()["data"]["llm_settings"]["has_text_api_key"] is True
+    assert s1.json()["data"]["llm_settings"]["has_vl_api_key"] is True
 
-    s2 = client.post("/api/v1/settings", json={"llm_api_key": ""})
+    s2 = client.post("/api/v1/settings", json={"llm_text_api_key": "", "llm_vl_api_key": ""})
     assert s2.status_code == 200
-    assert s2.json()["data"]["llm_settings"]["has_api_key"] is False
+    assert s2.json()["data"]["llm_settings"]["has_text_api_key"] is False
+    assert s2.json()["data"]["llm_settings"]["has_vl_api_key"] is False
 
 
 def test_import_rules_md(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -110,3 +118,27 @@ def test_import_rules_md(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     assert data["focus_points"][0]["id"] == "reqx"
     saved = (tmp_path / "rules.md").read_text(encoding="utf-8")
     assert "focus:reqx" in saved
+
+
+def test_settings_reads_focus_combo_tips_from_rules_md(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
+    (tmp_path / "rules.md").write_text(
+        (
+            "# r\n\n"
+            "### focus:req | 需求\n"
+            "需求提示\n\n"
+            "## 组合使用建议\n\n"
+            "| 评审节点 | 推荐组合的关注点 |\n"
+            "|---|---|\n"
+            "| 蓝图评审 | `focus:req` + `focus:integration` |\n"
+            "| 验收评审 | `focus:acceptance` + `focus:data` |\n"
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(app)
+    r = client.get("/api/v1/settings")
+    assert r.status_code == 200
+    tips = r.json()["data"]["focus_combo_tips"]
+    assert len(tips) == 2
+    assert tips[0]["stage"] == "蓝图评审"
+    assert "focus:req" in tips[0]["recommended"]

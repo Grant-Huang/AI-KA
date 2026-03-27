@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Divider, Input, InputNumber, message, Modal, Select, Space, Spin, Tabs, Typography } from "antd";
-import { QuestionCircleOutlined, SettingOutlined } from "@ant-design/icons";
+import { Alert, Button, Card, Divider, Input, InputNumber, Popover, message, Modal, Select, Space, Spin, Table, Tabs, Typography } from "antd";
+import { InfoCircleOutlined, QuestionCircleOutlined, SettingOutlined } from "@ant-design/icons";
 import { apiJson, openAnalyzeStream, openConvertStream, postRulesGenerateStream, waitAnalyzeStream, waitConvertStream } from "./api";
 import { BlockRenderer, type Block } from "./BlockRenderer";
 
@@ -8,9 +8,22 @@ const { Text } = Typography;
 
 type Project = { id: number; name: string; root_path: string };
 type FocusPoint = { id: string; name: string; prompt: string };
-type LlmSettings = { text_provider: string; text_base_url: string; text_model: string; vl_model: string; has_api_key?: boolean };
-type SettingsData = { focus_points: FocusPoint[]; chunk_limit: number; llm_settings: LlmSettings; rules_md_error?: string | null };
-type LayoutData = { mode: "single" | "multi"; root_label: string; candidates: { id: string; name: string; path: string }[]; warnings: string[] };
+type LlmSettings = {
+  text_provider: string;
+  text_base_url: string;
+  text_model: string;
+  vl_model: string;
+  has_text_api_key?: boolean;
+  has_vl_api_key?: boolean;
+};
+type FocusComboTip = { stage: string; recommended: string };
+type SettingsData = {
+  focus_points: FocusPoint[];
+  chunk_limit: number;
+  llm_settings: LlmSettings;
+  focus_combo_tips?: FocusComboTip[];
+  rules_md_error?: string | null;
+};
 
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -23,10 +36,8 @@ export default function App() {
   const [nativePickerAvailable, setNativePickerAvailable] = useState(true);
   const [pickLoading, setPickLoading] = useState(false);
   const [focusPoints, setFocusPoints] = useState<string[]>([]);
-  const [focusNote, setFocusNote] = useState("");
   const [focusDefs, setFocusDefs] = useState<FocusPoint[]>([]);
-  const [layout, setLayout] = useState<LayoutData | null>(null);
-  const [selectedCandidatePath, setSelectedCandidatePath] = useState<string | null>(null);
+  const [focusComboTips, setFocusComboTips] = useState<FocusComboTip[]>([]);
   const [pipelineRunning, setPipelineRunning] = useState(false);
   const [outputTab, setOutputTab] = useState<string>("process");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -39,12 +50,15 @@ export default function App() {
       text_base_url: "",
       text_model: "qwen3",
       vl_model: "qwen3-vl-plus",
-      has_api_key: false,
+      has_text_api_key: false,
+      has_vl_api_key: false,
     },
   });
   const [rulesMdError, setRulesMdError] = useState<string | null>(null);
-  const [llmApiKeyDraft, setLlmApiKeyDraft] = useState("");
-  const [llmApiKeyTouched, setLlmApiKeyTouched] = useState(false);
+  const [textApiKeyDraft, setTextApiKeyDraft] = useState("");
+  const [textApiKeyTouched, setTextApiKeyTouched] = useState(false);
+  const [vlApiKeyDraft, setVlApiKeyDraft] = useState("");
+  const [vlApiKeyTouched, setVlApiKeyTouched] = useState(false);
   const [focusSelectedIndex, setFocusSelectedIndex] = useState(0);
   const [newFocusName, setNewFocusName] = useState("");
   const rulesFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -62,11 +76,14 @@ export default function App() {
     const data = await apiJson<SettingsData>("/api/v1/settings");
     setChunkLimit(data.chunk_limit);
     setFocusDefs(data.focus_points);
+    setFocusComboTips(data.focus_combo_tips || []);
     setSettingsDraft(data);
     setFocusSelectedIndex(0);
     setRulesMdError(data.rules_md_error || null);
-    setLlmApiKeyDraft("");
-    setLlmApiKeyTouched(false);
+    setTextApiKeyDraft("");
+    setTextApiKeyTouched(false);
+    setVlApiKeyDraft("");
+    setVlApiKeyTouched(false);
   }, []);
 
   useEffect(() => {
@@ -81,7 +98,6 @@ export default function App() {
   }, []);
 
   const selected = useMemo(() => projects.find((p) => p.id === selectedId) || null, [projects, selectedId]);
-  const layoutFetchGen = useRef(0);
 
   const ensureProjectForPath = useCallback(
     async (path: string, nameHint?: string) => {
@@ -100,26 +116,7 @@ export default function App() {
 
   const detectAndLoadFromRoot = useCallback(
     async (rootPath: string) => {
-      const gen = ++layoutFetchGen.current;
-      const data = await apiJson<LayoutData>("/api/v1/fs/detect-projects", {
-        method: "POST",
-        body: JSON.stringify({ root_path: rootPath }),
-      });
-      if (gen !== layoutFetchGen.current) return;
-      setLayout(data);
-      if (data.candidates.length === 0) {
-        setSelectedCandidatePath(rootPath);
-        await ensureProjectForPath(rootPath, data.root_label);
-        return;
-      }
-      if (data.mode === "multi" && data.candidates.length > 1) {
-        setSelectedCandidatePath(data.candidates[0].path);
-        await ensureProjectForPath(data.candidates[0].path, data.candidates[0].name);
-        return;
-      }
-      const single = data.candidates[0];
-      setSelectedCandidatePath(single.path);
-      await ensureProjectForPath(single.path, single.name || data.root_label);
+      await ensureProjectForPath(rootPath);
     },
     [ensureProjectForPath],
   );
@@ -147,15 +144,19 @@ export default function App() {
         method: "POST",
         body: JSON.stringify({
           ...settingsDraft,
-          ...(llmApiKeyTouched ? { llm_api_key: llmApiKeyDraft } : {}),
+          ...(textApiKeyTouched ? { llm_text_api_key: textApiKeyDraft } : {}),
+          ...(vlApiKeyTouched ? { llm_vl_api_key: vlApiKeyDraft } : {}),
         }),
       });
       setChunkLimit(data.chunk_limit);
       setFocusDefs(data.focus_points);
+      setFocusComboTips(data.focus_combo_tips || []);
       setSettingsDraft(data);
       setRulesMdError(data.rules_md_error || null);
-      setLlmApiKeyDraft("");
-      setLlmApiKeyTouched(false);
+      setTextApiKeyDraft("");
+      setTextApiKeyTouched(false);
+      setVlApiKeyDraft("");
+      setVlApiKeyTouched(false);
       setSettingsOpen(false);
       message.success("设置已保存");
     } catch (e) {
@@ -218,8 +219,8 @@ export default function App() {
       message.warning("请先选择或创建项目");
       return;
     }
-    if (focusPoints.length === 0 && !focusNote.trim()) {
-      message.warning("请至少选择一个关注点或填写补充说明");
+    if (focusPoints.length === 0) {
+      message.warning("请至少选择一个关注点");
       return;
     }
     setPipelineRunning(true);
@@ -231,7 +232,7 @@ export default function App() {
       appendProcess("【规则生成】正在调用大模型生成分析规则 JSON…\n");
       await postRulesGenerateStream(
         selectedId,
-        { focus_points: focusPoints, focus_note: focusNote.trim() },
+        { focus_points: focusPoints, focus_note: "" },
         (ev) => {
           if (ev.type === "delta" && typeof ev.text === "string") appendProcess(ev.text);
           if (ev.type === "final") appendProcess("\n【规则生成】已完成并保存。\n");
@@ -295,8 +296,8 @@ export default function App() {
       <Text type="secondary">选择目录后自动加载项目并开始一键分析。</Text>
       <Divider />
 
-      <Card title="项目选择" style={{ marginBottom: 16 }}>
-        <Space direction="vertical" style={{ width: "100%" }} size={8}>
+      <Card title="一键分析" style={{ marginBottom: 16 }}>
+        <Space direction="vertical" style={{ width: "100%" }} size={10}>
           {rulesMdError ? (
             <Alert
               type="error"
@@ -307,63 +308,50 @@ export default function App() {
           ) : null}
           <Space wrap>
             <Button type="primary" loading={pickLoading} disabled={!nativePickerAvailable} onClick={onPickDirectory}>
-              选择目录并自动加载
+              选择项目
             </Button>
-            {pickedRootPath ? <Text code>{pickedRootPath}</Text> : <Text type="secondary">未选择目录</Text>}
+            {pickedRootPath ? <Text code>{pickedRootPath}</Text> : <Text type="secondary">未选择项目路径</Text>}
           </Space>
-          {layout && layout.mode === "multi" && (
-            <Select
-              style={{ minWidth: 460 }}
-              placeholder="选择项目"
-              value={selectedCandidatePath ?? undefined}
-              options={layout.candidates.map((c) => ({ value: c.path, label: c.name }))}
-              onChange={async (v) => {
-                setSelectedCandidatePath(v);
-                const hit = layout.candidates.find((c) => c.path === v);
-                try {
-                  await ensureProjectForPath(v, hit?.name || "project");
-                } catch (e) {
-                  message.error(String((e as Error).message));
-                }
-              }}
-            />
-          )}
-          {layout && layout.mode === "single" && <Text>{`已识别项目：${layout.candidates[0]?.name || layout.root_label}`}</Text>}
-          {layout?.warnings?.length ? <Alert type="warning" showIcon message={layout.warnings.join(" ")} /> : null}
-          {selected ? (
-            <Space wrap>
-              <Text strong>{`${selected.name} (#${selected.id})`}</Text>
-              <Text code>{selected.root_path}</Text>
-            </Space>
-          ) : (
-            <Text type="secondary">请选择目录并自动加载项目</Text>
-          )}
-        </Space>
-      </Card>
-
-      <Card title="分析输入" style={{ marginBottom: 16 }}>
-        <Space wrap>
+          {selected ? <Text>{`已识别项目：${selected.name}`}</Text> : <Text type="secondary">选择项目目录</Text>}
           <Select
             mode="multiple"
             allowClear
-            style={{ minWidth: 460 }}
+            style={{ minWidth: 520 }}
             placeholder="选择分析关注点（可多选）"
             value={focusPoints}
             options={focusDefs.map((x) => ({ value: x.name, label: x.name }))}
             onChange={(v) => setFocusPoints(v as string[])}
           />
-          <Input placeholder="补充关注点（可选）" style={{ width: 320 }} value={focusNote} onChange={(e) => setFocusNote(e.target.value)} />
-        </Space>
-      </Card>
-
-      <Card title="一键分析（规则生成 → docs2md → 索引 → 大模型）" style={{ marginBottom: 16 }}>
-        <Space wrap>
-          <Button type="primary" loading={pipelineRunning} onClick={runFullPipeline} disabled={selectedId == null}>
-            开始分析
-          </Button>
-          <Button onClick={exportDocx} disabled={selectedId == null || !analysis}>
-            导出 docx（epic-doc）
-          </Button>
+          {focusComboTips.length > 0 ? (
+            <Popover
+              trigger="click"
+              placement="bottomLeft"
+              title="关注点组合建议（来自 rules.md）"
+              content={
+                <Table
+                  size="small"
+                  pagination={false}
+                  style={{ width: 560 }}
+                  rowKey={(r) => r.stage}
+                  dataSource={focusComboTips}
+                  columns={[
+                    { title: "评审节点", dataIndex: "stage", key: "stage", width: 180 },
+                    { title: "推荐组合的关注点", dataIndex: "recommended", key: "recommended" },
+                  ]}
+                />
+              }
+            >
+              <Button icon={<InfoCircleOutlined />}>组合建议 Tips</Button>
+            </Popover>
+          ) : null}
+          <Space wrap>
+            <Button type="primary" loading={pipelineRunning} onClick={runFullPipeline} disabled={selectedId == null}>
+              开始分析
+            </Button>
+            <Button onClick={exportDocx} disabled={selectedId == null || !analysis}>
+              导出 docx（epic-doc）
+            </Button>
+          </Space>
         </Space>
         <div style={{ marginTop: 12 }}>
           <Spin spinning={pipelineRunning}>
@@ -586,14 +574,14 @@ export default function App() {
               <Space wrap style={{ width: "100%" }}>
                 <Input.Password
                   style={{ width: 520 }}
-                  addonBefore="API Key"
-                  placeholder={settingsDraft.llm_settings?.has_api_key ? "已配置（如需更新请粘贴新 Key）" : "粘贴 API Key"}
-                  value={llmApiKeyDraft}
+                  addonBefore="文本 Key"
+                  placeholder={settingsDraft.llm_settings?.has_text_api_key ? "已配置（如需更新请粘贴新 Key）" : "粘贴文本 API Key"}
+                  value={textApiKeyDraft}
                   visibilityToggle={false}
                   autoComplete="off"
                   onChange={(e) => {
-                    setLlmApiKeyDraft(e.target.value);
-                    setLlmApiKeyTouched(true);
+                    setTextApiKeyDraft(e.target.value);
+                    setTextApiKeyTouched(true);
                   }}
                   onCopy={(e) => e.preventDefault()}
                   onCut={(e) => e.preventDefault()}
@@ -614,18 +602,59 @@ export default function App() {
                 />
                 <Button
                   onClick={() => {
-                    setLlmApiKeyDraft("");
-                    setLlmApiKeyTouched(true);
+                    setTextApiKeyDraft("");
+                    setTextApiKeyTouched(true);
                   }}
                 >
-                  清空 Key
+                  清空文本 Key
                 </Button>
                 <Text type="secondary">
-                  {settingsDraft.llm_settings?.has_api_key ? "当前已配置 Key（出于安全不回显）" : "当前未配置 Key"}
+                  {settingsDraft.llm_settings?.has_text_api_key ? "文本 Key 已配置（不回显）" : "文本 Key 未配置"}
+                </Text>
+              </Space>
+              <Space wrap style={{ width: "100%" }}>
+                <Input.Password
+                  style={{ width: 520 }}
+                  addonBefore="VL Key"
+                  placeholder={settingsDraft.llm_settings?.has_vl_api_key ? "已配置（如需更新请粘贴新 Key）" : "粘贴 VL API Key"}
+                  value={vlApiKeyDraft}
+                  visibilityToggle={false}
+                  autoComplete="off"
+                  onChange={(e) => {
+                    setVlApiKeyDraft(e.target.value);
+                    setVlApiKeyTouched(true);
+                  }}
+                  onCopy={(e) => e.preventDefault()}
+                  onCut={(e) => e.preventDefault()}
+                  onKeyDown={(e) => {
+                    const withMeta = e.metaKey || e.ctrlKey;
+                    const k = e.key.toLowerCase();
+                    if (withMeta && (k === "v" || k === "a")) return;
+                    if (withMeta && (k === "c" || k === "x")) {
+                      e.preventDefault();
+                      return;
+                    }
+                    if (["backspace", "delete", "arrowleft", "arrowright", "tab", "enter"].includes(k)) return;
+                    if (!withMeta && k.length === 1) {
+                      e.preventDefault();
+                    }
+                  }}
+                  onContextMenu={(e) => e.preventDefault()}
+                />
+                <Button
+                  onClick={() => {
+                    setVlApiKeyDraft("");
+                    setVlApiKeyTouched(true);
+                  }}
+                >
+                  清空 VL Key
+                </Button>
+                <Text type="secondary">
+                  {settingsDraft.llm_settings?.has_vl_api_key ? "VL Key 已配置（不回显）" : "VL Key 未配置"}
                 </Text>
               </Space>
               <Text type="secondary">Key 输入框只允许粘贴与删除，且不可查看/复制。</Text>
-              <Text type="secondary">文本解析使用 Provider + Text Base URL + 文本模型；图片解析使用 VL 模型 + 同一 API Key（用于 docs2md 的 VL 解析）。</Text>
+              <Text type="secondary">文本解析使用 Provider + Text Base URL + 文本模型 + 文本 Key；图片解析使用 VL 模型 + VL Key。</Text>
             </Space>
           </div>
         </Space>
@@ -633,11 +662,11 @@ export default function App() {
 
       <Modal title="帮助" open={helpOpen} onCancel={() => setHelpOpen(false)} footer={null} width={760}>
         <Space direction="vertical" size={10}>
-          <Text>1) 点击「选择目录并自动加载」，系统会自动识别单项目/多项目结构。</Text>
-          <Text>2) 在“分析输入”里选择关注点，可补充额外说明。</Text>
-          <Text>3) 点击“开始分析”后，系统会自动执行：规则生成 → docs2md 转换 → 索引 → 大模型分析。</Text>
-          <Text>4) 若未配置 VL API Key，转换日志会提示“跳过图片解析环节”。</Text>
-          <Text>5) 齿轮设置里可维护关注点及对应 prompt，并修改 chunk 上限。</Text>
+          <Text>1) 点击「选择项目」，系统会回填绝对路径并自动加载该项目。</Text>
+          <Text>2) 在首页选择分析关注点（可多选）；若 rules.md 提供“组合使用建议”，会在下拉框后显示 Tips。</Text>
+          <Text>3) 点击“开始分析”后，系统自动执行：规则生成 → docs2md 转换 → 索引 → 大模型分析。</Text>
+          <Text>4) 设置页分为三部分：chunk 上限、关注点维护、Model（文本模型与 VL 模型分别配置 Key）。</Text>
+          <Text>5) 可在设置页点击「加载 rules」导入完整规则文件，系统会先校验再确认保存。</Text>
         </Space>
       </Modal>
     </div>

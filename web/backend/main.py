@@ -13,7 +13,6 @@ from fastapi.staticfiles import StaticFiles
 from aika import db as dbm
 from aika.epic_doc import EpicDocError, generate_docx
 from aika.indexer import sync_project_md_root
-from aika.project_layout import detect_project_layout
 from aika.llm import LLMConfig, LLMError, get_provider
 from aika.paths import db_path
 
@@ -86,6 +85,54 @@ def _read_settings_from_rules_md() -> tuple[dict[str, Any] | None, str | None]:
         return None, None
     text = p.read_text(encoding="utf-8", errors="replace")
     return _read_settings_from_rules_text(text)
+
+
+def _extract_focus_combo_tips_from_rules_text(text: str) -> list[dict[str, str]]:
+    lines = text.splitlines()
+    start = -1
+    for i, raw in enumerate(lines):
+        if raw.strip() == "## 组合使用建议":
+            start = i
+            break
+    if start < 0:
+        return []
+
+    rows: list[dict[str, str]] = []
+    in_table = False
+    for raw in lines[start + 1 :]:
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("## ") and in_table:
+            break
+        if not line.startswith("|"):
+            if in_table:
+                break
+            continue
+        cells = [x.strip() for x in line.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        # Skip header/separator rows.
+        if cells[0] in {"评审节点", "---"}:
+            in_table = True
+            continue
+        if cells[0].startswith("---"):
+            in_table = True
+            continue
+        in_table = True
+        stage = cells[0]
+        recommended = cells[1]
+        if stage and recommended:
+            rows.append({"stage": stage, "recommended": recommended})
+    return rows
+
+
+def _read_focus_combo_tips_from_rules_md() -> list[dict[str, str]]:
+    p = _rules_md_path()
+    if not p.is_file():
+        return []
+    text = p.read_text(encoding="utf-8", errors="replace")
+    return _extract_focus_combo_tips_from_rules_text(text)
 
 
 def _read_settings_from_rules_text(text: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -185,8 +232,29 @@ def _get_llm_api_key_from_db(conn: Any) -> str | None:
     return None
 
 
-def _get_llm_api_key_effective(conn: Any) -> str | None:
-    v = _get_llm_api_key_from_db(conn)
+def _get_text_llm_api_key_from_db(conn: Any) -> str | None:
+    v = dbm.get_app_setting_json(conn, "llm_text_api_key")
+    if v:
+        return v
+    return _get_llm_api_key_from_db(conn)
+
+
+def _get_vl_llm_api_key_from_db(conn: Any) -> str | None:
+    v = dbm.get_app_setting_json(conn, "llm_vl_api_key")
+    if v:
+        return v
+    return _get_llm_api_key_from_db(conn)
+
+
+def _get_text_llm_api_key_effective(conn: Any) -> str | None:
+    v = _get_text_llm_api_key_from_db(conn)
+    if v:
+        return v
+    return get_settings().llm_api_key
+
+
+def _get_vl_llm_api_key_effective(conn: Any) -> str | None:
+    v = _get_vl_llm_api_key_from_db(conn)
     if v:
         return v
     return get_settings().llm_api_key
@@ -227,7 +295,8 @@ def _get_llm_settings(conn: Any) -> dict[str, Any]:
         "text_base_url": _get_text_base_url(conn),
         "text_model": _get_text_model(conn),
         "vl_model": _get_vl_model(conn),
-        "has_api_key": bool(_get_llm_api_key_effective(conn)),
+        "has_text_api_key": bool(_get_text_llm_api_key_effective(conn)),
+        "has_vl_api_key": bool(_get_vl_llm_api_key_effective(conn)),
     }
 
 
@@ -236,7 +305,7 @@ def _build_text_llm_config(conn: Any, timeout_s: float) -> LLMConfig:
         provider=_get_text_provider(conn),
         model=_get_text_model(conn),
         base_url=_get_text_base_url(conn) or None,
-        api_key=_get_llm_api_key_effective(conn),
+        api_key=_get_text_llm_api_key_effective(conn),
         timeout_s=timeout_s,
     )
 
@@ -291,21 +360,11 @@ def pick_directory(request: Request) -> JSONResponse:
     return JSONResponse(ok({"path": validated.as_posix()}))
 
 
-@app.post("/api/v1/fs/detect-projects")
-def detect_projects(payload: dict[str, Any]) -> JSONResponse:
-    root_path = str(payload.get("root_path") or "").strip()
-    try:
-        validated = validate_project_root(root_path)
-    except PathValidationError as e:
-        return JSONResponse(err(str(e)), status_code=400)
-    layout = detect_project_layout(validated)
-    return JSONResponse(ok(layout))
-
-
 @app.get("/api/v1/settings")
 def get_app_settings() -> JSONResponse:
     conn = _conn()
     file_data, parse_error = _read_settings_from_rules_md()
+    combo_tips = _read_focus_combo_tips_from_rules_md()
     if isinstance(file_data, dict):
         fp = file_data.get("focus_points")
         cl = file_data.get("chunk_limit")
@@ -314,6 +373,7 @@ def get_app_settings() -> JSONResponse:
         if isinstance(cl, int):
             dbm.set_app_setting_json(conn, "chunk_limit", cl)
     payload = _build_settings_payload(conn)
+    payload["focus_combo_tips"] = combo_tips
     payload["rules_md_error"] = parse_error
     return JSONResponse(ok(payload))
 
@@ -363,13 +423,26 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
         dbm.set_app_setting_json(conn, "llm_text_base_url", text_base_url or None)
         dbm.set_app_setting_json(conn, "llm_text_model", text_model)
         dbm.set_app_setting_json(conn, "llm_vl_model", vl_model)
+    # Backward compatibility: legacy llm_api_key sets both text/vl keys.
     if "llm_api_key" in payload:
         raw_key = payload.get("llm_api_key")
         key = str(raw_key or "").strip()
         if key:
+            dbm.set_app_setting_json(conn, "llm_text_api_key", key)
+            dbm.set_app_setting_json(conn, "llm_vl_api_key", key)
             dbm.set_app_setting_json(conn, "llm_api_key", key)
         else:
+            dbm.set_app_setting_json(conn, "llm_text_api_key", None)
+            dbm.set_app_setting_json(conn, "llm_vl_api_key", None)
             dbm.set_app_setting_json(conn, "llm_api_key", None)
+    if "llm_text_api_key" in payload:
+        raw_text_key = payload.get("llm_text_api_key")
+        text_key = str(raw_text_key or "").strip()
+        dbm.set_app_setting_json(conn, "llm_text_api_key", text_key or None)
+    if "llm_vl_api_key" in payload:
+        raw_vl_key = payload.get("llm_vl_api_key")
+        vl_key = str(raw_vl_key or "").strip()
+        dbm.set_app_setting_json(conn, "llm_vl_api_key", vl_key or None)
     current = _build_settings_payload(conn)
     _write_settings_to_rules_md(current)
     current["rules_md_error"] = None
@@ -714,7 +787,7 @@ def convert_md_stream(project_id: int) -> StreamingResponse:
                 input_dir=src,
                 output_dir=out_dir,
                 format_="md",
-                vl_api_key=_get_llm_api_key_effective(conn),
+                vl_api_key=_get_vl_llm_api_key_effective(conn),
                 vl_model=_get_vl_model(conn),
             ):
                 yield _sse_line({"type": "log", "text": line.rstrip("\n")})
