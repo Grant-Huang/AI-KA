@@ -30,7 +30,7 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert body["data"]["llm_settings"]["has_text_api_key"] is False
     assert body["data"]["llm_settings"]["has_vl_api_key"] is False
     assert body["data"]["focus_combo_tips"] == []
-    assert body["data"]["disable_image_parse"] is False
+    assert body["data"]["disable_image_parse"] is True
 
     payload = {
         "chunk_limit": 55,

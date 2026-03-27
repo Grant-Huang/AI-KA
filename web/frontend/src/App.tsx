@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Checkbox, Divider, Input, InputNumber, Popover, message, Modal, Select, Space, Spin, Table, Typography } from "antd";
+import { Alert, Button, Card, Checkbox, Collapse, Divider, Input, InputNumber, Popover, message, Modal, Select, Space, Table, Typography } from "antd";
 import { InfoCircleOutlined, QuestionCircleOutlined, SettingOutlined } from "@ant-design/icons";
 import { apiJson, openAnalyzeStream, openConvertStream, postRulesGenerateStream, waitAnalyzeStream, waitConvertStream } from "./api";
 import { BlockRenderer, type Block } from "./BlockRenderer";
@@ -37,6 +37,7 @@ export default function App() {
   const [convertLog, setConvertLog] = useState("");
   const [streamText, setStreamText] = useState("");
   const [analysis, setAnalysis] = useState<{ title?: string; blocks?: Block[] } | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
   const [chunkLimit, setChunkLimit] = useState(40);
   const [nativePickerAvailable, setNativePickerAvailable] = useState(true);
   const [pickLoading, setPickLoading] = useState(false);
@@ -52,7 +53,7 @@ export default function App() {
   const [settingsDraft, setSettingsDraft] = useState<SettingsData>({
     focus_points: [],
     chunk_limit: 40,
-    disable_image_parse: false,
+    disable_image_parse: true,
     llm_settings: {
       text_provider: "openai_compatible",
       text_base_url: "",
@@ -230,6 +231,47 @@ export default function App() {
 
   const appendProcess = (s: string) => setStreamText((prev) => prev + s);
   const appendBackend = (s: string) => setConvertLog((prev) => prev + s);
+  const renderProcessStream = (text: string) => {
+    const chunks: Array<{ type: "think" | "text"; content: string }> = [];
+    const re = /<think>([\s\S]*?)<\/think>/g;
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      if (m.index > last) {
+        chunks.push({ type: "text", content: text.slice(last, m.index) });
+      }
+      chunks.push({ type: "think", content: m[1] || "" });
+      last = re.lastIndex;
+    }
+    if (last < text.length) {
+      chunks.push({ type: "text", content: text.slice(last) });
+    }
+    if (chunks.length === 0) return <div className="stream-render-text">{text || "（规则生成与大模型分析流式输出）"}</div>;
+    return (
+      <div className="stream-render">
+        {chunks.map((c, idx) =>
+          c.type === "think" ? (
+            <Collapse
+              key={`think-${idx}`}
+              size="small"
+              ghost
+              items={[
+                {
+                  key: `k-${idx}`,
+                  label: "思考过程（已折叠）",
+                  children: <div className="stream-render-think">{c.content}</div>,
+                },
+              ]}
+            />
+          ) : (
+            <div key={`txt-${idx}`} className="stream-render-text">
+              {c.content}
+            </div>
+          ),
+        )}
+      </div>
+    );
+  };
   const renderBackendLog = (text: string) => {
     const rows = text.split("\n");
     return rows.map((line, idx) => {
@@ -331,7 +373,7 @@ export default function App() {
       <Text type="secondary">选择目录后自动加载项目并开始一键分析。</Text>
       <Divider />
 
-      <Card title="一键分析" style={{ marginBottom: 16 }}>
+      <Card style={{ marginBottom: 16 }}>
         <Space direction="vertical" style={{ width: "100%" }} size={10}>
           {rulesMdError ? (
             <Alert
@@ -384,29 +426,20 @@ export default function App() {
               开始分析
             </Button>
             <Button onClick={() => setLogOpen(true)}>后台日志</Button>
+            <Button onClick={() => setPreviewOpen(true)} disabled={!analysis}>
+              结构化预览
+            </Button>
             <Button onClick={exportDocx} disabled={selectedId == null || !analysis}>
               导出 docx（epic-doc）
             </Button>
           </Space>
         </Space>
         <div style={{ marginTop: 12 }}>
-          <Spin spinning={pipelineRunning}>
-            <div className="raw-stream stream-log" style={{ minHeight: 160 }}>
-              {streamText || "（规则生成与大模型分析流式输出）"}
-            </div>
-          </Spin>
+          {pipelineRunning ? <Text type="secondary">分析进行中…（可滚动查看实时输出）</Text> : null}
+          <div className="raw-stream stream-log process-stream" style={{ minHeight: 160 }}>
+            {renderProcessStream(streamText)}
+          </div>
         </div>
-      </Card>
-
-      <Card title="结构化预览">
-        {analysis?.blocks?.length ? (
-          <>
-            {analysis.title && <Typography.Title level={4}>{analysis.title}</Typography.Title>}
-            <BlockRenderer blocks={analysis.blocks as Block[]} />
-          </>
-        ) : (
-          <Text type="secondary">分析完成后在此展示卡片/表格/Tabs 等</Text>
-        )}
       </Card>
 
       <Modal title="设置" open={settingsOpen} onOk={saveSettings} onCancel={() => setSettingsOpen(false)} width={860} okText="保存">
@@ -667,6 +700,16 @@ export default function App() {
         <div className="stream-log" style={{ minHeight: 220, maxHeight: 420 }}>
           {convertLog ? renderBackendLog(convertLog) : "（docs2md 与索引日志）"}
         </div>
+      </Modal>
+      <Modal title="结构化预览" open={previewOpen} onCancel={() => setPreviewOpen(false)} footer={null} width={980}>
+        {analysis?.blocks?.length ? (
+          <>
+            {analysis.title && <Typography.Title level={4}>{analysis.title}</Typography.Title>}
+            <BlockRenderer blocks={analysis.blocks as Block[]} />
+          </>
+        ) : (
+          <Text type="secondary">暂无可预览内容，请先执行分析。</Text>
+        )}
       </Modal>
     </div>
   );

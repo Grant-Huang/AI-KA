@@ -122,3 +122,18 @@ body {
   max-height: 200px;
   overflow: auto;
 }
+
+.process-stream {
+  padding-right: 6px;
+}
+
+.stream-render-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.stream-render-think {
+  white-space: pre-wrap;
+  color: #b8c0b7;
+  font-size: 11px;
+}

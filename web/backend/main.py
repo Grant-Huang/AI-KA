@@ -236,7 +236,9 @@ def _get_chunk_limit(conn: Any) -> int:
 
 def _get_disable_image_parse(conn: Any) -> bool:
     v = dbm.get_app_setting_json(conn, "disable_image_parse")
-    return bool(v is True)
+    if isinstance(v, bool):
+        return v
+    return True
 
 
 def _get_llm_api_key_from_db(conn: Any) -> str | None:
