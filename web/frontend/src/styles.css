@@ -127,6 +127,15 @@ body {
   padding-right: 6px;
 }
 
+.process-stream.stream-log {
+  width: 100%;
+  min-height: 360px;
+  max-height: 68vh;
+  background: #e6e8eb;
+  color: #2f3a32;
+  border: 1px solid #cfd4d9;
+}
+
 .stream-render-text {
   white-space: pre-wrap;
   word-break: break-word;

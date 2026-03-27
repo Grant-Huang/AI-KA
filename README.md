@@ -79,7 +79,7 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8765
 
 1. **分析配置**：设定 chunk 上限（参与大模型分析的 Markdown 分块数量，越大上下文越多、耗时与费用通常越高）、选择关注点。若 `rules.md` 含有“组合使用建议”表格，首页关注点下拉框后会显示 `Tips` 入口用于快速参考。
 2. **选择项目**：点击「选择项目」由本机后端回填**绝对路径**（后端进程必须可读）。当前按单项目目录处理：一次选择一个目录并分析一个项目。
-3. 点击 **「开始分析」**：自动顺序执行——**流式生成分析规则 JSON**（`POST /api/v1/projects/{id}/rules/generate/stream`）→ **docs2md 转换**（SSE 日志写入「后台日志」Tab）→ **索引 Markdown**（将 `md_out` 下 Markdown 扫描入库并分块，供后续分析使用；一键流程内自动执行，无需单独点击）→ **大模型流式分析**（「过程流式输出」Tab）。
+3. 点击 **「开始分析」**：自动顺序执行——**docs2md 转换**（SSE 日志写入「后台日志」弹窗）→ **索引 Markdown**（将 `md_out` 下 Markdown 扫描入库并分块）→ **大模型流式审查**（`POST /api/v1/projects/{id}/analyze/stream`，请求体含 `chunk_limit` 与本次勾选的 `focus_points`，系统按 `rules.md`/设置中的关注点 name+prompt 生成审查提示；「过程流式输出」区域展示）。
 4. **导出 docx**：分析完成后可导出；依赖 `epic-doc`；若缺少 LibreOffice/pandoc/graphviz 等系统依赖，启动或导出时会提示安装方式。
 
 ### 3.5 设置与帮助

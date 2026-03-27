@@ -31,6 +31,16 @@ def test_prompt_builder_includes_dimensions() -> None:
     assert "hello" in u
 
 
+def test_prompt_builder_focus_definitions() -> None:
+    s = build_system_prompt(
+        None,
+        focus_definitions=[{"id": "req", "name": "需求", "prompt": "检查需求完整性"}],
+    )
+    assert "关注点审查清单" in s
+    assert "需求" in s
+    assert "检查需求完整性" in s
+
+
 def test_analysis_to_epic_has_blocks() -> None:
     analysis = {
         "title": "T",

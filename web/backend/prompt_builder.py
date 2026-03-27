@@ -35,7 +35,38 @@ def merge_rules(user_rules: dict[str, Any] | None) -> dict[str, Any]:
     return base
 
 
-def build_system_prompt(rules: dict[str, Any]) -> str:
+def build_system_prompt(
+    rules: dict[str, Any] | None = None,
+    *,
+    focus_definitions: list[dict[str, str]] | None = None,
+) -> str:
+    """
+    主流程：传入 focus_definitions（来自 rules.md/设置中的 name+prompt，并按本次勾选子集过滤），
+    驱动文档审查；不再依赖 LLM 预生成的 goal/dimensions JSON。
+    兼容：未传关注点定义时，仍使用 merge_rules(rules) 的旧维度字段。
+    """
+    if focus_definitions:
+        lines: list[str] = [
+            "你是资深 IT 实施与项目评审顾问。基于用户提供的文档片段，按「关注点审查清单」逐项审查并输出结构化结论。\n",
+            "输出语言要求：除专有名词、英文缩写、代码/协议字段外，其余文本必须使用简体中文。\n",
+            "审查要求：\n",
+            "- 对下列每个关注点分别给出：发现、结论、建议（如适用）；\n",
+            "- 结论需引用片段证据（片段编号或原文要点摘录）；\n",
+            "- 若某关注点无证据，明确说明未在片段中发现相关内容。\n",
+            "\n关注点审查清单（名称与审查要点来自 rules.md / 应用设置）：\n",
+        ]
+        for i, fd in enumerate(focus_definitions, 1):
+            name = str(fd.get("name") or "").strip()
+            pid = str(fd.get("id") or name).strip()
+            prm = str(fd.get("prompt") or "").strip()
+            lines.append(f"{i}. 【{name}】（id={pid}）\n   审查要点：{prm}\n")
+        lines.append(
+            "\n输出风格偏好："
+            + json.dumps(DEFAULT_RULES.get("style", {}), ensure_ascii=False)
+            + "\n"
+        )
+        return "".join(lines) + BLOCK_SCHEMA_HINT
+
     r = merge_rules(rules)
     return (
         "你是资深 IT 实施与项目评审顾问。基于用户提供的文档片段进行分析。\n"

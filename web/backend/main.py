@@ -5,7 +5,8 @@ import re
 from typing import Any, Iterator
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -659,14 +660,6 @@ def _sse_line(obj: dict[str, Any]) -> str:
     return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
 
 
-def _clean_json_text(raw: str) -> str:
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
-    return cleaned.strip()
-
-
 def _extract_first_json_object_text(raw: str) -> str | None:
     s = raw.strip()
     start = s.find("{")
@@ -699,120 +692,40 @@ def _extract_first_json_object_text(raw: str) -> str | None:
     return None
 
 
-def _coerce_rules_obj(obj: Any, focus_points: list[str], focus_note: str) -> dict[str, Any]:
-    merged_focus = [x for x in focus_points if x]
-    if focus_note:
-        merged_focus.append(focus_note)
-    if not isinstance(obj, dict):
-        return merge_rules({"dimensions": merged_focus})
-    goal = str(obj.get("goal") or "").strip() or "基于转换后的 Markdown 做项目风险与需求梳理"
-    dimensions = obj.get("dimensions")
-    if not isinstance(dimensions, list):
-        dimensions = []
-    dimensions_clean = [str(x).strip() for x in dimensions if str(x).strip()]
-    for item in merged_focus:
-        if item not in dimensions_clean:
-            dimensions_clean.append(item)
-    if not dimensions_clean:
-        dimensions_clean = ["需求", "风险", "接口与集成"]
-    style = obj.get("style")
-    if not isinstance(style, dict):
-        style = {"prefer": ["cards", "table", "tabs"]}
-    return {"goal": goal, "dimensions": dimensions_clean, "style": style}
+class AnalyzeStreamBody(BaseModel):
+    chunk_limit: int = Field(default=40, ge=1, le=500)
+    focus_points: list[str] = Field(min_length=1)
 
 
-def _rules_generate_prompts(
-    conn: Any, prj: Any, focus_points: list[str], focus_note: str
-) -> tuple[str, str, LLMConfig, Any]:
-    cfg = _build_text_llm_config(conn, timeout_s=180.0)
-    provider = get_provider(cfg.provider)
-    fp_defs = _get_focus_points(conn)
-    prompt_by_name = {x["name"]: x.get("prompt", "") for x in fp_defs}
-    selected_focus = [
-        {"name": n, "prompt": prompt_by_name.get(n, "")}
-        for n in focus_points
-    ]
-    system = (
-        "你是资深 IT 实施顾问。请基于用户给出的分析关注点，输出 analysis rules JSON。"
-        "只输出 JSON 对象，不要 Markdown。"
-        '格式：{"goal":"...","dimensions":["..."],"style":{"prefer":["cards","table","tabs"]}}'
-    )
-    user = (
-        f"项目名：{prj.name}\n"
-        f"用户选择关注点：{json.dumps(selected_focus, ensure_ascii=False)}\n"
-        f"用户补充说明：{focus_note}\n"
-        "要求：\n"
-        "1) dimensions 必须覆盖所有关注点；\n"
-        "2) goal 一句话且可执行；\n"
-        "3) 输出必须是合法 JSON。"
-    )
-    return system, user, cfg, provider
-
-
-def _rules_from_llm_raw(raw: str, focus_points: list[str], focus_note: str) -> dict[str, Any]:
-    try:
-        parsed = json.loads(_clean_json_text(raw))
-    except json.JSONDecodeError:
-        parsed = {}
-    return _coerce_rules_obj(parsed, focus_points=focus_points, focus_note=focus_note)
-
-
-@app.post("/api/v1/projects/{project_id}/rules/generate")
-def generate_rules(project_id: int, payload: dict[str, Any]) -> JSONResponse:
-    conn = _conn()
-    prj = dbm.get_project_by_id(conn, project_id)
-    if prj is None:
-        return JSONResponse(err("project not found"), status_code=404)
-
-    points_raw = payload.get("focus_points")
-    focus_points = [str(x).strip() for x in (points_raw if isinstance(points_raw, list) else []) if str(x).strip()]
-    focus_note = str(payload.get("focus_note") or "").strip()
-    if not focus_points and not focus_note:
-        return JSONResponse(err("focus_points or focus_note is required"), status_code=400)
-
-    system, user, cfg, provider = _rules_generate_prompts(conn, prj, focus_points, focus_note)
-    try:
-        chunks: list[str] = []
-        for piece in provider.chat_stream(system=system, user=user, config=cfg):
-            chunks.append(piece)
-        raw = "".join(chunks)
-    except LLMError as e:
-        return JSONResponse(err(str(e)), status_code=502)
-
-    rules = _rules_from_llm_raw(raw, focus_points=focus_points, focus_note=focus_note)
-    dbm.update_project_rules(conn, project_id, json.dumps(rules, ensure_ascii=False))
-    return JSONResponse(ok({"rules": rules, "saved": True}))
-
-
-@app.post("/api/v1/projects/{project_id}/rules/generate/stream")
-def generate_rules_stream(project_id: int, payload: dict[str, Any]) -> StreamingResponse:
-    conn = _conn()
-    prj = dbm.get_project_by_id(conn, project_id)
-    if prj is None:
-        raise HTTPException(status_code=404, detail="project not found")
-
-    points_raw = payload.get("focus_points")
-    focus_points = [str(x).strip() for x in (points_raw if isinstance(points_raw, list) else []) if str(x).strip()]
-    focus_note = str(payload.get("focus_note") or "").strip()
-    if not focus_points and not focus_note:
-        raise HTTPException(status_code=400, detail="focus_points or focus_note is required")
-
-    system, user, cfg, provider = _rules_generate_prompts(conn, prj, focus_points, focus_note)
-
-    def gen() -> Iterator[str]:
-        try:
-            acc: list[str] = []
-            for piece in provider.chat_stream(system=system, user=user, config=cfg):
-                acc.append(piece)
-                yield _sse_line({"type": "delta", "text": piece})
-            raw = "".join(acc)
-            rules = _rules_from_llm_raw(raw, focus_points=focus_points, focus_note=focus_note)
-            dbm.update_project_rules(conn, project_id, json.dumps(rules, ensure_ascii=False))
-            yield _sse_line({"type": "final", "rules": rules, "saved": True})
-        except LLMError as e:
-            yield _sse_line({"type": "error", "message": str(e)})
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
+def _resolve_focus_definitions_for_subset(conn: Any, focus_names: list[str]) -> tuple[list[dict[str, str]], str | None]:
+    """按名称从已加载关注点定义中解析本次审查子集（顺序去重）。"""
+    if not focus_names:
+        return [], "focus_points 不能为空"
+    all_defs = _get_focus_points(conn)
+    by_name = {d["name"]: d for d in all_defs}
+    seen: set[str] = set()
+    ordered_names: list[str] = []
+    for n in focus_names:
+        n = str(n).strip()
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        ordered_names.append(n)
+    if not ordered_names:
+        return [], "focus_points 不能为空"
+    out: list[dict[str, str]] = []
+    for n in ordered_names:
+        if n not in by_name:
+            return [], f"未知关注点：{n}（请从设置中已加载的关注点中选择）"
+        d = by_name[n]
+        out.append(
+            {
+                "id": str(d["id"]),
+                "name": str(d["name"]),
+                "prompt": str(d.get("prompt") or ""),
+            }
+        )
+    return out, None
 
 
 def _normalize_analysis_for_ui(obj: Any) -> dict[str, Any]:
@@ -882,27 +795,23 @@ def index_md(project_id: int) -> JSONResponse:
     return JSONResponse(ok({"indexed_documents": n}))
 
 
-@app.get("/api/v1/projects/{project_id}/analyze/stream")
-def analyze_stream(
-    project_id: int,
-    chunk_limit: int = Query(default=40, ge=1, le=500),
-) -> StreamingResponse:
+@app.post("/api/v1/projects/{project_id}/analyze/stream")
+def analyze_stream_post(project_id: int, payload: AnalyzeStreamBody) -> StreamingResponse:
     conn = _conn()
     prj = dbm.get_project_by_id(conn, project_id)
     if prj is None:
         raise HTTPException(status_code=404, detail="project not found")
-    rules_dict: dict[str, Any] | None = None
-    if prj.rules_json:
-        try:
-            rules_dict = json.loads(prj.rules_json)
-        except json.JSONDecodeError:
-            rules_dict = None
-    texts = dbm.list_chunk_texts(conn, project_id=project_id, limit=chunk_limit)
+
+    resolved, err = _resolve_focus_definitions_for_subset(conn, payload.focus_points)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+
+    texts = dbm.list_chunk_texts(conn, project_id=project_id, limit=payload.chunk_limit)
     if not texts:
         raise HTTPException(status_code=400, detail="no chunks; run index-md after convert-md")
 
     cfg = _build_text_llm_config(conn, timeout_s=300.0)
-    system = build_system_prompt(rules_dict or {})
+    system = build_system_prompt(None, focus_definitions=resolved)
     user = build_user_prompt(chunk_texts=texts)
 
     def gen():

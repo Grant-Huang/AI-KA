@@ -21,29 +21,6 @@ export async function apiJson<T>(
   return (j as ApiOk<T>).data;
 }
 
-export function openAnalyzeStream(
-  projectId: number,
-  chunkLimit: number,
-  onEvent: (ev: Record<string, unknown>) => void,
-  onError: (e: Error) => void,
-): () => void {
-  const url = `${BASE}/api/v1/projects/${projectId}/analyze/stream?chunk_limit=${chunkLimit}`;
-  const es = new EventSource(url);
-  es.onmessage = (e) => {
-    try {
-      const obj = JSON.parse(e.data) as Record<string, unknown>;
-      onEvent(obj);
-    } catch {
-      onEvent({ type: "parse_error", raw: e.data });
-    }
-  };
-  es.onerror = () => {
-    onError(new Error("EventSource error"));
-    es.close();
-  };
-  return () => es.close();
-}
-
 export function openConvertStream(
   projectId: number,
   onEvent: (ev: Record<string, unknown>) => void,
@@ -68,6 +45,7 @@ export function openConvertStream(
 async function consumeSseFromResponse(
   response: Response,
   onEvent: (ev: Record<string, unknown>) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const reader = response.body?.getReader();
   if (!reader) {
@@ -76,6 +54,9 @@ async function consumeSseFromResponse(
   const decoder = new TextDecoder();
   let buf = "";
   while (true) {
+    if (signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
     const { done, value } = await reader.read();
     if (done) {
       break;
@@ -103,21 +84,23 @@ async function consumeSseFromResponse(
   }
 }
 
-export async function postRulesGenerateStream(
+export async function postAnalyzeStream(
   projectId: number,
-  body: { focus_points: string[]; focus_note: string },
+  body: { chunk_limit: number; focus_points: string[] },
   onEvent: (ev: Record<string, unknown>) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const r = await fetch(`${BASE}/api/v1/projects/${projectId}/rules/generate/stream`, {
+  const r = await fetch(`${BASE}/api/v1/projects/${projectId}/analyze/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal,
   });
   if (!r.ok) {
     const j = (await r.json().catch(() => ({}))) as ApiErr;
     throw new Error(j.message || `HTTP ${r.status}`);
   }
-  await consumeSseFromResponse(r, onEvent);
+  await consumeSseFromResponse(r, onEvent, signal);
 }
 
 export function waitConvertStream(
@@ -148,43 +131,6 @@ export function waitConvertStream(
     setTimeout(() => {
       stop();
       reject(new Error("docs2md 转换超时"));
-    }, 600_000);
-  });
-}
-
-export function waitAnalyzeStream(
-  projectId: number,
-  chunkLimit: number,
-  onDelta: (t: string) => void,
-): Promise<{ analysis: unknown; raw: string | null }> {
-  return new Promise((resolve, reject) => {
-    const stop = openAnalyzeStream(
-      projectId,
-      chunkLimit,
-      (ev) => {
-        if (ev.type === "delta" && typeof ev.text === "string") {
-          onDelta(ev.text);
-        }
-        if (ev.type === "final") {
-          stop();
-          resolve({
-            analysis: ev.analysis ?? null,
-            raw: typeof ev.raw === "string" ? ev.raw : null,
-          });
-        }
-        if (ev.type === "error") {
-          stop();
-          reject(new Error(String(ev.message)));
-        }
-      },
-      (e) => {
-        stop();
-        reject(e);
-      },
-    );
-    setTimeout(() => {
-      stop();
-      reject(new Error("大模型分析超时"));
     }, 600_000);
   });
 }

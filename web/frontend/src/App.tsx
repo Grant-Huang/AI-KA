@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Checkbox, Collapse, Divider, Input, InputNumber, Popover, message, Modal, Select, Space, Table, Typography } from "antd";
+import { Alert, Button, Card, Checkbox, Collapse, Divider, Input, InputNumber, Popover, message, Modal, Select, Space, Spin, Table, Typography } from "antd";
 import { InfoCircleOutlined, QuestionCircleOutlined, SettingOutlined } from "@ant-design/icons";
-import { apiJson, openAnalyzeStream, openConvertStream, postRulesGenerateStream, waitAnalyzeStream, waitConvertStream } from "./api";
+import { apiJson, openConvertStream, postAnalyzeStream } from "./api";
 import { BlockRenderer, type Block } from "./BlockRenderer";
 import SimpleMarkdown from "./SimpleMarkdown";
 
@@ -71,6 +71,10 @@ export default function App() {
   const [vlApiKeyTouched, setVlApiKeyTouched] = useState(false);
   const [focusSelectedIndex, setFocusSelectedIndex] = useState(0);
   const rulesFileInputRef = useRef<HTMLInputElement | null>(null);
+  const stopConvertRef = useRef<(() => void) | null>(null);
+  const stopAnalyzeRef = useRef<(() => void) | null>(null);
+  const analyzeAbortRef = useRef<AbortController | null>(null);
+  const terminatedRef = useRef(false);
 
   const loadProjects = useCallback(async () => {
     const data = await apiJson<{ projects: Project[] }>("/api/v1/projects");
@@ -246,7 +250,7 @@ export default function App() {
     if (last < text.length) {
       chunks.push({ type: "text", content: text.slice(last) });
     }
-    if (chunks.length === 0) return <div className="stream-render-text">{text || "（规则生成与大模型分析流式输出）"}</div>;
+    if (chunks.length === 0) return <div className="stream-render-text">{text || "（文档审查与大模型流式输出）"}</div>;
     return (
       <div className="stream-render">
         {chunks.map((c, idx) =>
@@ -290,6 +294,21 @@ export default function App() {
     });
   };
 
+  const stopPipeline = () => {
+    if (!pipelineRunning) return;
+    terminatedRef.current = true;
+    analyzeAbortRef.current?.abort();
+    stopConvertRef.current?.();
+    stopAnalyzeRef.current?.();
+    analyzeAbortRef.current = null;
+    stopConvertRef.current = null;
+    stopAnalyzeRef.current = null;
+    setPipelineRunning(false);
+    appendProcess("\n[info] 用户已终止流程。\n");
+    appendBackend("\n[info] 用户已终止流程。\n");
+    message.info("流程已终止");
+  };
+
   const runFullPipeline = async () => {
     if (selectedId == null) {
       message.warning("请先选择或创建项目");
@@ -300,30 +319,101 @@ export default function App() {
       return;
     }
     setPipelineRunning(true);
+    terminatedRef.current = false;
     setStreamText("");
     setConvertLog("");
     setAnalysis(null);
     try {
-      appendProcess("【规则生成】正在调用大模型生成分析规则 JSON…\n");
-      await postRulesGenerateStream(
-        selectedId,
-        { focus_points: focusPoints, focus_note: "" },
-        (ev) => {
-          if (ev.type === "delta" && typeof ev.text === "string") appendProcess(ev.text);
-          if (ev.type === "final") appendProcess("\n【规则生成】已完成并保存。\n");
-        },
-      );
+      appendProcess("【一键分析】文档转换 → 索引 → 大模型审查（按所选关注点）…\n");
 
       appendBackend("【docs2md】开始转换…\n");
-      await waitConvertStream(selectedId, (line) => appendBackend(line));
+      await new Promise<void>((resolve, reject) => {
+        const stop = openConvertStream(
+          selectedId,
+          (ev) => {
+            if (ev.type === "log" && typeof ev.text === "string") {
+              appendBackend(ev.text + "\n");
+            }
+            if (ev.type === "complete") {
+              stop();
+              stopConvertRef.current = null;
+              resolve();
+            }
+            if (ev.type === "error") {
+              stop();
+              stopConvertRef.current = null;
+              reject(new Error(String(ev.message)));
+            }
+          },
+          (e) => {
+            stop();
+            stopConvertRef.current = null;
+            reject(e);
+          },
+        );
+        stopConvertRef.current = () => {
+          stop();
+          stopConvertRef.current = null;
+          resolve();
+        };
+      });
+      if (terminatedRef.current) return;
       appendBackend("【docs2md】转换完成。\n");
 
       appendBackend("【索引】正在将 Markdown 写入索引与分块…\n");
       const idx = await apiJson<{ indexed_documents: number }>(`/api/v1/projects/${selectedId}/index-md`, { method: "POST" });
       appendBackend(`【索引】完成，已索引 ${idx.indexed_documents} 个文档。\n`);
+      if (terminatedRef.current) return;
 
-      appendProcess("\n【大模型分析】开始流式输出…\n");
-      const fin = await waitAnalyzeStream(selectedId, chunkLimit, (t) => appendProcess(t));
+      appendProcess("\n【大模型分析】按关注点审查，开始流式输出…\n");
+      const analyzeAbort = new AbortController();
+      analyzeAbortRef.current = analyzeAbort;
+      const fin = await new Promise<{ analysis: unknown; raw: string | null }>((resolve, reject) => {
+        let settled = false;
+        const safeResolve = (v: { analysis: unknown; raw: string | null }) => {
+          if (settled) return;
+          settled = true;
+          analyzeAbortRef.current = null;
+          resolve(v);
+        };
+        const safeReject = (e: Error) => {
+          if (settled) return;
+          settled = true;
+          analyzeAbortRef.current = null;
+          reject(e);
+        };
+        stopAnalyzeRef.current = () => {
+          analyzeAbort.abort();
+          safeResolve({ analysis: null, raw: null });
+        };
+        postAnalyzeStream(
+          selectedId,
+          { chunk_limit: chunkLimit, focus_points: focusPoints },
+          (ev) => {
+            if (ev.type === "delta" && typeof ev.text === "string") {
+              appendProcess(ev.text);
+            }
+            if (ev.type === "final") {
+              safeResolve({
+                analysis: ev.analysis ?? null,
+                raw: typeof ev.raw === "string" ? ev.raw : null,
+              });
+            }
+            if (ev.type === "error") {
+              safeReject(new Error(String(ev.message)));
+            }
+          },
+          analyzeAbort.signal,
+        ).catch((e) => {
+          if (settled) return;
+          if ((e as Error)?.name === "AbortError") {
+            safeResolve({ analysis: null, raw: null });
+            return;
+          }
+          safeReject(e instanceof Error ? e : new Error(String(e)));
+        });
+      });
+      if (terminatedRef.current) return;
       if (fin.analysis && typeof fin.analysis === "object") {
         setAnalysis(fin.analysis as { title?: string; blocks?: Block[] });
       } else if (fin.raw) {
@@ -332,6 +422,9 @@ export default function App() {
       }
       message.success("全流程完成");
     } catch (e) {
+      if ((e as Error)?.name === "AbortError" || terminatedRef.current) {
+        return;
+      }
       const msg = String((e as Error).message);
       appendProcess(`\n[error] ${msg}\n`);
       appendBackend(`\n[error] ${msg}\n`);
@@ -339,6 +432,9 @@ export default function App() {
       message.error(msg);
     } finally {
       setPipelineRunning(false);
+      analyzeAbortRef.current = null;
+      stopConvertRef.current = null;
+      stopAnalyzeRef.current = null;
     }
   };
 
@@ -373,23 +469,23 @@ export default function App() {
       <Text type="secondary">选择目录后自动加载项目并开始一键分析。</Text>
       <Divider />
 
-      <Card style={{ marginBottom: 16 }}>
-        <Space direction="vertical" style={{ width: "100%" }} size={10}>
-          {rulesMdError ? (
-            <Alert
-              type="error"
-              showIcon
-              message={`rules.md 格式异常：${rulesMdError}`}
-              description="系统已自动回退到数据库中的上次有效设置。请修复 rules.md 后刷新页面，或在设置页保存一次。"
-            />
-          ) : null}
-          <Space wrap>
-            <Button type="primary" loading={pickLoading} disabled={!nativePickerAvailable} onClick={onPickDirectory}>
-              选择项目
-            </Button>
-            {pickedRootPath ? <Text code>{pickedRootPath}</Text> : <Text type="secondary">未选择项目路径</Text>}
-          </Space>
-          {selected ? <Text>{`已识别项目：${selected.name}`}</Text> : <Text type="secondary">选择项目目录</Text>}
+      <Space direction="vertical" style={{ width: "100%" }} size={10}>
+        {rulesMdError ? (
+          <Alert
+            type="error"
+            showIcon
+            message={`rules.md 格式异常：${rulesMdError}`}
+            description="系统已自动回退到数据库中的上次有效设置。请修复 rules.md 后刷新页面，或在设置页保存一次。"
+          />
+        ) : null}
+        <Space wrap>
+          <Button type="primary" loading={pickLoading} disabled={!nativePickerAvailable} onClick={onPickDirectory}>
+            选择项目
+          </Button>
+          {pickedRootPath ? <Text code>{pickedRootPath}</Text> : <Text type="secondary">未选择项目路径</Text>}
+        </Space>
+        {selected ? <Text>{`已识别项目：${selected.name}`}</Text> : <Text type="secondary">选择项目目录</Text>}
+        <Space wrap align="center">
           <Select
             mode="multiple"
             allowClear
@@ -418,29 +514,32 @@ export default function App() {
                 />
               }
             >
-              <Button icon={<InfoCircleOutlined />}>组合建议 Tips</Button>
+              <Button size="small" icon={<InfoCircleOutlined />}>
+                组合建议
+              </Button>
             </Popover>
           ) : null}
-          <Space wrap>
-            <Button type="primary" loading={pipelineRunning} onClick={runFullPipeline} disabled={selectedId == null}>
-              开始分析
-            </Button>
-            <Button onClick={() => setLogOpen(true)}>后台日志</Button>
-            <Button onClick={() => setPreviewOpen(true)} disabled={!analysis}>
-              结构化预览
-            </Button>
-            <Button onClick={exportDocx} disabled={selectedId == null || !analysis}>
-              导出 docx（epic-doc）
-            </Button>
-          </Space>
         </Space>
-        <div style={{ marginTop: 12 }}>
-          {pipelineRunning ? <Text type="secondary">分析进行中…（可滚动查看实时输出）</Text> : null}
-          <div className="raw-stream stream-log process-stream" style={{ minHeight: 160 }}>
-            {renderProcessStream(streamText)}
-          </div>
-        </div>
-      </Card>
+        <Space wrap>
+          <Button type="primary" loading={pipelineRunning} onClick={runFullPipeline} disabled={selectedId == null}>
+            开始分析
+          </Button>
+          <Button danger onClick={stopPipeline} disabled={!pipelineRunning}>
+            终止流程
+          </Button>
+          <Button onClick={() => setLogOpen(true)}>后台日志</Button>
+          <Button onClick={() => setPreviewOpen(true)} disabled={!analysis}>
+            结构化预览
+          </Button>
+          <Button onClick={exportDocx} disabled={selectedId == null || !analysis}>
+            导出 docx（epic-doc）
+          </Button>
+        </Space>
+      </Space>
+      <div style={{ marginTop: 12, marginBottom: 16 }}>
+        {pipelineRunning ? <Text type="secondary">分析进行中…（可滚动查看实时输出）</Text> : null}
+        <div className="raw-stream stream-log process-stream">{renderProcessStream(streamText)}</div>
+      </div>
 
       <Modal title="设置" open={settingsOpen} onOk={saveSettings} onCancel={() => setSettingsOpen(false)} width={860} okText="保存">
         <Space direction="vertical" style={{ width: "100%", fontSize: 12 }} size={12}>
