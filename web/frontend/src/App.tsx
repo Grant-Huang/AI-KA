@@ -75,7 +75,7 @@ export default function App() {
   const stopAnalyzeRef = useRef<(() => void) | null>(null);
   const analyzeAbortRef = useRef<AbortController | null>(null);
   const terminatedRef = useRef(false);
-  const lastDeltaRef = useRef<string>("");
+  const deltaAccRef = useRef<string>(""); // accumulated model-output text used for dedup
 
   const loadProjects = useCallback(async () => {
     const data = await apiJson<{ projects: Project[] }>("/api/v1/projects");
@@ -235,23 +235,23 @@ export default function App() {
   };
 
   const appendProcess = (s: string) => setStreamText((prev) => prev + s);
-  const appendBackend = (s: string) => setConvertLog((prev) => prev + s);
-  const appendProcessAdaptive = (incoming: string) => {
-    const text = String(incoming || "");
-    if (!text) return;
-    const prevDelta = lastDeltaRef.current;
-    if (text === prevDelta) return;
-    // 兼容两类网关：
-    // 1) 增量流：每次只返回新增 token（直接追加）
-    // 2) 累计流：每次返回从开头累计到当前的完整文本（只追加差量）
-    if (prevDelta && text.startsWith(prevDelta)) {
-      const suffix = text.slice(prevDelta.length);
-      if (suffix) appendProcess(suffix);
-    } else {
-      appendProcess(text);
+  const appendProcessDelta = (piece: string) => {
+    const p = String(piece || "");
+    if (!p) return;
+    const acc = deltaAccRef.current;
+    // Cumulative: gateway resent the full model output so far; append only the new suffix.
+    if (acc && p.startsWith(acc)) {
+      const delta = p.slice(acc.length);
+      if (delta) { deltaAccRef.current += delta; appendProcess(delta); }
+      return;
     }
-    lastDeltaRef.current = text;
+    // Already seen: accumulated text already starts with (or equals) this piece — skip.
+    if (acc && acc.startsWith(p)) return;
+    // Incremental: genuine new content.
+    deltaAccRef.current += p;
+    appendProcess(p);
   };
+  const appendBackend = (s: string) => setConvertLog((prev) => prev + s);
   const renderProcessStream = (text: string) => {
     const chunks: Array<{ type: "think" | "text"; content: string }> = [];
     const re = /<think>([\s\S]*?)<\/think>/g;
@@ -337,8 +337,8 @@ export default function App() {
     }
     setPipelineRunning(true);
     terminatedRef.current = false;
-    lastDeltaRef.current = "";
     setStreamText("");
+    deltaAccRef.current = "";
     setConvertLog("");
     setAnalysis(null);
     try {
@@ -409,7 +409,7 @@ export default function App() {
           { chunk_limit: chunkLimit, focus_points: focusPoints },
           (ev) => {
             if (ev.type === "delta" && typeof ev.text === "string") {
-              appendProcessAdaptive(ev.text);
+              appendProcessDelta(ev.text);
             }
             if (ev.type === "final") {
               safeResolve({
