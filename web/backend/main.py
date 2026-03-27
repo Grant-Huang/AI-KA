@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Iterator
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from aika import db as dbm
 from aika.epic_doc import EpicDocError, generate_docx
 from aika.indexer import sync_project_md_root
+from aika.project_layout import detect_project_layout
 from aika.llm import LLMConfig, LLMError, get_provider
 from aika.paths import db_path
 
@@ -101,6 +102,17 @@ def pick_directory(request: Request) -> JSONResponse:
     return JSONResponse(ok({"path": validated.as_posix()}))
 
 
+@app.post("/api/v1/fs/detect-projects")
+def detect_projects(payload: dict[str, Any]) -> JSONResponse:
+    root_path = str(payload.get("root_path") or "").strip()
+    try:
+        validated = validate_project_root(root_path)
+    except PathValidationError as e:
+        return JSONResponse(err(str(e)), status_code=400)
+    layout = detect_project_layout(validated)
+    return JSONResponse(ok(layout))
+
+
 @app.post("/api/v1/projects")
 def create_project(payload: dict[str, Any]) -> JSONResponse:
     name = str(payload.get("name") or "").strip()
@@ -137,6 +149,35 @@ def list_projects() -> JSONResponse:
             }
         )
     )
+
+
+@app.patch("/api/v1/projects/{project_id}")
+def patch_project(project_id: int, payload: dict[str, Any]) -> JSONResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    new_root = payload.get("root_path")
+    new_name = payload.get("name")
+    if new_root is not None:
+        try:
+            validated = validate_project_root(str(new_root).strip())
+        except PathValidationError as e:
+            return JSONResponse(err(str(e)), status_code=400)
+        dbm.clear_project_index_state(conn, project_id)
+        dbm.update_project_root(conn, project_id, validated.as_posix())
+    if new_name is not None:
+        name = str(new_name).strip()
+        if not name:
+            return JSONResponse(err("name is empty"), status_code=400)
+        existing = dbm.get_project_by_name(conn, name)
+        if existing and existing.id != project_id:
+            return JSONResponse(err("project name already exists"), status_code=409)
+        dbm.update_project_name(conn, project_id, name)
+    prj2 = dbm.get_project_by_id(conn, project_id)
+    if prj2 is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    return JSONResponse(ok({"id": prj2.id, "name": prj2.name, "root_path": prj2.root_path}))
 
 
 @app.get("/api/v1/projects/{project_id}")
@@ -221,19 +262,9 @@ def _coerce_rules_obj(obj: Any, focus_points: list[str], focus_note: str) -> dic
     return {"goal": goal, "dimensions": dimensions_clean, "style": style}
 
 
-@app.post("/api/v1/projects/{project_id}/rules/generate")
-def generate_rules(project_id: int, payload: dict[str, Any]) -> JSONResponse:
-    conn = _conn()
-    prj = dbm.get_project_by_id(conn, project_id)
-    if prj is None:
-        return JSONResponse(err("project not found"), status_code=404)
-
-    points_raw = payload.get("focus_points")
-    focus_points = [str(x).strip() for x in (points_raw if isinstance(points_raw, list) else []) if str(x).strip()]
-    focus_note = str(payload.get("focus_note") or "").strip()
-    if not focus_points and not focus_note:
-        return JSONResponse(err("focus_points or focus_note is required"), status_code=400)
-
+def _rules_generate_prompts(
+    prj: Any, focus_points: list[str], focus_note: str
+) -> tuple[str, str, LLMConfig, Any]:
     st = get_settings()
     cfg = LLMConfig(
         provider=st.llm_provider,
@@ -257,18 +288,73 @@ def generate_rules(project_id: int, payload: dict[str, Any]) -> JSONResponse:
         "2) goal 一句话且可执行；\n"
         "3) 输出必须是合法 JSON。"
     )
+    return system, user, cfg, provider
+
+
+def _rules_from_llm_raw(raw: str, focus_points: list[str], focus_note: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(_clean_json_text(raw))
+    except json.JSONDecodeError:
+        parsed = {}
+    return _coerce_rules_obj(parsed, focus_points=focus_points, focus_note=focus_note)
+
+
+@app.post("/api/v1/projects/{project_id}/rules/generate")
+def generate_rules(project_id: int, payload: dict[str, Any]) -> JSONResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+
+    points_raw = payload.get("focus_points")
+    focus_points = [str(x).strip() for x in (points_raw if isinstance(points_raw, list) else []) if str(x).strip()]
+    focus_note = str(payload.get("focus_note") or "").strip()
+    if not focus_points and not focus_note:
+        return JSONResponse(err("focus_points or focus_note is required"), status_code=400)
+
+    system, user, cfg, provider = _rules_generate_prompts(prj, focus_points, focus_note)
     try:
         chunks: list[str] = []
         for piece in provider.chat_stream(system=system, user=user, config=cfg):
             chunks.append(piece)
         raw = "".join(chunks)
-        parsed = json.loads(_clean_json_text(raw))
-    except (LLMError, json.JSONDecodeError):
-        parsed = {}
+    except LLMError as e:
+        return JSONResponse(err(str(e)), status_code=502)
 
-    rules = _coerce_rules_obj(parsed, focus_points=focus_points, focus_note=focus_note)
+    rules = _rules_from_llm_raw(raw, focus_points=focus_points, focus_note=focus_note)
     dbm.update_project_rules(conn, project_id, json.dumps(rules, ensure_ascii=False))
     return JSONResponse(ok({"rules": rules, "saved": True}))
+
+
+@app.post("/api/v1/projects/{project_id}/rules/generate/stream")
+def generate_rules_stream(project_id: int, payload: dict[str, Any]) -> StreamingResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        raise HTTPException(status_code=404, detail="project not found")
+
+    points_raw = payload.get("focus_points")
+    focus_points = [str(x).strip() for x in (points_raw if isinstance(points_raw, list) else []) if str(x).strip()]
+    focus_note = str(payload.get("focus_note") or "").strip()
+    if not focus_points and not focus_note:
+        raise HTTPException(status_code=400, detail="focus_points or focus_note is required")
+
+    system, user, cfg, provider = _rules_generate_prompts(prj, focus_points, focus_note)
+
+    def gen() -> Iterator[str]:
+        try:
+            acc: list[str] = []
+            for piece in provider.chat_stream(system=system, user=user, config=cfg):
+                acc.append(piece)
+                yield _sse_line({"type": "delta", "text": piece})
+            raw = "".join(acc)
+            rules = _rules_from_llm_raw(raw, focus_points=focus_points, focus_note=focus_note)
+            dbm.update_project_rules(conn, project_id, json.dumps(rules, ensure_ascii=False))
+            yield _sse_line({"type": "final", "rules": rules, "saved": True})
+        except LLMError as e:
+            yield _sse_line({"type": "error", "message": str(e)})
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 def _normalize_analysis_for_ui(obj: Any) -> dict[str, Any]:

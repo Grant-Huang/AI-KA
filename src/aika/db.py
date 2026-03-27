@@ -215,6 +215,29 @@ def update_project_rules(conn: sqlite3.Connection, project_id: int, rules_json: 
     conn.commit()
 
 
+def clear_project_index_state(conn: sqlite3.Connection, project_id: int) -> None:
+    """Remove annotations, documents and chunks for a project (e.g. after root_path change)."""
+    conn.execute("DELETE FROM annotations WHERE project_id=?", (project_id,))
+    conn.execute("DELETE FROM documents WHERE project_id=?", (project_id,))
+    conn.commit()
+
+
+def update_project_root(conn: sqlite3.Connection, project_id: int, root_path: str) -> None:
+    conn.execute(
+        "UPDATE projects SET root_path=?, updated_at=datetime('now') WHERE id=?",
+        (root_path, project_id),
+    )
+    conn.commit()
+
+
+def update_project_name(conn: sqlite3.Connection, project_id: int, name: str) -> None:
+    conn.execute(
+        "UPDATE projects SET name=?, updated_at=datetime('now') WHERE id=?",
+        (name, project_id),
+    )
+    conn.commit()
+
+
 def delete_project_documents(conn: sqlite3.Connection, project_id: int) -> None:
     conn.execute("DELETE FROM documents WHERE project_id=?", (project_id,))
     conn.commit()

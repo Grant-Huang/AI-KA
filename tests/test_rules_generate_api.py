@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,7 @@ def test_generate_rules_from_focus_points(monkeypatch: pytest.MonkeyPatch, tmp_p
     src.mkdir()
     create = client.post(
         "/api/v1/projects",
-        json={"name": "p-rules", "root_path": str(src)},
+        json={"name": f"p-rules-{uuid.uuid4().hex[:8]}", "root_path": str(src)},
     )
     assert create.status_code == 200
     project_id = create.json()["data"]["id"]
