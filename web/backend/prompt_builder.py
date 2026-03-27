@@ -12,7 +12,8 @@ DEFAULT_RULES: dict[str, Any] = {
 
 
 BLOCK_SCHEMA_HINT = """
-你必须只输出一个 JSON 对象（不要 Markdown 围栏），结构如下：
+【强制输出格式】只能输出一个合法 JSON 对象，不得包含任何前缀文字、后缀说明、注释或 Markdown 围栏（```json ... ```）。
+输出必须能被 json.loads() 直接解析，结构如下：
 {
   "title": "可选标题",
   "blocks": [
@@ -25,6 +26,7 @@ BLOCK_SCHEMA_HINT = """
     {"type": "callout", "style": "info|warning|danger|success", "title": "可选", "text": "提示内容"}
   ]
 }
+第一个字符必须是 {，最后一个字符必须是 }，JSON 之外不能有任何其他内容。
 """
 
 
