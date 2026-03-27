@@ -13,7 +13,9 @@ class Docs2MdError(RuntimeError):
     pass
 
 
-def _vl_api_key_present() -> bool:
+def _vl_api_key_present(explicit_key: str | None = None) -> bool:
+    if (explicit_key or "").strip():
+        return True
     keys = (
         "AIKA_VL_API_KEY",
         "VL_API_KEY",
@@ -38,6 +40,8 @@ def run_convert_directory(
     input_dir: Path,
     output_dir: Path,
     format_: str = "md",
+    vl_api_key: str | None = None,
+    vl_model: str | None = None,
 ) -> Iterator[str]:
     """
     Stream lines from docs2md stdout/stderr (merged).
@@ -59,7 +63,16 @@ def run_convert_directory(
         cmd = [sys.executable, "-m", "docs2md.cli", str(input_dir), "-o", str(output_dir), "--format", format_]
 
     child_env = dict(os.environ)
-    if not _vl_api_key_present():
+    if (vl_api_key or "").strip():
+        child_env["AIKA_VL_API_KEY"] = str(vl_api_key).strip()
+        child_env["VL_API_KEY"] = str(vl_api_key).strip()
+        child_env["OPENAI_VL_API_KEY"] = str(vl_api_key).strip()
+        child_env["QWEN_VL_API_KEY"] = str(vl_api_key).strip()
+    if (vl_model or "").strip():
+        child_env["AIKA_VL_MODEL"] = str(vl_model).strip()
+        child_env["QWEN_VL_MODEL"] = str(vl_model).strip()
+
+    if not _vl_api_key_present(vl_api_key):
         # Best-effort flag: if docs2md supports these envs, image/VL parsing will be skipped.
         child_env["DOCS2MD_DISABLE_IMAGE_PARSE"] = "1"
         child_env["DOCS2MD_SKIP_IMAGE"] = "1"

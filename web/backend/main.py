@@ -58,6 +58,9 @@ DEFAULT_FOCUS_POINTS: list[dict[str, str]] = [
     {"id": "data", "name": "数据一致性", "prompt": "关注关键主数据、口径与跨系统一致性问题。"},
 ]
 DEFAULT_CHUNK_LIMIT = 40
+DEFAULT_TEXT_MODEL = "qwen3"
+DEFAULT_VL_MODEL = "qwen3-vl-plus"
+DEFAULT_TEXT_PROVIDER = "openai_compatible"
 
 
 @app.get("/api/v1/health")
@@ -70,7 +73,11 @@ def _rules_md_path() -> Path:
 
 
 def _build_settings_payload(conn: Any) -> dict[str, Any]:
-    return {"focus_points": _get_focus_points(conn), "chunk_limit": _get_chunk_limit(conn)}
+    return {
+        "focus_points": _get_focus_points(conn),
+        "chunk_limit": _get_chunk_limit(conn),
+        "llm_settings": _get_llm_settings(conn),
+    }
 
 
 def _read_settings_from_rules_md() -> tuple[dict[str, Any] | None, str | None]:
@@ -78,56 +85,41 @@ def _read_settings_from_rules_md() -> tuple[dict[str, Any] | None, str | None]:
     if not p.is_file():
         return None, None
     text = p.read_text(encoding="utf-8", errors="replace")
+    return _read_settings_from_rules_text(text)
+
+
+def _read_settings_from_rules_text(text: str) -> tuple[dict[str, Any] | None, str | None]:
     lines = text.splitlines()
 
-    chunk_limit: int | None = None
-    focus_rows: list[tuple[str, str]] = []
-    prompts: dict[str, str] = {}
-
-    in_table = False
+    focus_points: list[dict[str, str]] = []
     i = 0
     while i < len(lines):
         line = lines[i].strip()
-        if line.startswith("- chunk_limit:"):
-            raw = line.split(":", 1)[1].strip()
-            try:
-                val = int(raw)
-            except ValueError:
-                val = None
-            if val is not None and 1 <= val <= 500:
-                chunk_limit = val
-        if line == "| id | name |":
-            in_table = True
-            i += 2  # skip separator
-            continue
-        if in_table:
-            if not line.startswith("|"):
-                in_table = False
+        if line.startswith("### focus:"):
+            rest = line[len("### focus:") :].strip()
+            if "|" in rest:
+                pid, name = [x.strip() for x in rest.split("|", 1)]
             else:
-                cells = [x.strip() for x in line.strip("|").split("|")]
-                if len(cells) >= 2 and cells[0] and cells[1]:
-                    focus_rows.append((cells[0], cells[1]))
-        if line.startswith("### prompt:"):
-            pid = line.split(":", 1)[1].strip()
+                pid = rest
+                name = rest
             j = i + 1
             buf: list[str] = []
             while j < len(lines):
                 nxt = lines[j]
-                if nxt.strip().startswith("### prompt:"):
+                if nxt.strip().startswith("### focus:"):
                     break
                 buf.append(nxt)
                 j += 1
-            prompts[pid] = "\n".join(buf).strip()
+            prompt = "\n".join(buf).strip()
+            if pid and name:
+                focus_points.append({"id": pid, "name": name, "prompt": prompt})
             i = j
             continue
         i += 1
 
-    if not focus_rows:
-        return None, "rules.md 格式无效：未找到“关注点列表”表格（| id | name |）"
-    focus_points = [{"id": fid, "name": name, "prompt": prompts.get(fid, "")} for fid, name in focus_rows]
+    if not focus_points:
+        return None, "rules.md 格式无效：未找到“关注点块”（格式：### focus:<id> | <name>）"
     out: dict[str, Any] = {"focus_points": focus_points}
-    if chunk_limit is not None:
-        out["chunk_limit"] = chunk_limit
     return out, None
 
 
@@ -136,12 +128,8 @@ def _write_settings_to_rules_md(payload: dict[str, Any]) -> None:
     focus_points = payload.get("focus_points")
     if not isinstance(focus_points, list):
         focus_points = DEFAULT_FOCUS_POINTS
-    chunk_limit = payload.get("chunk_limit")
-    if not isinstance(chunk_limit, int):
-        chunk_limit = DEFAULT_CHUNK_LIMIT
 
-    table_lines = ["| id | name |", "| --- | --- |"]
-    prompt_lines: list[str] = []
+    blocks: list[str] = []
     for item in focus_points:
         if not isinstance(item, dict):
             continue
@@ -150,18 +138,13 @@ def _write_settings_to_rules_md(payload: dict[str, Any]) -> None:
         prm = str(item.get("prompt") or "").strip()
         if not fid or not name:
             continue
-        table_lines.append(f"| {fid} | {name} |")
-        prompt_lines.append(f"### prompt:{fid}\n{prm}\n")
+        blocks.append(f"### focus:{fid} | {name}\n{prm}\n")
 
     md = (
         "# 分析规则配置\n\n"
-        "该文件由 AI-KA 自动维护，用于保存关注点与 chunk 上限。\n\n"
-        "## chunk 设置\n\n"
-        f"- chunk_limit: {chunk_limit}\n\n"
-        "## 关注点列表\n\n"
-        + "\n".join(table_lines)
-        + "\n\n## 关注点 Prompt 详情\n\n"
-        + "\n".join(prompt_lines)
+        "该文件由 AI-KA 自动维护，用于保存关注点及其 Prompt。\n\n"
+        "## 关注点块\n\n"
+        + "\n".join(blocks)
     )
     p.write_text(md, encoding="utf-8")
 
@@ -193,6 +176,69 @@ def _get_chunk_limit(conn: Any) -> int:
     if isinstance(v, int) and 1 <= v <= 500:
         return v
     return DEFAULT_CHUNK_LIMIT
+
+
+def _get_llm_api_key_from_db(conn: Any) -> str | None:
+    v = dbm.get_app_setting_json(conn, "llm_api_key")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    return None
+
+
+def _get_llm_api_key_effective(conn: Any) -> str | None:
+    v = _get_llm_api_key_from_db(conn)
+    if v:
+        return v
+    return get_settings().llm_api_key
+
+
+def _get_text_model(conn: Any) -> str:
+    v = dbm.get_app_setting_json(conn, "llm_text_model")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    return DEFAULT_TEXT_MODEL
+
+
+def _get_text_provider(conn: Any) -> str:
+    v = dbm.get_app_setting_json(conn, "llm_text_provider")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    st = get_settings()
+    return (st.llm_provider or "").strip() or DEFAULT_TEXT_PROVIDER
+
+
+def _get_text_base_url(conn: Any) -> str:
+    v = dbm.get_app_setting_json(conn, "llm_text_base_url")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    return str(get_settings().llm_base_url or "").strip()
+
+
+def _get_vl_model(conn: Any) -> str:
+    v = dbm.get_app_setting_json(conn, "llm_vl_model")
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    return DEFAULT_VL_MODEL
+
+
+def _get_llm_settings(conn: Any) -> dict[str, Any]:
+    return {
+        "text_provider": _get_text_provider(conn),
+        "text_base_url": _get_text_base_url(conn),
+        "text_model": _get_text_model(conn),
+        "vl_model": _get_vl_model(conn),
+        "has_api_key": bool(_get_llm_api_key_effective(conn)),
+    }
+
+
+def _build_text_llm_config(conn: Any, timeout_s: float) -> LLMConfig:
+    return LLMConfig(
+        provider=_get_text_provider(conn),
+        model=_get_text_model(conn),
+        base_url=_get_text_base_url(conn) or None,
+        api_key=_get_llm_api_key_effective(conn),
+        timeout_s=timeout_s,
+    )
 
 
 def _client_is_localhost(request: Request) -> bool:
@@ -305,8 +351,55 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
         if not out:
             return JSONResponse(err("focus_points cannot be empty"), status_code=400)
         dbm.set_app_setting_json(conn, "focus_points", out)
+    if "llm_settings" in payload:
+        raw_llm = payload.get("llm_settings")
+        if not isinstance(raw_llm, dict):
+            return JSONResponse(err("llm_settings must be an object"), status_code=400)
+        text_provider = str(raw_llm.get("text_provider") or "").strip() or DEFAULT_TEXT_PROVIDER
+        text_base_url = str(raw_llm.get("text_base_url") or "").strip()
+        text_model = str(raw_llm.get("text_model") or "").strip() or DEFAULT_TEXT_MODEL
+        vl_model = str(raw_llm.get("vl_model") or "").strip() or DEFAULT_VL_MODEL
+        dbm.set_app_setting_json(conn, "llm_text_provider", text_provider)
+        dbm.set_app_setting_json(conn, "llm_text_base_url", text_base_url or None)
+        dbm.set_app_setting_json(conn, "llm_text_model", text_model)
+        dbm.set_app_setting_json(conn, "llm_vl_model", vl_model)
+    if "llm_api_key" in payload:
+        raw_key = payload.get("llm_api_key")
+        key = str(raw_key or "").strip()
+        if key:
+            dbm.set_app_setting_json(conn, "llm_api_key", key)
+        else:
+            dbm.set_app_setting_json(conn, "llm_api_key", None)
     current = _build_settings_payload(conn)
     _write_settings_to_rules_md(current)
+    current["rules_md_error"] = None
+    return JSONResponse(ok(current))
+
+
+@app.post("/api/v1/settings/rules-md/validate")
+def validate_rules_md_payload(payload: dict[str, Any]) -> JSONResponse:
+    text = str(payload.get("text") or "")
+    parsed, parse_error = _read_settings_from_rules_text(text)
+    if parse_error:
+        return JSONResponse(err(parse_error), status_code=400)
+    fps = (parsed or {}).get("focus_points", [])
+    return JSONResponse(ok({"focus_points": fps, "count": len(fps)}))
+
+
+@app.post("/api/v1/settings/rules-md/import")
+def import_rules_md_payload(payload: dict[str, Any]) -> JSONResponse:
+    text = str(payload.get("text") or "")
+    parsed, parse_error = _read_settings_from_rules_text(text)
+    if parse_error:
+        return JSONResponse(err(parse_error), status_code=400)
+    focus_points = (parsed or {}).get("focus_points")
+    if not isinstance(focus_points, list) or not focus_points:
+        return JSONResponse(err("rules.md 中未解析到有效关注点"), status_code=400)
+
+    conn = _conn()
+    dbm.set_app_setting_json(conn, "focus_points", focus_points)
+    _rules_md_path().write_text(text, encoding="utf-8")
+    current = _build_settings_payload(conn)
     current["rules_md_error"] = None
     return JSONResponse(ok(current))
 
@@ -489,14 +582,7 @@ def _coerce_rules_obj(obj: Any, focus_points: list[str], focus_note: str) -> dic
 def _rules_generate_prompts(
     conn: Any, prj: Any, focus_points: list[str], focus_note: str
 ) -> tuple[str, str, LLMConfig, Any]:
-    st = get_settings()
-    cfg = LLMConfig(
-        provider=st.llm_provider,
-        model=st.llm_model,
-        base_url=st.llm_base_url,
-        api_key=st.llm_api_key,
-        timeout_s=180.0,
-    )
+    cfg = _build_text_llm_config(conn, timeout_s=180.0)
     provider = get_provider(cfg.provider)
     fp_defs = _get_focus_points(conn)
     prompt_by_name = {x["name"]: x.get("prompt", "") for x in fp_defs}
@@ -624,7 +710,13 @@ def convert_md_stream(project_id: int) -> StreamingResponse:
 
     def gen():
         try:
-            for line in run_convert_directory(input_dir=src, output_dir=out_dir, format_="md"):
+            for line in run_convert_directory(
+                input_dir=src,
+                output_dir=out_dir,
+                format_="md",
+                vl_api_key=_get_llm_api_key_effective(conn),
+                vl_model=_get_vl_model(conn),
+            ):
                 yield _sse_line({"type": "log", "text": line.rstrip("\n")})
             yield _sse_line({"type": "complete", "md_out": str(out_dir)})
         except Docs2MdError as e:
@@ -665,14 +757,7 @@ def analyze_stream(
     if not texts:
         raise HTTPException(status_code=400, detail="no chunks; run index-md after convert-md")
 
-    st = get_settings()
-    cfg = LLMConfig(
-        provider=st.llm_provider,
-        model=st.llm_model,
-        base_url=st.llm_base_url,
-        api_key=st.llm_api_key,
-        timeout_s=300.0,
-    )
+    cfg = _build_text_llm_config(conn, timeout_s=300.0)
     system = build_system_prompt(rules_dict or {})
     user = build_user_prompt(chunk_texts=texts)
 

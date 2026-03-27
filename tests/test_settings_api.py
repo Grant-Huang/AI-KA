@@ -20,6 +20,11 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert "focus_points" in body["data"]
     assert "chunk_limit" in body["data"]
     assert "rules_md_error" in body["data"]
+    assert body["data"]["llm_settings"]["text_model"] == "qwen3"
+    assert body["data"]["llm_settings"]["vl_model"] == "qwen3-vl-plus"
+    assert body["data"]["llm_settings"]["text_provider"] == "openai_compatible"
+    assert body["data"]["llm_settings"]["text_base_url"] == ""
+    assert body["data"]["llm_settings"]["has_api_key"] is False
 
     payload = {
         "chunk_limit": 55,
@@ -27,6 +32,13 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
             {"id": "fp1", "name": "关注A", "prompt": "请重点分析A"},
             {"id": "fp2", "name": "关注B", "prompt": "请重点分析B"},
         ],
+        "llm_settings": {
+            "text_provider": "openai_compatible",
+            "text_base_url": "https://api.minimax.chat",
+            "text_model": "MiniMax-M2.5",
+            "vl_model": "qwen3-vl-plus",
+        },
+        "llm_api_key": "sk-test-123",
     }
     s = client.post("/api/v1/settings", json=payload)
     assert s.status_code == 200
@@ -34,12 +46,17 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert b2["chunk_limit"] == 55
     assert len(b2["focus_points"]) == 2
     assert b2["rules_md_error"] is None
+    assert b2["llm_settings"]["text_provider"] == "openai_compatible"
+    assert b2["llm_settings"]["text_base_url"] == "https://api.minimax.chat"
+    assert b2["llm_settings"]["text_model"] == "MiniMax-M2.5"
+    assert b2["llm_settings"]["vl_model"] == "qwen3-vl-plus"
+    assert b2["llm_settings"]["has_api_key"] is True
     rules_md = tmp_path / "rules.md"
     assert rules_md.is_file()
     txt = rules_md.read_text(encoding="utf-8")
-    assert "| id | name |" in txt
-    assert "### prompt:fp1" in txt
-    assert "- chunk_limit: 55" in txt
+    assert "## 关注点块" in txt
+    assert "### focus:fp1 | 关注A" in txt
+    assert "chunk_limit" not in txt
     assert "关注A" in txt
 
 
@@ -51,4 +68,45 @@ def test_settings_reports_rules_md_parse_error(monkeypatch: pytest.MonkeyPatch, 
     assert r.status_code == 200
     body = r.json()["data"]
     assert isinstance(body.get("rules_md_error"), str)
-    assert "关注点列表" in body["rules_md_error"]
+    assert "关注点块" in body["rules_md_error"]
+
+
+def test_settings_clear_llm_api_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
+    client = TestClient(app)
+    s1 = client.post(
+        "/api/v1/settings",
+        json={
+            "llm_settings": {"text_provider": "openai_compatible", "text_base_url": "", "text_model": "qwen3", "vl_model": "qwen3-vl-plus"},
+            "llm_api_key": "sk-test-abc",
+        },
+    )
+    assert s1.status_code == 200
+    assert s1.json()["data"]["llm_settings"]["has_api_key"] is True
+
+    s2 = client.post("/api/v1/settings", json={"llm_api_key": ""})
+    assert s2.status_code == 200
+    assert s2.json()["data"]["llm_settings"]["has_api_key"] is False
+
+
+def test_import_rules_md(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
+    client = TestClient(app)
+    text = (
+        "# custom\n\n"
+        "### focus:reqx | 需求扩展\n"
+        "这是扩展需求关注点。\n\n"
+        "### focus:riskx | 风险扩展\n"
+        "这是扩展风险关注点。\n"
+    )
+    v = client.post("/api/v1/settings/rules-md/validate", json={"text": text})
+    assert v.status_code == 200
+    assert v.json()["data"]["count"] == 2
+
+    i = client.post("/api/v1/settings/rules-md/import", json={"text": text})
+    assert i.status_code == 200
+    data = i.json()["data"]
+    assert len(data["focus_points"]) == 2
+    assert data["focus_points"][0]["id"] == "reqx"
+    saved = (tmp_path / "rules.md").read_text(encoding="utf-8")
+    assert "focus:reqx" in saved

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Card, Divider, Input, InputNumber, message, Modal, Select, Space, Spin, Tabs, Typography } from "antd";
+import { QuestionCircleOutlined, SettingOutlined } from "@ant-design/icons";
 import { apiJson, openAnalyzeStream, openConvertStream, postRulesGenerateStream, waitAnalyzeStream, waitConvertStream } from "./api";
 import { BlockRenderer, type Block } from "./BlockRenderer";
 
@@ -7,7 +8,8 @@ const { Text } = Typography;
 
 type Project = { id: number; name: string; root_path: string };
 type FocusPoint = { id: string; name: string; prompt: string };
-type SettingsData = { focus_points: FocusPoint[]; chunk_limit: number; rules_md_error?: string | null };
+type LlmSettings = { text_provider: string; text_base_url: string; text_model: string; vl_model: string; has_api_key?: boolean };
+type SettingsData = { focus_points: FocusPoint[]; chunk_limit: number; llm_settings: LlmSettings; rules_md_error?: string | null };
 type LayoutData = { mode: "single" | "multi"; root_label: string; candidates: { id: string; name: string; path: string }[]; warnings: string[] };
 
 export default function App() {
@@ -29,8 +31,23 @@ export default function App() {
   const [outputTab, setOutputTab] = useState<string>("process");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [settingsDraft, setSettingsDraft] = useState<SettingsData>({ focus_points: [], chunk_limit: 40 });
+  const [settingsDraft, setSettingsDraft] = useState<SettingsData>({
+    focus_points: [],
+    chunk_limit: 40,
+    llm_settings: {
+      text_provider: "openai_compatible",
+      text_base_url: "",
+      text_model: "qwen3",
+      vl_model: "qwen3-vl-plus",
+      has_api_key: false,
+    },
+  });
   const [rulesMdError, setRulesMdError] = useState<string | null>(null);
+  const [llmApiKeyDraft, setLlmApiKeyDraft] = useState("");
+  const [llmApiKeyTouched, setLlmApiKeyTouched] = useState(false);
+  const [focusSelectedIndex, setFocusSelectedIndex] = useState(0);
+  const [newFocusName, setNewFocusName] = useState("");
+  const rulesFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadProjects = useCallback(async () => {
     const data = await apiJson<{ projects: Project[] }>("/api/v1/projects");
@@ -46,7 +63,10 @@ export default function App() {
     setChunkLimit(data.chunk_limit);
     setFocusDefs(data.focus_points);
     setSettingsDraft(data);
+    setFocusSelectedIndex(0);
     setRulesMdError(data.rules_md_error || null);
+    setLlmApiKeyDraft("");
+    setLlmApiKeyTouched(false);
   }, []);
 
   useEffect(() => {
@@ -125,15 +145,68 @@ export default function App() {
     try {
       const data = await apiJson<SettingsData>("/api/v1/settings", {
         method: "POST",
-        body: JSON.stringify(settingsDraft),
+        body: JSON.stringify({
+          ...settingsDraft,
+          ...(llmApiKeyTouched ? { llm_api_key: llmApiKeyDraft } : {}),
+        }),
       });
       setChunkLimit(data.chunk_limit);
       setFocusDefs(data.focus_points);
+      setSettingsDraft(data);
       setRulesMdError(data.rules_md_error || null);
+      setLlmApiKeyDraft("");
+      setLlmApiKeyTouched(false);
       setSettingsOpen(false);
       message.success("设置已保存");
     } catch (e) {
       message.error(String((e as Error).message));
+    }
+  };
+
+  const updateSelectedFocus = (patch: Partial<FocusPoint>) => {
+    setSettingsDraft((s) => {
+      if (!s.focus_points.length) return s;
+      const idx = Math.max(0, Math.min(focusSelectedIndex, s.focus_points.length - 1));
+      const next = [...s.focus_points];
+      next[idx] = { ...next[idx], ...patch };
+      return { ...s, focus_points: next };
+    });
+  };
+
+  const onPickRulesFile = () => {
+    rulesFileInputRef.current?.click();
+  };
+
+  const onRulesFileChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    try {
+      const text = await f.text();
+      const check = await apiJson<{ focus_points: FocusPoint[]; count: number }>("/api/v1/settings/rules-md/validate", {
+        method: "POST",
+        body: JSON.stringify({ text }),
+      });
+      Modal.confirm({
+        title: "确认加载 rules.md",
+        content: `检测通过：共 ${check.count} 个关注点。确认后将覆盖当前关注点并保存 rules.md。`,
+        okText: "确认加载",
+        cancelText: "取消",
+        onOk: async () => {
+          const data = await apiJson<SettingsData>("/api/v1/settings/rules-md/import", {
+            method: "POST",
+            body: JSON.stringify({ text }),
+          });
+          setChunkLimit(data.chunk_limit);
+          setFocusDefs(data.focus_points);
+          setSettingsDraft(data);
+          setFocusSelectedIndex(0);
+          setRulesMdError(data.rules_md_error || null);
+          message.success("rules.md 已加载并保存");
+        },
+      });
+    } catch (err) {
+      message.error(String((err as Error).message));
     }
   };
 
@@ -215,12 +288,8 @@ export default function App() {
           AI-KA ProjectLens
         </Typography.Title>
         <Space>
-          <Button shape="circle" onClick={() => setHelpOpen(true)} title="帮助">
-            !
-          </Button>
-          <Button shape="circle" onClick={() => setSettingsOpen(true)} title="设置">
-            ⚙
-          </Button>
+          <Button shape="circle" icon={<QuestionCircleOutlined />} onClick={() => setHelpOpen(true)} title="帮助" />
+          <Button shape="circle" icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)} title="设置" />
         </Space>
       </Space>
       <Text type="secondary">选择目录后自动加载项目并开始一键分析。</Text>
@@ -345,55 +414,220 @@ export default function App() {
             </div>
           </div>
           <Divider style={{ margin: "8px 0" }} />
-          <Text strong>关注点与对应 Prompt</Text>
-          {settingsDraft.focus_points.map((fp, i) => (
-            <Space key={`${fp.id}-${i}`} direction="vertical" style={{ width: "100%", border: "1px solid #f0f0f0", padding: 10, borderRadius: 8 }}>
+          <div>
+            <Space style={{ width: "100%", justifyContent: "space-between" }}>
+              <Text strong>关注点</Text>
+              <Button size="small" onClick={onPickRulesFile}>
+                加载 rules
+              </Button>
+            </Space>
+            <input ref={rulesFileInputRef} type="file" accept=".md,text/markdown" style={{ display: "none" }} onChange={onRulesFileChosen} />
+            <div style={{ display: "flex", gap: 12, marginTop: 8, alignItems: "stretch" }}>
+              <div style={{ width: 280 }}>
+                <Select
+                  style={{ width: "100%" }}
+                  value={settingsDraft.focus_points[focusSelectedIndex]?.id}
+                  options={settingsDraft.focus_points.map((fp) => ({ value: fp.id, label: fp.name || fp.id }))}
+                  onChange={(v) => {
+                    const idx = settingsDraft.focus_points.findIndex((x) => x.id === v);
+                    if (idx >= 0) setFocusSelectedIndex(idx);
+                  }}
+                />
+                <Space style={{ marginTop: 8 }} wrap>
+                  <Input
+                    placeholder="新增关注点名称"
+                    style={{ width: 170 }}
+                    value={newFocusName}
+                    onChange={(e) => setNewFocusName(e.target.value)}
+                  />
+                  <Button
+                    onClick={() => {
+                      const name = newFocusName.trim();
+                      if (!name) {
+                        message.warning("请先输入关注点名称");
+                        return;
+                      }
+                      setSettingsDraft((s) => {
+                        const id = `custom-${Date.now()}`;
+                        return {
+                          ...s,
+                          focus_points: [...s.focus_points, { id, name, prompt: "" }],
+                        };
+                      });
+                      setFocusSelectedIndex(settingsDraft.focus_points.length);
+                      setNewFocusName("");
+                    }}
+                  >
+                    新增
+                  </Button>
+                  <Button
+                    danger
+                    disabled={!settingsDraft.focus_points.length}
+                    onClick={() => {
+                      if (!settingsDraft.focus_points.length) return;
+                      setSettingsDraft((s) => ({
+                        ...s,
+                        focus_points: s.focus_points.filter((_, idx) => idx !== focusSelectedIndex),
+                      }));
+                      setFocusSelectedIndex((prev) => Math.max(0, prev - 1));
+                    }}
+                  >
+                    删除
+                  </Button>
+                </Space>
+              </div>
+              <div style={{ flex: 1, border: "1px solid #f0f0f0", padding: 10, borderRadius: 8 }}>
+                {settingsDraft.focus_points.length ? (
+                  <Space direction="vertical" style={{ width: "100%" }}>
+                    <Input
+                      placeholder="关注点名称"
+                      value={settingsDraft.focus_points[focusSelectedIndex]?.name}
+                      onChange={(e) => updateSelectedFocus({ name: e.target.value })}
+                    />
+                    <Input.TextArea
+                      rows={8}
+                      placeholder="该关注点对应的提示词（prompt）"
+                      value={settingsDraft.focus_points[focusSelectedIndex]?.prompt}
+                      onChange={(e) => updateSelectedFocus({ prompt: e.target.value })}
+                    />
+                  </Space>
+                ) : (
+                  <Text type="secondary">请先新增一个关注点</Text>
+                )}
+              </div>
+            </div>
+          </div>
+          <Divider style={{ margin: "8px 0" }} />
+          <div>
+            <Text strong>Model</Text>
+            <Space direction="vertical" style={{ width: "100%", marginTop: 8 }} size={8}>
               <Space wrap style={{ width: "100%" }}>
                 <Input
-                  placeholder="关注点名称"
                   style={{ width: 220 }}
-                  value={fp.name}
+                  addonBefore="Provider"
+                  placeholder="openai_compatible"
+                  value={settingsDraft.llm_settings?.text_provider}
                   onChange={(e) =>
-                    setSettingsDraft((s) => {
-                      const next = [...s.focus_points];
-                      next[i] = { ...next[i], name: e.target.value };
-                      return { ...s, focus_points: next };
-                    })
+                    setSettingsDraft((s) => ({
+                      ...s,
+                      llm_settings: {
+                        ...(s.llm_settings || {
+                          text_provider: "openai_compatible",
+                          text_base_url: "",
+                          text_model: "qwen3",
+                          vl_model: "qwen3-vl-plus",
+                        }),
+                        text_provider: e.target.value,
+                      },
+                    }))
                   }
                 />
-                <Button
-                  danger
-                  onClick={() =>
-                    setSettingsDraft((s) => ({ ...s, focus_points: s.focus_points.filter((_, idx) => idx !== i) }))
+                <Input
+                  style={{ width: 360 }}
+                  addonBefore="Text Base URL"
+                  placeholder="https://api.minimax.chat"
+                  value={settingsDraft.llm_settings?.text_base_url}
+                  onChange={(e) =>
+                    setSettingsDraft((s) => ({
+                      ...s,
+                      llm_settings: {
+                        ...(s.llm_settings || {
+                          text_provider: "openai_compatible",
+                          text_base_url: "",
+                          text_model: "qwen3",
+                          vl_model: "qwen3-vl-plus",
+                        }),
+                        text_base_url: e.target.value,
+                      },
+                    }))
                   }
-                >
-                  删除
-                </Button>
+                />
+                <Input
+                  style={{ width: 260 }}
+                  addonBefore="文本模型"
+                  placeholder="qwen3"
+                  value={settingsDraft.llm_settings?.text_model}
+                  onChange={(e) =>
+                    setSettingsDraft((s) => ({
+                      ...s,
+                      llm_settings: {
+                        ...(s.llm_settings || {
+                          text_provider: "openai_compatible",
+                          text_base_url: "",
+                          text_model: "qwen3",
+                          vl_model: "qwen3-vl-plus",
+                        }),
+                        text_model: e.target.value,
+                      },
+                    }))
+                  }
+                />
+                <Input
+                  style={{ width: 320 }}
+                  addonBefore="VL 模型"
+                  placeholder="qwen3-vl-plus"
+                  value={settingsDraft.llm_settings?.vl_model}
+                  onChange={(e) =>
+                    setSettingsDraft((s) => ({
+                      ...s,
+                      llm_settings: {
+                        ...(s.llm_settings || {
+                          text_provider: "openai_compatible",
+                          text_base_url: "",
+                          text_model: "qwen3",
+                          vl_model: "qwen3-vl-plus",
+                        }),
+                        vl_model: e.target.value,
+                      },
+                    }))
+                  }
+                />
               </Space>
-              <Input.TextArea
-                rows={3}
-                placeholder="该关注点对应的提示词（prompt）"
-                value={fp.prompt}
-                onChange={(e) =>
-                  setSettingsDraft((s) => {
-                    const next = [...s.focus_points];
-                    next[i] = { ...next[i], prompt: e.target.value };
-                    return { ...s, focus_points: next };
-                  })
-                }
-              />
+              <Space wrap style={{ width: "100%" }}>
+                <Input.Password
+                  style={{ width: 520 }}
+                  addonBefore="API Key"
+                  placeholder={settingsDraft.llm_settings?.has_api_key ? "已配置（如需更新请粘贴新 Key）" : "粘贴 API Key"}
+                  value={llmApiKeyDraft}
+                  visibilityToggle={false}
+                  autoComplete="off"
+                  onChange={(e) => {
+                    setLlmApiKeyDraft(e.target.value);
+                    setLlmApiKeyTouched(true);
+                  }}
+                  onCopy={(e) => e.preventDefault()}
+                  onCut={(e) => e.preventDefault()}
+                  onKeyDown={(e) => {
+                    const withMeta = e.metaKey || e.ctrlKey;
+                    const k = e.key.toLowerCase();
+                    if (withMeta && (k === "v" || k === "a")) return;
+                    if (withMeta && (k === "c" || k === "x")) {
+                      e.preventDefault();
+                      return;
+                    }
+                    if (["backspace", "delete", "arrowleft", "arrowright", "tab", "enter"].includes(k)) return;
+                    if (!withMeta && k.length === 1) {
+                      e.preventDefault();
+                    }
+                  }}
+                  onContextMenu={(e) => e.preventDefault()}
+                />
+                <Button
+                  onClick={() => {
+                    setLlmApiKeyDraft("");
+                    setLlmApiKeyTouched(true);
+                  }}
+                >
+                  清空 Key
+                </Button>
+                <Text type="secondary">
+                  {settingsDraft.llm_settings?.has_api_key ? "当前已配置 Key（出于安全不回显）" : "当前未配置 Key"}
+                </Text>
+              </Space>
+              <Text type="secondary">Key 输入框只允许粘贴与删除，且不可查看/复制。</Text>
+              <Text type="secondary">文本解析使用 Provider + Text Base URL + 文本模型；图片解析使用 VL 模型 + 同一 API Key（用于 docs2md 的 VL 解析）。</Text>
             </Space>
-          ))}
-          <Button
-            onClick={() =>
-              setSettingsDraft((s) => ({
-                ...s,
-                focus_points: [...s.focus_points, { id: `custom-${Date.now()}`, name: "", prompt: "" }],
-              }))
-            }
-          >
-            新增关注点
-          </Button>
+          </div>
         </Space>
       </Modal>
 
