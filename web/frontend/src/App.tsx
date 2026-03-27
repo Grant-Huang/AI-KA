@@ -75,8 +75,7 @@ export default function App() {
   const stopAnalyzeRef = useRef<(() => void) | null>(null);
   const analyzeAbortRef = useRef<AbortController | null>(null);
   const terminatedRef = useRef(false);
-  const lastDeltaSnapshotRef = useRef<string>("");
-  const deltaModeRef = useRef<"unknown" | "incremental" | "cumulative">("unknown");
+  const deltaAccRef = useRef<string>(""); // accumulated model-output text used for dedup
 
   const loadProjects = useCallback(async () => {
     const data = await apiJson<{ projects: Project[] }>("/api/v1/projects");
@@ -239,33 +238,17 @@ export default function App() {
   const appendProcessDelta = (piece: string) => {
     const p = String(piece || "");
     if (!p) return;
-    const last = lastDeltaSnapshotRef.current;
-    if (!last) {
-      lastDeltaSnapshotRef.current = p;
-      appendProcess(p);
+    const acc = deltaAccRef.current;
+    // Cumulative: gateway resent the full model output so far; append only the new suffix.
+    if (acc && p.startsWith(acc)) {
+      const delta = p.slice(acc.length);
+      if (delta) { deltaAccRef.current += delta; appendProcess(delta); }
       return;
     }
-    if (p.startsWith(last)) {
-      deltaModeRef.current = "cumulative";
-      const delta = p.slice(last.length);
-      lastDeltaSnapshotRef.current = p;
-      if (delta) appendProcess(delta);
-      return;
-    }
-    if (last.startsWith(p)) {
-      deltaModeRef.current = "cumulative";
-      return;
-    }
-    if (deltaModeRef.current === "cumulative" && p.includes(last)) {
-      deltaModeRef.current = "cumulative";
-      const idx = p.indexOf(last);
-      const delta = p.slice(idx + last.length);
-      lastDeltaSnapshotRef.current = p;
-      if (delta) appendProcess(delta);
-      return;
-    }
-    deltaModeRef.current = "incremental";
-    lastDeltaSnapshotRef.current = p;
+    // Already seen: accumulated text already starts with (or equals) this piece — skip.
+    if (acc && acc.startsWith(p)) return;
+    // Incremental: genuine new content.
+    deltaAccRef.current += p;
     appendProcess(p);
   };
   const appendBackend = (s: string) => setConvertLog((prev) => prev + s);
@@ -355,8 +338,7 @@ export default function App() {
     setPipelineRunning(true);
     terminatedRef.current = false;
     setStreamText("");
-    lastDeltaSnapshotRef.current = "";
-    deltaModeRef.current = "unknown";
+    deltaAccRef.current = "";
     setConvertLog("");
     setAnalysis(null);
     try {
@@ -454,8 +436,6 @@ export default function App() {
         setAnalysis(fin.analysis as { title?: string; blocks?: Block[] });
       } else if (fin.raw) {
         setStreamText(fin.raw);
-        lastDeltaSnapshotRef.current = fin.raw;
-        deltaModeRef.current = "unknown";
         message.warning("模型输出非 JSON，已显示原文");
       }
       message.success("全流程完成");
