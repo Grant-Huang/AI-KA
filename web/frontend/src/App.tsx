@@ -75,8 +75,7 @@ export default function App() {
   const stopAnalyzeRef = useRef<(() => void) | null>(null);
   const analyzeAbortRef = useRef<AbortController | null>(null);
   const terminatedRef = useRef(false);
-  const lastDeltaSnapshotRef = useRef<string>("");
-  const deltaModeRef = useRef<"unknown" | "incremental" | "cumulative">("unknown");
+  const lastDeltaRef = useRef<string>("");
 
   const loadProjects = useCallback(async () => {
     const data = await apiJson<{ projects: Project[] }>("/api/v1/projects");
@@ -236,39 +235,23 @@ export default function App() {
   };
 
   const appendProcess = (s: string) => setStreamText((prev) => prev + s);
-  const appendProcessDelta = (piece: string) => {
-    const p = String(piece || "");
-    if (!p) return;
-    const last = lastDeltaSnapshotRef.current;
-    if (!last) {
-      lastDeltaSnapshotRef.current = p;
-      appendProcess(p);
-      return;
-    }
-    if (p.startsWith(last)) {
-      deltaModeRef.current = "cumulative";
-      const delta = p.slice(last.length);
-      lastDeltaSnapshotRef.current = p;
-      if (delta) appendProcess(delta);
-      return;
-    }
-    if (last.startsWith(p)) {
-      deltaModeRef.current = "cumulative";
-      return;
-    }
-    if (deltaModeRef.current === "cumulative" && p.includes(last)) {
-      deltaModeRef.current = "cumulative";
-      const idx = p.indexOf(last);
-      const delta = p.slice(idx + last.length);
-      lastDeltaSnapshotRef.current = p;
-      if (delta) appendProcess(delta);
-      return;
-    }
-    deltaModeRef.current = "incremental";
-    lastDeltaSnapshotRef.current = p;
-    appendProcess(p);
-  };
   const appendBackend = (s: string) => setConvertLog((prev) => prev + s);
+  const appendProcessAdaptive = (incoming: string) => {
+    const text = String(incoming || "");
+    if (!text) return;
+    const prevDelta = lastDeltaRef.current;
+    if (text === prevDelta) return;
+    // 兼容两类网关：
+    // 1) 增量流：每次只返回新增 token（直接追加）
+    // 2) 累计流：每次返回从开头累计到当前的完整文本（只追加差量）
+    if (prevDelta && text.startsWith(prevDelta)) {
+      const suffix = text.slice(prevDelta.length);
+      if (suffix) appendProcess(suffix);
+    } else {
+      appendProcess(text);
+    }
+    lastDeltaRef.current = text;
+  };
   const renderProcessStream = (text: string) => {
     const chunks: Array<{ type: "think" | "text"; content: string }> = [];
     const re = /<think>([\s\S]*?)<\/think>/g;
@@ -354,9 +337,8 @@ export default function App() {
     }
     setPipelineRunning(true);
     terminatedRef.current = false;
+    lastDeltaRef.current = "";
     setStreamText("");
-    lastDeltaSnapshotRef.current = "";
-    deltaModeRef.current = "unknown";
     setConvertLog("");
     setAnalysis(null);
     try {
@@ -427,7 +409,7 @@ export default function App() {
           { chunk_limit: chunkLimit, focus_points: focusPoints },
           (ev) => {
             if (ev.type === "delta" && typeof ev.text === "string") {
-              appendProcessDelta(ev.text);
+              appendProcessAdaptive(ev.text);
             }
             if (ev.type === "final") {
               safeResolve({
@@ -454,8 +436,6 @@ export default function App() {
         setAnalysis(fin.analysis as { title?: string; blocks?: Block[] });
       } else if (fin.raw) {
         setStreamText(fin.raw);
-        lastDeltaSnapshotRef.current = fin.raw;
-        deltaModeRef.current = "unknown";
         message.warning("模型输出非 JSON，已显示原文");
       }
       message.success("全流程完成");

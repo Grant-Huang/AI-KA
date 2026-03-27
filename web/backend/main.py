@@ -332,7 +332,6 @@ def _build_text_llm_config(conn: Any, timeout_s: float) -> LLMConfig:
         base_url=_get_text_base_url(conn) or None,
         api_key=_get_text_llm_api_key_effective(conn),
         timeout_s=timeout_s,
-        response_format={"type": "json_object"},
     )
 
 
