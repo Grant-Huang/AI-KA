@@ -1,16 +1,78 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
+import shutil
 
 from backend.config import get_settings
 
 
 class Docs2MdError(RuntimeError):
     pass
+
+
+_MD_LIKE_EXTS = {".md", ".markdown", ".txt"}
+
+
+def _is_md_like_file(p: Path) -> bool:
+    return p.is_file() and p.suffix.lower() in _MD_LIKE_EXTS
+
+
+def _scan_for_non_md_like_files(root: Path) -> list[Path]:
+    """
+    Return a small sample of non-md-like files. Used to decide md passthrough.
+    """
+    root = root.resolve()
+    out: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel = Path(dirpath).resolve().relative_to(root).as_posix()
+        if rel.startswith(".tmp") or rel.startswith("tmp") or rel.startswith(".git"):
+            dirnames[:] = []
+            continue
+        for fn in filenames:
+            p = Path(dirpath) / fn
+            if p.is_symlink():
+                continue
+            if _is_md_like_file(p):
+                continue
+            out.append(p)
+            if len(out) >= 20:
+                return out
+    return out
+
+
+def _copy_md_like_tree(src: Path, dst: Path) -> int:
+    """
+    Copy .md/.txt files from src into dst, preserving relative paths.
+    Returns number of files copied.
+    """
+    src = src.resolve()
+    dst = dst.resolve()
+    copied = 0
+    for dirpath, dirnames, filenames in os.walk(src):
+        rel_dir = Path(dirpath).resolve().relative_to(src).as_posix()
+        if rel_dir.startswith(".tmp") or rel_dir.startswith("tmp") or rel_dir.startswith(".git"):
+            dirnames[:] = []
+            continue
+        for fn in filenames:
+            p = Path(dirpath) / fn
+            if not _is_md_like_file(p):
+                continue
+            rel = p.resolve().relative_to(src)
+            target = (dst / rel).resolve()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # lightweight validation: ensure readable as UTF-8 (replace ok), and non-empty
+            text = p.read_text(encoding="utf-8", errors="replace")
+            if not text.strip():
+                continue
+            shutil.copy2(p, target)
+            copied += 1
+    return copied
 
 
 def _vl_api_key_present(explicit_key: str | None = None) -> bool:
@@ -54,6 +116,15 @@ def run_convert_directory(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     st = get_settings()
+
+    non_md_like = _scan_for_non_md_like_files(input_dir)
+    if not non_md_like:
+        yield "[hint] 检测到输入目录仅包含 md/txt：跳过转换，仅检查并复制到 md_out。\n"
+        copied = _copy_md_like_tree(input_dir, output_dir)
+        if copied <= 0:
+            raise Docs2MdError("输入目录未发现可用的 md/txt 内容（或内容为空）")
+        yield f"[ok] 已复制 {copied} 个 md/txt 文件到：{output_dir}\n"
+        return
 
     cmd: list[str]
     cwd: str | None = None
@@ -102,6 +173,12 @@ def run_convert_directory(
     yield f"[debug] disable_image_parse={disable_image_parse}\n"
     yield f"[cmd] {' '.join(cmd)}\n"
 
+    # Throttle noisy per-page logs to avoid UI spam.
+    last_progress_emit = 0.0
+    progress_seen = 0
+    page_re = re.compile(r"(?i)(page\\s*\\d+|第\\s*\\d+\\s*页|\\bpages?\\b)")
+    progress_re = re.compile(r"(?i)(\\b\\d+%\\b|\\b\\d+/\\d+\\b)")
+
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -114,6 +191,14 @@ def run_convert_directory(
     )
     assert proc.stdout is not None
     for line in proc.stdout:
+        # Reduce per-page/progress spam: emit aggregated summary at most every ~2s.
+        if page_re.search(line) or progress_re.search(line):
+            progress_seen += 1
+            now = time.time()
+            if now - last_progress_emit >= 2.0:
+                last_progress_emit = now
+                yield f"[progress] 转换进行中…（已收到 {progress_seen} 条进度输出）\n"
+            continue
         yield line
         if disable_image_parse and "解析图片（" in line:
             yield (

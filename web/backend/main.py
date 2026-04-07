@@ -83,6 +83,7 @@ def _helpme_md_path() -> Path:
 def _build_settings_payload(conn: Any) -> dict[str, Any]:
     return {
         "focus_points": _get_focus_points(conn),
+        "focus_presets": _get_focus_presets(conn),
         "chunk_limit": _get_chunk_limit(conn),
         "disable_image_parse": _get_disable_image_parse(conn),
         "llm_settings": _get_llm_settings(conn),
@@ -226,6 +227,34 @@ def _get_focus_points(conn: Any) -> list[dict[str, str]]:
         if out:
             return out
     return DEFAULT_FOCUS_POINTS
+
+
+def _get_focus_presets(conn: Any) -> list[dict[str, Any]]:
+    """
+    Stored in app_settings.focus_presets as JSON.
+    Shape: [{id,name,focus_points:[name,...]}]
+    """
+    v = dbm.get_app_setting_json(conn, "focus_presets")
+    if not isinstance(v, list):
+        return []
+    out: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for item in v:
+        if not isinstance(item, dict):
+            continue
+        pid = str(item.get("id") or "").strip()
+        name = str(item.get("name") or "").strip()
+        fps = item.get("focus_points")
+        if not pid or not name or not isinstance(fps, list):
+            continue
+        if pid in seen_ids:
+            continue
+        focus_points = [str(x).strip() for x in fps if str(x).strip()]
+        if not focus_points:
+            continue
+        seen_ids.add(pid)
+        out.append({"id": pid, "name": name, "focus_points": focus_points})
+    return out
 
 
 def _get_chunk_limit(conn: Any) -> int:
@@ -447,6 +476,31 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
         if not out:
             return JSONResponse(err("focus_points cannot be empty"), status_code=400)
         dbm.set_app_setting_json(conn, "focus_points", out)
+    if "focus_presets" in payload:
+        raw_presets = payload.get("focus_presets")
+        if raw_presets is None:
+            dbm.set_app_setting_json(conn, "focus_presets", [])
+        elif not isinstance(raw_presets, list):
+            return JSONResponse(err("focus_presets must be a list"), status_code=400)
+        else:
+            cleaned: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for it in raw_presets:
+                if not isinstance(it, dict):
+                    continue
+                pid = str(it.get("id") or "").strip()
+                name = str(it.get("name") or "").strip()
+                fps = it.get("focus_points")
+                if not pid or not name or not isinstance(fps, list):
+                    continue
+                if pid in seen:
+                    continue
+                focus_points = [str(x).strip() for x in fps if str(x).strip()]
+                if not focus_points:
+                    continue
+                cleaned.append({"id": pid, "name": name, "focus_points": focus_points})
+                seen.add(pid)
+            dbm.set_app_setting_json(conn, "focus_presets", cleaned)
     if "llm_settings" in payload:
         raw_llm = payload.get("llm_settings")
         if not isinstance(raw_llm, dict):
@@ -660,6 +714,13 @@ def _sse_line(obj: dict[str, Any]) -> str:
     return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
 
 
+def _sse_stage(name: str, state: str, *, detail: str | None = None) -> str:
+    payload: dict[str, Any] = {"type": "stage", "name": name, "state": state}
+    if detail:
+        payload["detail"] = detail
+    return _sse_line(payload)
+
+
 def _extract_first_json_object_text(raw: str) -> str | None:
     s = raw.strip()
     start = s.find("{")
@@ -750,6 +811,139 @@ def _normalize_analysis_for_ui(obj: Any) -> dict[str, Any]:
     return {"title": str(obj.get("title") or "分析"), "blocks": [{"type": "paragraph", "text": json.dumps(obj, ensure_ascii=False)}]}
 
 
+def _analysis_blocks_to_markdown(analysis: dict[str, Any]) -> str:
+    """
+    Convert the legacy structured blocks format into Markdown for display/export.
+    Keep it resilient: never raise, and never expose raw JSON unless unavoidable.
+    """
+    title = str(analysis.get("title") or "").strip()
+    blocks = analysis.get("blocks") if isinstance(analysis.get("blocks"), list) else []
+
+    out: list[str] = []
+    if title:
+        out.append(f"# {title}\n")
+
+    def add(s: str) -> None:
+        s2 = (s or "").rstrip()
+        if not s2:
+            return
+        out.append(s2 + "\n")
+
+    for b in blocks:
+        if not isinstance(b, dict):
+            add(str(b))
+            continue
+        t = str(b.get("type") or "").lower()
+        if t == "heading":
+            level = int(b.get("level") or 2)
+            level = max(1, min(6, level))
+            add(f"{'#' * level} {str(b.get('text') or '').strip()}")
+            continue
+        if t == "paragraph":
+            add(str(b.get("text") or "").strip())
+            continue
+        if t == "tags":
+            items = b.get("items") if isinstance(b.get("items"), list) else []
+            tags = [str(x) for x in items if str(x).strip()]
+            if tags:
+                add(" ".join(f"`{x}`" for x in tags))
+            continue
+        if t == "table":
+            headers = b.get("headers") if isinstance(b.get("headers"), list) else []
+            rows = b.get("rows") if isinstance(b.get("rows"), list) else []
+            hs = [str(x) for x in headers]
+            if not hs:
+                add(str(b))
+                continue
+            add("| " + " | ".join(hs) + " |")
+            add("| " + " | ".join(["---"] * len(hs)) + " |")
+            for r in rows:
+                if not isinstance(r, list):
+                    continue
+                cells = [str(x) for x in r]
+                # pad / trim
+                if len(cells) < len(hs):
+                    cells += [""] * (len(hs) - len(cells))
+                if len(cells) > len(hs):
+                    cells = cells[: len(hs)]
+                add("| " + " | ".join(cells) + " |")
+            add("")
+            continue
+        if t == "cards":
+            items = b.get("items") if isinstance(b.get("items"), list) else []
+            for it in items:
+                if not isinstance(it, dict):
+                    add(str(it))
+                    continue
+                it_title = str(it.get("title") or "").strip() or "项"
+                add(f"## {it_title}")
+                body = str(it.get("body") or "").strip()
+                if body:
+                    add(body)
+                tags = it.get("tags") if isinstance(it.get("tags"), list) else []
+                tg = [str(x) for x in tags if str(x).strip()]
+                if tg:
+                    add(" ".join(f"`{x}`" for x in tg))
+                add("")
+            continue
+        if t == "tabs":
+            items = b.get("items") if isinstance(b.get("items"), list) else []
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                tab = str(it.get("tab") or "").strip() or "Tab"
+                add(f"## {tab}")
+                inner = it.get("blocks") if isinstance(it.get("blocks"), list) else []
+                # recursive (shallow)
+                inner_obj = {"title": "", "blocks": inner}
+                add(_analysis_blocks_to_markdown(inner_obj))
+            continue
+        if t == "callout":
+            c_title = str(b.get("title") or "").strip()
+            c_text = str(b.get("text") or "").strip()
+            header = f"**{c_title}**\n\n" if c_title else ""
+            if c_text:
+                add("> " + (header + c_text).replace("\n", "\n> "))
+                add("")
+            continue
+        # fallback
+        txt = str(b.get("text") or "").strip()
+        if txt:
+            add(txt)
+        else:
+            add(json.dumps(b, ensure_ascii=False))
+
+    md = "\n".join(out).strip() + "\n"
+    return md
+
+
+def _coerce_model_output_to_markdown(full_text: str) -> str:
+    """
+    Best-effort: if output is JSON (legacy structured format), convert to Markdown.
+    Otherwise treat it as Markdown/plain text.
+    """
+    cleaned = (full_text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
+        cleaned = cleaned.strip()
+    # Try parse as JSON object
+    try:
+        obj = json.loads(cleaned)
+    except json.JSONDecodeError:
+        extracted = _extract_first_json_object_text(cleaned)
+        if extracted:
+            try:
+                obj = json.loads(extracted)
+            except json.JSONDecodeError:
+                return cleaned + ("\n" if cleaned and not cleaned.endswith("\n") else "")
+        else:
+            return cleaned + ("\n" if cleaned and not cleaned.endswith("\n") else "")
+    # Parsed JSON
+    analysis = _normalize_analysis_for_ui(obj)
+    return _analysis_blocks_to_markdown(analysis)
+
+
 @app.get("/api/v1/projects/{project_id}/convert-md/stream")
 def convert_md_stream(project_id: int) -> StreamingResponse:
     conn = _conn()
@@ -818,31 +1012,18 @@ def analyze_stream_post(project_id: int, payload: AnalyzeStreamBody) -> Streamin
         provider = get_provider(cfg.provider)
         acc: list[str] = []
         try:
+            yield _sse_stage("解析文档", "start", detail=f"chunks={len(texts)}")
+            yield _sse_stage("解析文档", "end")
+            yield _sse_stage("分析内容", "start", detail=f"model={cfg.model}")
             for piece in provider.chat_stream(system=system, user=user, config=cfg):
                 acc.append(piece)
                 yield _sse_line({"type": "delta", "text": piece})
+            yield _sse_stage("分析内容", "end")
             full = "".join(acc)
-            cleaned = full.strip()
-            if cleaned.startswith("```"):
-                cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-                cleaned = re.sub(r"\s*```\s*$", "", cleaned)
-            try:
-                analysis = json.loads(cleaned)
-            except json.JSONDecodeError:
-                extracted = _extract_first_json_object_text(cleaned)
-                if extracted:
-                    try:
-                        analysis = json.loads(extracted)
-                    except json.JSONDecodeError:
-                        yield _sse_line({"type": "final", "analysis": None, "raw": full})
-                    else:
-                        analysis = _normalize_analysis_for_ui(analysis)
-                        yield _sse_line({"type": "final", "analysis": analysis, "raw": None})
-                else:
-                    yield _sse_line({"type": "final", "analysis": None, "raw": full})
-            else:
-                analysis = _normalize_analysis_for_ui(analysis)
-                yield _sse_line({"type": "final", "analysis": analysis, "raw": None})
+            yield _sse_stage("呈现结果", "start")
+            markdown = _coerce_model_output_to_markdown(full)
+            yield _sse_line({"type": "final", "markdown": markdown})
+            yield _sse_stage("呈现结果", "end")
         except LLMError as e:
             yield _sse_line({"type": "error", "message": str(e)})
 

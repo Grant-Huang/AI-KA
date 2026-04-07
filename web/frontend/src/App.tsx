@@ -1,8 +1,31 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Checkbox, Collapse, Divider, Input, InputNumber, Popover, message, Modal, Select, Space, Spin, Table, Typography } from "antd";
-import { InfoCircleOutlined, QuestionCircleOutlined, SettingOutlined } from "@ant-design/icons";
+import {
+  Alert,
+  Button,
+  Checkbox,
+  Collapse,
+  Divider,
+  Input,
+  InputNumber,
+  Modal,
+  Popover,
+  Select,
+  Space,
+  Spin,
+  Table,
+  Tooltip,
+  Typography,
+  message,
+} from "antd";
+import {
+  DownloadOutlined,
+  InfoCircleOutlined,
+  PlayCircleOutlined,
+  QuestionCircleOutlined,
+  SettingOutlined,
+  StopOutlined,
+} from "@ant-design/icons";
 import { apiJson, openConvertStream, postAnalyzeStream } from "./api";
-import { BlockRenderer, type Block } from "./BlockRenderer";
 import SimpleMarkdown from "./SimpleMarkdown";
 
 const { Text } = Typography;
@@ -19,8 +42,10 @@ type LlmSettings = {
   has_vl_api_key?: boolean;
 };
 type FocusComboTip = { stage: string; recommended: string };
+type FocusPreset = { id: string; name: string; focus_points: string[] };
 type SettingsData = {
   focus_points: FocusPoint[];
+  focus_presets?: FocusPreset[];
   chunk_limit: number;
   disable_image_parse?: boolean;
   llm_settings: LlmSettings;
@@ -28,24 +53,37 @@ type SettingsData = {
   rules_md_error?: string | null;
 };
 
+type LogGroupKind = "system" | "business" | "error";
+type LogGroup = {
+  key: string;
+  title: string;
+  kind: LogGroupKind;
+  collapsed: boolean;
+  text: string;
+};
+
 export default function App() {
   const TEXT_MODEL_OPTIONS = ["qwen3", "MiniMax-M2.5"];
   const VL_MODEL_OPTIONS = ["qwen3-vl-plus"];
+
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [pickedRootPath, setPickedRootPath] = useState<string>("");
-  const [convertLog, setConvertLog] = useState("");
-  const [streamText, setStreamText] = useState("");
-  const [analysis, setAnalysis] = useState<{ title?: string; blocks?: Block[] } | null>(null);
-  const [previewOpen, setPreviewOpen] = useState(false);
+
+  const [groups, setGroups] = useState<LogGroup[]>([]);
+  const [activeGroupKeys, setActiveGroupKeys] = useState<string[]>([]);
+  const [finalMarkdown, setFinalMarkdown] = useState<string>("");
+
   const [chunkLimit, setChunkLimit] = useState(40);
   const [nativePickerAvailable, setNativePickerAvailable] = useState(true);
   const [pickLoading, setPickLoading] = useState(false);
   const [focusPoints, setFocusPoints] = useState<string[]>([]);
   const [focusDefs, setFocusDefs] = useState<FocusPoint[]>([]);
   const [focusComboTips, setFocusComboTips] = useState<FocusComboTip[]>([]);
+  const [focusPresets, setFocusPresets] = useState<FocusPreset[]>([]);
+  const [selectedPresetId, setSelectedPresetId] = useState<string>("");
   const [pipelineRunning, setPipelineRunning] = useState(false);
-  const [logOpen, setLogOpen] = useState(false);
+
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [helpMarkdown, setHelpMarkdown] = useState<string>("");
@@ -70,12 +108,37 @@ export default function App() {
   const [vlApiKeyDraft, setVlApiKeyDraft] = useState("");
   const [vlApiKeyTouched, setVlApiKeyTouched] = useState(false);
   const [focusSelectedIndex, setFocusSelectedIndex] = useState(0);
+  const [presetSelectedIndex, setPresetSelectedIndex] = useState(0);
+
   const rulesFileInputRef = useRef<HTMLInputElement | null>(null);
   const stopConvertRef = useRef<(() => void) | null>(null);
   const stopAnalyzeRef = useRef<(() => void) | null>(null);
   const analyzeAbortRef = useRef<AbortController | null>(null);
   const terminatedRef = useRef(false);
   const deltaAccRef = useRef<string>(""); // accumulated model-output text used for dedup
+  const currentStageKeyRef = useRef<string>("");
+
+  const ensureGroup = useCallback((key: string, title: string, kind: LogGroupKind, collapsed: boolean) => {
+    setGroups((prev) => {
+      if (prev.some((g) => g.key === key)) return prev;
+      return [...prev, { key, title, kind, collapsed, text: "" }];
+    });
+    setActiveGroupKeys((prev) => {
+      if (collapsed) return prev;
+      if (prev.includes(key)) return prev;
+      return [...prev, key];
+    });
+  }, []);
+
+  const appendToGroup = useCallback((key: string, chunk: string) => {
+    const s = String(chunk || "");
+    if (!s) return;
+    setGroups((prev) => prev.map((g) => (g.key === key ? { ...g, text: g.text + s } : g)));
+  }, []);
+
+  const setGroupTitle = useCallback((key: string, title: string) => {
+    setGroups((prev) => prev.map((g) => (g.key === key ? { ...g, title } : g)));
+  }, []);
 
   const loadProjects = useCallback(async () => {
     const data = await apiJson<{ projects: Project[] }>("/api/v1/projects");
@@ -91,8 +154,10 @@ export default function App() {
     setChunkLimit(data.chunk_limit);
     setFocusDefs(data.focus_points);
     setFocusComboTips(data.focus_combo_tips || []);
+    setFocusPresets(data.focus_presets || []);
     setSettingsDraft(data);
     setFocusSelectedIndex(0);
+    setPresetSelectedIndex(0);
     setRulesMdError(data.rules_md_error || null);
     setTextApiKeyDraft("");
     setTextApiKeyTouched(false);
@@ -101,8 +166,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    loadProjects().catch((e) => message.error(String(e.message)));
-    loadSettings().catch((e) => message.error(String(e.message)));
+    loadProjects().catch((e) => message.error(String((e as Error).message)));
+    loadSettings().catch((e) => message.error(String((e as Error).message)));
   }, [loadProjects, loadSettings]);
 
   useEffect(() => {
@@ -174,7 +239,9 @@ export default function App() {
       setChunkLimit(data.chunk_limit);
       setFocusDefs(data.focus_points);
       setFocusComboTips(data.focus_combo_tips || []);
+      setFocusPresets(data.focus_presets || []);
       setSettingsDraft(data);
+      setPresetSelectedIndex(0);
       setRulesMdError(data.rules_md_error || null);
       setTextApiKeyDraft("");
       setTextApiKeyTouched(false);
@@ -194,6 +261,35 @@ export default function App() {
       const next = [...s.focus_points];
       next[idx] = { ...next[idx], prompt };
       return { ...s, focus_points: next };
+    });
+  };
+
+  const addPreset = () => {
+    const id = `p_${Date.now().toString(36)}`;
+    setSettingsDraft((s) => {
+      const next = [...(s.focus_presets || [])];
+      next.push({ id, name: "新预设", focus_points: [...focusPoints] });
+      return { ...s, focus_presets: next };
+    });
+    setPresetSelectedIndex((_) => (settingsDraft.focus_presets || []).length);
+  };
+
+  const deletePreset = (idx: number) => {
+    setSettingsDraft((s) => {
+      const arr = [...(s.focus_presets || [])];
+      if (idx < 0 || idx >= arr.length) return s;
+      arr.splice(idx, 1);
+      return { ...s, focus_presets: arr };
+    });
+    setPresetSelectedIndex((i) => Math.max(0, Math.min(i, Math.max(0, (settingsDraft.focus_presets || []).length - 2))));
+  };
+
+  const updatePresetAt = (idx: number, patch: Partial<FocusPreset>) => {
+    setSettingsDraft((s) => {
+      const arr = [...(s.focus_presets || [])];
+      if (idx < 0 || idx >= arr.length) return s;
+      arr[idx] = { ...arr[idx], ...patch };
+      return { ...s, focus_presets: arr };
     });
   };
 
@@ -223,8 +319,10 @@ export default function App() {
           });
           setChunkLimit(data.chunk_limit);
           setFocusDefs(data.focus_points);
+          setFocusPresets(data.focus_presets || []);
           setSettingsDraft(data);
           setFocusSelectedIndex(0);
+          setPresetSelectedIndex(0);
           setRulesMdError(data.rules_md_error || null);
           message.success("rules.md 已加载并保存");
         },
@@ -234,81 +332,49 @@ export default function App() {
     }
   };
 
-  const appendProcess = (s: string) => setStreamText((prev) => prev + s);
-  const appendProcessDelta = (piece: string) => {
-    const p = String(piece || "");
-    if (!p) return;
-    const acc = deltaAccRef.current;
-    // Cumulative: gateway resent the full model output so far; append only the new suffix.
-    if (acc && p.startsWith(acc)) {
-      const delta = p.slice(acc.length);
-      if (delta) { deltaAccRef.current += delta; appendProcess(delta); }
-      return;
-    }
-    // Already seen: accumulated text already starts with (or equals) this piece — skip.
-    if (acc && acc.startsWith(p)) return;
-    // Incremental: genuine new content.
-    deltaAccRef.current += p;
-    appendProcess(p);
-  };
-  const appendBackend = (s: string) => setConvertLog((prev) => prev + s);
-  const renderProcessStream = (text: string) => {
-    const chunks: Array<{ type: "think" | "text"; content: string }> = [];
-    const re = /<think>([\s\S]*?)<\/think>/g;
-    let last = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text)) !== null) {
-      if (m.index > last) {
-        chunks.push({ type: "text", content: text.slice(last, m.index) });
+  const appendAnalyzeDelta = useCallback(
+    (piece: string) => {
+      const p = String(piece || "");
+      if (!p) return;
+      const acc = deltaAccRef.current;
+      if (acc && p.startsWith(acc)) {
+        const delta = p.slice(acc.length);
+        if (delta) {
+          deltaAccRef.current += delta;
+          appendToGroup(currentStageKeyRef.current || "stage:分析内容", delta);
+        }
+        return;
       }
-      chunks.push({ type: "think", content: m[1] || "" });
-      last = re.lastIndex;
+      if (acc && acc.startsWith(p)) return;
+      deltaAccRef.current += p;
+      appendToGroup(currentStageKeyRef.current || "stage:分析内容", p);
+    },
+    [appendToGroup],
+  );
+
+  const parseRecommendedFocus = (s: string): string[] => {
+    const raw = String(s || "").trim();
+    if (!raw) return [];
+    const parts = raw.split(/[,+、\s]+/g).map((x) => x.trim()).filter(Boolean);
+    const allow = new Set(focusDefs.map((x) => x.name));
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const p of parts) {
+      if (!allow.has(p)) continue;
+      if (seen.has(p)) continue;
+      seen.add(p);
+      out.push(p);
     }
-    if (last < text.length) {
-      chunks.push({ type: "text", content: text.slice(last) });
-    }
-    if (chunks.length === 0) return <div className="stream-render-text">{text || "（文档审查与大模型流式输出）"}</div>;
-    return (
-      <div className="stream-render">
-        {chunks.map((c, idx) =>
-          c.type === "think" ? (
-            <Collapse
-              key={`think-${idx}`}
-              size="small"
-              ghost
-              items={[
-                {
-                  key: `k-${idx}`,
-                  label: "思考过程（已折叠）",
-                  children: <div className="stream-render-think">{c.content}</div>,
-                },
-              ]}
-            />
-          ) : (
-            <div key={`txt-${idx}`} className="stream-render-text">
-              {c.content}
-            </div>
-          ),
-        )}
-      </div>
-    );
+    return out;
   };
-  const renderBackendLog = (text: string) => {
-    const rows = text.split("\n");
-    return rows.map((line, idx) => {
-      const lo = line.toLowerCase();
-      const isErr =
-        lo.includes("[error]") ||
-        lo.includes(" error") ||
-        lo.includes("exception") ||
-        lo.includes("failed") ||
-        lo.includes("http error");
-      return (
-        <div key={`${idx}-${line.slice(0, 8)}`} className={isErr ? "log-line-error" : undefined}>
-          {line || " "}
-        </div>
-      );
-    });
+
+  const renderGroupContent = (g: LogGroup) => {
+    const t = g.text || "";
+    if (g.kind === "system" || g.kind === "error") {
+      const wrapped = "```text\n" + t.replace(/\n?$/, "\n") + "```";
+      return <SimpleMarkdown markdown={wrapped} />;
+    }
+    return <SimpleMarkdown markdown={t || "（暂无内容）"} />;
   };
 
   const stopPipeline = () => {
@@ -321,8 +387,8 @@ export default function App() {
     stopConvertRef.current = null;
     stopAnalyzeRef.current = null;
     setPipelineRunning(false);
-    appendProcess("\n[info] 用户已终止流程。\n");
-    appendBackend("\n[info] 用户已终止流程。\n");
+    ensureGroup("sys:control", "系统调用", "system", true);
+    appendToGroup("sys:control", "[info] 用户已终止流程。\n");
     message.info("流程已终止");
   };
 
@@ -337,20 +403,23 @@ export default function App() {
     }
     setPipelineRunning(true);
     terminatedRef.current = false;
-    setStreamText("");
     deltaAccRef.current = "";
-    setConvertLog("");
-    setAnalysis(null);
+    currentStageKeyRef.current = "";
+    setGroups([]);
+    setActiveGroupKeys([]);
+    setFinalMarkdown("");
     try {
-      appendProcess("【一键分析】文档转换 → 索引 → 大模型审查（按所选关注点）…\n");
+      ensureGroup("biz:overview", "流程概览", "business", false);
+      appendToGroup("biz:overview", "【一键分析】文档转换 → 索引 → 大模型审查（按所选关注点）\n\n");
 
-      appendBackend("【docs2md】开始转换…\n");
+      ensureGroup("sys:convert", "系统调用：转换文档", "system", true);
+      appendToGroup("sys:convert", "【docs2md】开始转换…\n");
       await new Promise<void>((resolve, reject) => {
         const stop = openConvertStream(
           selectedId,
           (ev) => {
             if (ev.type === "log" && typeof ev.text === "string") {
-              appendBackend(ev.text + "\n");
+              appendToGroup("sys:convert", ev.text + "\n");
             }
             if (ev.type === "complete") {
               stop();
@@ -376,19 +445,23 @@ export default function App() {
         };
       });
       if (terminatedRef.current) return;
-      appendBackend("【docs2md】转换完成。\n");
+      appendToGroup("sys:convert", "【docs2md】转换完成。\n");
 
-      appendBackend("【索引】正在将 Markdown 写入索引与分块…\n");
+      ensureGroup("sys:index", "系统调用：索引与分块", "system", true);
+      appendToGroup("sys:index", "【索引】正在将 Markdown 写入索引与分块…\n");
       const idx = await apiJson<{ indexed_documents: number }>(`/api/v1/projects/${selectedId}/index-md`, { method: "POST" });
-      appendBackend(`【索引】完成，已索引 ${idx.indexed_documents} 个文档。\n`);
+      appendToGroup("sys:index", `【索引】完成，已索引 ${idx.indexed_documents} 个文档。\n`);
       if (terminatedRef.current) return;
 
-      appendProcess("\n【大模型分析】按关注点审查，开始流式输出…\n");
+      ensureGroup("biz:analysis", "分析内容", "business", false);
+      currentStageKeyRef.current = "biz:analysis";
+      appendToGroup("biz:analysis", "（开始流式输出…）\n\n");
+
       const analyzeAbort = new AbortController();
       analyzeAbortRef.current = analyzeAbort;
-      const fin = await new Promise<{ analysis: unknown; raw: string | null }>((resolve, reject) => {
+      const fin = await new Promise<{ markdown: string }>((resolve, reject) => {
         let settled = false;
-        const safeResolve = (v: { analysis: unknown; raw: string | null }) => {
+        const safeResolve = (v: { markdown: string }) => {
           if (settled) return;
           settled = true;
           analyzeAbortRef.current = null;
@@ -402,20 +475,34 @@ export default function App() {
         };
         stopAnalyzeRef.current = () => {
           analyzeAbort.abort();
-          safeResolve({ analysis: null, raw: null });
+          safeResolve({ markdown: "" });
         };
         postAnalyzeStream(
           selectedId,
           { chunk_limit: chunkLimit, focus_points: focusPoints },
           (ev) => {
             if (ev.type === "delta" && typeof ev.text === "string") {
-              appendProcessDelta(ev.text);
+              appendAnalyzeDelta(ev.text);
+            }
+            if (ev.type === "stage" && typeof ev.name === "string" && typeof ev.state === "string") {
+              const name = String(ev.name);
+              const state = String(ev.state);
+              const key = `stage:${name}`;
+              const kind: LogGroupKind =
+                name.includes("错误") ? "error" : name.includes("分析") || name.includes("呈现") ? "business" : "system";
+              ensureGroup(key, name, kind, kind !== "business");
+              setGroupTitle(key, name);
+              currentStageKeyRef.current = key;
+              if (state === "start") {
+                const detail = typeof (ev as any).detail === "string" ? ` ${String((ev as any).detail)}` : "";
+                appendToGroup(key, `> 开始：${name}${detail}\n\n`);
+              } else if (state === "end") {
+                appendToGroup(key, `\n> 完成：${name}\n\n`);
+              }
             }
             if (ev.type === "final") {
-              safeResolve({
-                analysis: ev.analysis ?? null,
-                raw: typeof ev.raw === "string" ? ev.raw : null,
-              });
+              const md = typeof (ev as any).markdown === "string" ? String((ev as any).markdown) : "";
+              safeResolve({ markdown: md });
             }
             if (ev.type === "error") {
               safeReject(new Error(String(ev.message)));
@@ -425,28 +512,24 @@ export default function App() {
         ).catch((e) => {
           if (settled) return;
           if ((e as Error)?.name === "AbortError") {
-            safeResolve({ analysis: null, raw: null });
+            safeResolve({ markdown: "" });
             return;
           }
           safeReject(e instanceof Error ? e : new Error(String(e)));
         });
       });
       if (terminatedRef.current) return;
-      if (fin.analysis && typeof fin.analysis === "object") {
-        setAnalysis(fin.analysis as { title?: string; blocks?: Block[] });
-      } else if (fin.raw) {
-        setStreamText(fin.raw);
-        message.warning("模型输出非 JSON，已显示原文");
-      }
+
+      const md = fin.markdown || "";
+      setFinalMarkdown(md);
+      ensureGroup("biz:result", "结果呈现", "business", false);
+      appendToGroup("biz:result", md || "（无结果输出）\n");
       message.success("全流程完成");
     } catch (e) {
-      if ((e as Error)?.name === "AbortError" || terminatedRef.current) {
-        return;
-      }
+      if ((e as Error)?.name === "AbortError" || terminatedRef.current) return;
       const msg = String((e as Error).message);
-      appendProcess(`\n[error] ${msg}\n`);
-      appendBackend(`\n[error] ${msg}\n`);
-      setLogOpen(true);
+      ensureGroup("err:main", "错误", "error", false);
+      appendToGroup("err:main", `[error] ${msg}\n`);
       message.error(msg);
     } finally {
       setPipelineRunning(false);
@@ -456,21 +539,23 @@ export default function App() {
     }
   };
 
-  const exportDocx = async () => {
-    if (selectedId == null || !analysis) {
-      message.warning("请先完成分析");
+  const exportMarkdown = () => {
+    if (!finalMarkdown.trim()) {
+      message.warning("暂无可导出的 Markdown，请先完成分析");
       return;
     }
-    try {
-      const data = await apiJson<{ download_path: string }>(`/api/v1/projects/${selectedId}/export/docx`, {
-        method: "POST",
-        body: JSON.stringify({ analysis, title: analysis.title || "项目分析", theme: "tech" }),
-      });
-      window.open(data.download_path, "_blank");
-      message.success("已开始下载");
-    } catch (e) {
-      message.error(String((e as Error).message));
-    }
+    const name = selected?.name ? String(selected.name).replace(/[^\w\u4e00-\u9fa5\-_.]+/g, "_") : "analysis";
+    const filename = `${name}-analysis.md`;
+    const blob = new Blob([finalMarkdown], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    message.success("已导出 Markdown");
   };
 
   return (
@@ -484,7 +569,7 @@ export default function App() {
           <Button shape="circle" icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)} title="设置" />
         </Space>
       </Space>
-      <Text type="secondary">选择项目目录与关注点，一键完成转换、索引与审查，并可导出报告。</Text>
+      <Text type="secondary">选择项目目录与关注点，一键完成转换、索引与审查，并可导出 Markdown。</Text>
       <Divider />
 
       <Space direction="vertical" style={{ width: "100%" }} size={10}>
@@ -513,6 +598,24 @@ export default function App() {
             options={focusDefs.map((x) => ({ value: x.name, label: x.name }))}
             onChange={(v) => setFocusPoints(v as string[])}
           />
+          {focusPresets.length ? (
+            <Select
+              style={{ width: 200 }}
+              placeholder="选择预设"
+              value={selectedPresetId || undefined}
+              allowClear
+              options={focusPresets.map((p) => ({ value: p.id, label: p.name }))}
+              onChange={(v) => {
+                const id = String(v || "");
+                setSelectedPresetId(id);
+                const preset = focusPresets.find((p) => p.id === id);
+                if (preset) {
+                  setFocusPoints(preset.focus_points || []);
+                  message.success(`已套用预设：${preset.name}`);
+                }
+              }}
+            />
+          ) : null}
           {focusComboTips.length > 0 ? (
             <Popover
               trigger="click"
@@ -522,12 +625,33 @@ export default function App() {
                 <Table
                   size="small"
                   pagination={false}
-                  style={{ width: 560 }}
+                  style={{ width: 640 }}
                   rowKey={(r) => r.stage}
                   dataSource={focusComboTips}
                   columns={[
-                    { title: "评审节点", dataIndex: "stage", key: "stage", width: 180 },
+                    { title: "评审节点", dataIndex: "stage", key: "stage", width: 160 },
                     { title: "推荐组合的关注点", dataIndex: "recommended", key: "recommended" },
+                    {
+                      title: "操作",
+                      key: "op",
+                      width: 90,
+                      render: (_: unknown, r: FocusComboTip) => (
+                        <Button
+                          size="small"
+                          onClick={() => {
+                            const next = parseRecommendedFocus(r.recommended || "");
+                            if (!next.length) {
+                              message.warning("未解析到可用关注点（请确认名称与关注点列表一致）");
+                              return;
+                            }
+                            setFocusPoints(next);
+                            message.success("已套用推荐组合");
+                          }}
+                        >
+                          套用
+                        </Button>
+                      ),
+                    },
                   ]}
                 />
               }
@@ -539,24 +663,41 @@ export default function App() {
           ) : null}
         </Space>
         <Space wrap>
-          <Button type="primary" loading={pipelineRunning} onClick={runFullPipeline} disabled={selectedId == null}>
-            开始分析
-          </Button>
-          <Button danger onClick={stopPipeline} disabled={!pipelineRunning}>
-            终止流程
-          </Button>
-          <Button onClick={() => setLogOpen(true)}>后台日志</Button>
-          <Button onClick={() => setPreviewOpen(true)} disabled={!analysis}>
-            结构化预览
-          </Button>
-          <Button onClick={exportDocx} disabled={selectedId == null || !analysis}>
-            导出 docx（epic-doc）
+          <Tooltip title={pipelineRunning ? "终止当前流程（会中断转换/分析）" : "执行：转换→索引→分析"}>
+            <Button
+              type="primary"
+              danger={pipelineRunning}
+              loading={pipelineRunning}
+              onClick={pipelineRunning ? stopPipeline : runFullPipeline}
+              disabled={selectedId == null}
+              icon={pipelineRunning ? <StopOutlined /> : <PlayCircleOutlined />}
+            >
+              {pipelineRunning ? "终止" : "执行"}
+            </Button>
+          </Tooltip>
+          <Button icon={<DownloadOutlined />} onClick={exportMarkdown} disabled={!finalMarkdown.trim()}>
+            导出 md
           </Button>
         </Space>
       </Space>
+
       <div style={{ marginTop: 12, marginBottom: 16 }}>
         {pipelineRunning ? <Text type="secondary">分析进行中…（可滚动查看实时输出）</Text> : null}
-        <div className="raw-stream stream-log process-stream">{renderProcessStream(streamText)}</div>
+        <div className="raw-stream stream-log process-stream">
+          {groups.length ? (
+            <Collapse
+              activeKey={activeGroupKeys}
+              onChange={(keys) => setActiveGroupKeys(Array.isArray(keys) ? (keys as string[]) : [String(keys)])}
+              items={groups.map((g) => ({
+                key: g.key,
+                label: g.title,
+                children: <div style={{ fontSize: 12 }}>{renderGroupContent(g)}</div>,
+              }))}
+            />
+          ) : (
+            <Text type="secondary">（输出将以折叠分组显示：业务内容默认展开，系统调用/错误默认折叠）</Text>
+          )}
+        </div>
       </div>
 
       <Modal title="设置" open={settingsOpen} onOk={saveSettings} onCancel={() => setSettingsOpen(false)} width={860} okText="保存">
@@ -568,14 +709,9 @@ export default function App() {
                 min={1}
                 max={500}
                 value={settingsDraft.chunk_limit}
-                onChange={(v) =>
-                  setSettingsDraft((s) => ({ ...s, chunk_limit: Math.max(1, Math.min(500, Number(v) || 40)) }))
-                }
+                onChange={(v) => setSettingsDraft((s) => ({ ...s, chunk_limit: Math.max(1, Math.min(500, Number(v) || 40)) }))}
               />
-              <Checkbox
-                checked={!!settingsDraft.disable_image_parse}
-                onChange={(e) => setSettingsDraft((s) => ({ ...s, disable_image_parse: e.target.checked }))}
-              >
+              <Checkbox checked={!!settingsDraft.disable_image_parse} onChange={(e) => setSettingsDraft((s) => ({ ...s, disable_image_parse: e.target.checked }))}>
                 不解析文件中的图片
               </Checkbox>
             </Space>
@@ -628,6 +764,94 @@ export default function App() {
                   </Space>
                 ) : (
                   <Text type="secondary">rules.md 未提供可用关注点</Text>
+                )}
+              </div>
+            </div>
+          </div>
+          <Divider style={{ margin: "8px 0" }} />
+          <div>
+            <Space style={{ width: "100%", justifyContent: "space-between" }}>
+              <Text strong>组合预设</Text>
+              <Button size="small" onClick={addPreset}>
+                新增预设
+              </Button>
+            </Space>
+            <div style={{ display: "flex", gap: 12, marginTop: 8, alignItems: "stretch" }}>
+              <div
+                style={{
+                  width: 280,
+                  border: "1px solid #d9dfd7",
+                  borderRadius: 8,
+                  padding: 8,
+                  minHeight: 220,
+                  maxHeight: 220,
+                  overflow: "auto",
+                  background: "#f7f9f6",
+                }}
+              >
+                <Space direction="vertical" style={{ width: "100%" }} size={6}>
+                  {(settingsDraft.focus_presets || []).map((p, idx) => (
+                    <Button
+                      key={p.id}
+                      type="text"
+                      className={idx === presetSelectedIndex ? "focus-chip focus-chip-active" : "focus-chip"}
+                      style={{
+                        textAlign: "left",
+                        justifyContent: "space-between",
+                        width: "100%",
+                        borderRadius: 14,
+                        border: idx === presetSelectedIndex ? "1px solid #4f7f67" : "1px solid #d9dfd7",
+                        background: idx === presetSelectedIndex ? "#dbeadf" : "#eef3ed",
+                        color: idx === presetSelectedIndex ? "#2e5f49" : "#3e4a40",
+                        fontWeight: idx === presetSelectedIndex ? 600 : 500,
+                      }}
+                      onClick={() => setPresetSelectedIndex(idx)}
+                    >
+                      <span>{p.name || p.id}</span>
+                      <Button
+                        size="small"
+                        danger
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deletePreset(idx);
+                        }}
+                      >
+                        删除
+                      </Button>
+                    </Button>
+                  ))}
+                  {(settingsDraft.focus_presets || []).length === 0 ? <Text type="secondary">暂无预设</Text> : null}
+                </Space>
+              </div>
+              <div
+                style={{
+                  flex: 1,
+                  border: "1px solid #d9dfd7",
+                  padding: 10,
+                  borderRadius: 8,
+                  minHeight: 220,
+                  maxHeight: 220,
+                  background: "#f7f9f6",
+                }}
+              >
+                {(settingsDraft.focus_presets || []).length ? (
+                  <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                    <Input
+                      addonBefore="名称"
+                      value={(settingsDraft.focus_presets || [])[presetSelectedIndex]?.name}
+                      onChange={(e) => updatePresetAt(presetSelectedIndex, { name: e.target.value })}
+                    />
+                    <Select
+                      mode="multiple"
+                      allowClear
+                      placeholder="选择该预设包含的关注点"
+                      value={(settingsDraft.focus_presets || [])[presetSelectedIndex]?.focus_points || []}
+                      options={(settingsDraft.focus_points || []).map((x) => ({ value: x.name, label: x.name }))}
+                      onChange={(vals) => updatePresetAt(presetSelectedIndex, { focus_points: vals as string[] })}
+                    />
+                  </Space>
+                ) : (
+                  <Text type="secondary">新增一个预设后即可编辑</Text>
                 )}
               </div>
             </div>
@@ -758,12 +982,7 @@ export default function App() {
                     addonBefore="VL Base URL"
                     placeholder="可选，未填则沿用文本 Base URL/环境配置"
                     value={settingsDraft.llm_settings?.vl_base_url}
-                    onChange={(e) =>
-                      setSettingsDraft((s) => ({
-                        ...s,
-                        llm_settings: { ...s.llm_settings, vl_base_url: e.target.value },
-                      }))
-                    }
+                    onChange={(e) => setSettingsDraft((s) => ({ ...s, llm_settings: { ...s.llm_settings, vl_base_url: e.target.value } }))}
                   />
                 </Space>
                 <Space wrap style={{ width: "100%", marginTop: 8 }}>
@@ -812,21 +1031,6 @@ export default function App() {
 
       <Modal title="帮助" open={helpOpen} onCancel={() => setHelpOpen(false)} footer={null} width={760} styles={{ body: { fontSize: 12 } }}>
         {helpLoading ? <Spin /> : <SimpleMarkdown markdown={helpMarkdown || "# 帮助\n\n暂无帮助内容。"} />}
-      </Modal>
-      <Modal title="后台日志" open={logOpen} onCancel={() => setLogOpen(false)} footer={null} width={860}>
-        <div className="stream-log" style={{ minHeight: 220, maxHeight: 420 }}>
-          {convertLog ? renderBackendLog(convertLog) : "（docs2md 与索引日志）"}
-        </div>
-      </Modal>
-      <Modal title="结构化预览" open={previewOpen} onCancel={() => setPreviewOpen(false)} footer={null} width={980}>
-        {analysis?.blocks?.length ? (
-          <>
-            {analysis.title && <Typography.Title level={4}>{analysis.title}</Typography.Title>}
-            <BlockRenderer blocks={analysis.blocks as Block[]} />
-          </>
-        ) : (
-          <Text type="secondary">暂无可预览内容，请先执行分析。</Text>
-        )}
       </Modal>
     </div>
   );
