@@ -36,3 +36,6 @@ docs/*.docx
 # Local focus-point settings file
 rules.md
 
+# Vite config type stubs (generated / not for commit)
+web/frontend/vite.config.d.ts
+

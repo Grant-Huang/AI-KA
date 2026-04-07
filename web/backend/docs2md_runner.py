@@ -57,7 +57,8 @@ def run_convert_directory(
 
     cmd: list[str]
     cwd: str | None = None
-    if st.docs2md_root:
+    # Use installed CLI (python -m docs2md.cli) if no local docs2md_root is configured
+    if st.docs2md_root and Path(st.docs2md_root).is_dir():
         script = all2md_script_path()
         py = st.docs2md_python
         cmd = [py, str(script), str(input_dir), "-o", str(output_dir), "-f", format_]
