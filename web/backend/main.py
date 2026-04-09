@@ -61,6 +61,8 @@ DEFAULT_CHUNK_LIMIT = 40
 DEFAULT_TEXT_MODEL = "qwen3"
 DEFAULT_VL_MODEL = "qwen3-vl-plus"
 DEFAULT_TEXT_PROVIDER = "openai_compatible"
+DEFAULT_MINIMAX_TEXT_BASE_URL = "https://api.minimax.io/v1"
+DEFAULT_DASHSCOPE_COMPAT_BASE_URL_CN = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
 @app.get("/api/v1/health")
@@ -72,6 +74,108 @@ def _rules_md_path() -> Path:
     return repository_root() / "rules.md"
 
 
+def _default_rules_md_path() -> Path:
+    return repository_root() / "default_rules.md"
+
+
+def _app_settings_md_path() -> Path:
+    return repository_root() / "app_settings.md"
+
+
+def _default_app_settings_md_path() -> Path:
+    return repository_root() / "default_app_settings.md"
+
+
+def _parse_json_fenced_block(text: str) -> dict[str, Any] | None:
+    lines = str(text or "").splitlines()
+    start = -1
+    for i, raw in enumerate(lines):
+        if raw.strip().startswith("```"):
+            fence = raw.strip()
+            lang = fence.strip("`").strip().lower()
+            if lang in {"json", ""}:
+                start = i + 1
+                break
+    if start < 0:
+        return None
+    buf: list[str] = []
+    j = start
+    while j < len(lines) and lines[j].strip() != "```":
+        buf.append(lines[j])
+        j += 1
+    raw_json = "\n".join(buf).strip()
+    if not raw_json:
+        return None
+    obj = json.loads(raw_json)
+    if isinstance(obj, dict):
+        return obj
+    return None
+
+
+def _read_app_settings_md() -> tuple[dict[str, Any], str | None]:
+    p = _app_settings_md_path()
+    if p.is_file():
+        try:
+            obj = _parse_json_fenced_block(p.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(obj, dict):
+                return obj, None
+            err_msg = "app_settings.md 格式无效：未找到 JSON fenced block"
+        except Exception as e:
+            err_msg = str(e)
+        fb = _default_app_settings_md_path()
+        if fb.is_file():
+            try:
+                obj2 = _parse_json_fenced_block(fb.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(obj2, dict):
+                    return obj2, f"app_settings.md 解析失败，已回退 default_app_settings.md：{err_msg}"
+            except Exception:
+                pass
+        return {}, err_msg
+    fb = _default_app_settings_md_path()
+    if fb.is_file():
+        try:
+            obj2 = _parse_json_fenced_block(fb.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(obj2, dict):
+                return obj2, "app_settings.md 不存在，已回退 default_app_settings.md"
+        except Exception as e:
+            return {}, str(e)
+    return {}, "app_settings.md 与 default_app_settings.md 均不存在"
+
+
+def _read_app_settings_md_debug() -> tuple[dict[str, Any], str | None, str]:
+    """
+    与 _read_app_settings_md 类似，但额外返回本次实际使用的来源文件名：
+    - app_settings.md
+    - default_app_settings.md
+    - none
+    """
+    p = _app_settings_md_path()
+    if p.is_file():
+        cfg, err = _read_app_settings_md()
+        # _read_app_settings_md 内部可能回退到 default，因此这里再判断 err 文案
+        if err and "default_app_settings.md" in err:
+            return cfg, err, "default_app_settings.md"
+        return cfg, err, "app_settings.md"
+    fb = _default_app_settings_md_path()
+    if fb.is_file():
+        cfg, err = _read_app_settings_md()
+        return cfg, err, "default_app_settings.md"
+    cfg, err = _read_app_settings_md()
+    return cfg, err, "none"
+
+
+def _write_app_settings_md(payload: dict[str, Any]) -> None:
+    p = _app_settings_md_path()
+    obj = {
+        "chunk_limit": int(payload.get("chunk_limit") or DEFAULT_CHUNK_LIMIT),
+        "disable_image_parse": bool(payload.get("disable_image_parse", True)),
+        "llm_settings": payload.get("llm_settings") if isinstance(payload.get("llm_settings"), dict) else {},
+        "llm_text_api_key": str(payload.get("llm_text_api_key") or ""),
+        "llm_vl_api_key": str(payload.get("llm_vl_api_key") or ""),
+    }
+    text = "# 应用设置\n\n```json\n" + json.dumps(obj, ensure_ascii=False, indent=2) + "\n```\n"
+    p.write_text(text, encoding="utf-8")
+
 def _helpme_md_path() -> Path:
     root = repository_root()
     direct = root / "helpme.md"
@@ -82,20 +186,40 @@ def _helpme_md_path() -> Path:
 
 def _build_settings_payload(conn: Any) -> dict[str, Any]:
     return {
-        "focus_points": _get_focus_points(conn),
-        "focus_presets": _get_focus_presets(conn),
-        "chunk_limit": _get_chunk_limit(conn),
-        "disable_image_parse": _get_disable_image_parse(conn),
-        "llm_settings": _get_llm_settings(conn),
+        "focus_points": _get_focus_points(),
+        "focus_presets": _get_focus_presets(),
+        "chunk_limit": _get_chunk_limit(),
+        "disable_image_parse": _get_disable_image_parse(),
+        "llm_settings": _get_llm_settings(),
     }
 
 
 def _read_settings_from_rules_md() -> tuple[dict[str, Any] | None, str | None]:
+    """
+    Read settings from rules.md. If missing/invalid, fallback to default_rules.md.
+    """
     p = _rules_md_path()
-    if not p.is_file():
-        return None, None
-    text = p.read_text(encoding="utf-8", errors="replace")
-    return _read_settings_from_rules_text(text)
+    if p.is_file():
+        text = p.read_text(encoding="utf-8", errors="replace")
+        parsed, err = _read_settings_from_rules_text(text)
+        if parsed and not err:
+            return parsed, None
+        # fallback
+        fallback = _default_rules_md_path()
+        if fallback.is_file():
+            ft = fallback.read_text(encoding="utf-8", errors="replace")
+            parsed2, err2 = _read_settings_from_rules_text(ft)
+            if parsed2 and not err2:
+                return parsed2, f"rules.md 解析失败，已回退 default_rules.md：{err}"
+        return None, err
+    fallback = _default_rules_md_path()
+    if fallback.is_file():
+        ft = fallback.read_text(encoding="utf-8", errors="replace")
+        parsed2, err2 = _read_settings_from_rules_text(ft)
+        if parsed2 and not err2:
+            return parsed2, "rules.md 不存在，已回退 default_rules.md"
+        return None, err2
+    return None, "rules.md 与 default_rules.md 均不存在"
 
 
 def _extract_focus_combo_tips_from_rules_text(text: str) -> list[dict[str, str]]:
@@ -141,9 +265,67 @@ def _extract_focus_combo_tips_from_rules_text(text: str) -> list[dict[str, str]]
 def _read_focus_combo_tips_from_rules_md() -> list[dict[str, str]]:
     p = _rules_md_path()
     if not p.is_file():
-        return []
+        p = _default_rules_md_path()
+        if not p.is_file():
+            return []
     text = p.read_text(encoding="utf-8", errors="replace")
     return _extract_focus_combo_tips_from_rules_text(text)
+
+
+def _slugify_id(text: str) -> str:
+    s = re.sub(r"\s+", "_", (text or "").strip())
+    s = re.sub(r"[^\w\-]+", "_", s, flags=re.UNICODE)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s.lower() or "preset"
+
+
+def _parse_focus_ids_from_recommended(text: str) -> list[str]:
+    """
+    rules.md 的推荐组合通常形如：`focus:req` + `focus:data` + ...
+    返回 focus id 列表（如 req/data）。
+    """
+    t = str(text or "")
+    ids = re.findall(r"focus:([a-zA-Z0-9_\-]+)", t)
+    # 去重保序
+    out: list[str] = []
+    seen: set[str] = set()
+    for x in ids:
+        x = str(x).strip()
+        if not x or x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return out
+
+
+def _derive_focus_presets_from_combo_tips(
+    combo_tips: list[dict[str, str]], focus_defs: list[dict[str, str]]
+) -> list[dict[str, Any]]:
+    """
+    将 rules.md 的“组合使用建议”转换为可保存/可选用的 focus_presets。
+    主页与后端 analyze 接口使用的是关注点 name，因此这里把 focus:id 映射为 name。
+    """
+    id_to_name = {str(d.get("id") or "").strip(): str(d.get("name") or "").strip() for d in focus_defs if isinstance(d, dict)}
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in combo_tips:
+        if not isinstance(row, dict):
+            continue
+        stage = str(row.get("stage") or "").strip()
+        recommended = str(row.get("recommended") or "").strip()
+        if not stage or not recommended:
+            continue
+        fid_list = _parse_focus_ids_from_recommended(recommended)
+        names = [id_to_name.get(fid) for fid in fid_list]
+        focus_points = [n for n in names if n]
+        if not focus_points:
+            continue
+        pid = f"rules_{_slugify_id(stage)}"
+        if pid in seen:
+            continue
+        seen.add(pid)
+        out.append({"id": pid, "name": stage, "focus_points": focus_points})
+    return out
 
 
 def _read_settings_from_rules_text(text: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -187,6 +369,10 @@ def _write_settings_to_rules_md(payload: dict[str, Any]) -> None:
     if not isinstance(focus_points, list):
         focus_points = DEFAULT_FOCUS_POINTS
 
+    focus_presets = payload.get("focus_presets")
+    if not isinstance(focus_presets, list):
+        focus_presets = []
+
     blocks: list[str] = []
     for item in focus_points:
         if not isinstance(item, dict):
@@ -198,20 +384,72 @@ def _write_settings_to_rules_md(payload: dict[str, Any]) -> None:
             continue
         blocks.append(f"### focus:{fid} | {name}\n{prm}\n")
 
+    # Preserve any custom tail content after combo section (best-effort).
+    existing_suffix = ""
+    if p.is_file():
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        start = -1
+        for i, raw in enumerate(lines):
+            if raw.strip() == "## 组合使用建议":
+                start = i
+                break
+        if start >= 0:
+            j = start + 1
+            in_table = False
+            while j < len(lines):
+                line = lines[j].strip()
+                if line.startswith("|"):
+                    in_table = True
+                    j += 1
+                    continue
+                if in_table:
+                    # table ended; preserve the rest
+                    break
+                j += 1
+            existing_suffix = "\n".join(lines[j:]).strip()
+
+    combo_lines: list[str] = []
+    if focus_presets:
+        combo_lines.append("## 组合使用建议\n")
+        combo_lines.append("| 评审节点 | 推荐组合的关注点 |")
+        combo_lines.append("|---|---|")
+        for it in focus_presets:
+            if not isinstance(it, dict):
+                continue
+            name = str(it.get("name") or "").strip()
+            fps = it.get("focus_points")
+            if not name or not isinstance(fps, list):
+                continue
+            # 保存为 focus:id 的形式，便于人读与稳定
+            # 这里假设 focus_points 存的是 name，先反查 id
+            by_name = {str(d.get("name") or ""): str(d.get("id") or "") for d in focus_points if isinstance(d, dict)}
+            ids = [by_name.get(str(x), "") for x in fps]
+            ids = [x for x in ids if x]
+            if not ids:
+                continue
+            rec = " + ".join(f"`focus:{x}`" for x in ids)
+            combo_lines.append(f"| {name} | {rec} |")
+        combo_lines.append("")
+
     md = (
         "# 分析规则配置\n\n"
         "该文件由 AI-KA 自动维护，用于保存关注点及其 Prompt。\n\n"
         "## 关注点块\n\n"
         + "\n".join(blocks)
     )
+    if combo_lines:
+        md = md.rstrip() + "\n\n---\n\n" + "\n".join(combo_lines).rstrip() + "\n"
+    if existing_suffix:
+        md = md.rstrip() + "\n\n" + existing_suffix.strip() + "\n"
     p.write_text(md, encoding="utf-8")
 
 
-def _get_focus_points(conn: Any) -> list[dict[str, str]]:
-    v = dbm.get_app_setting_json(conn, "focus_points")
-    if isinstance(v, list):
+def _get_focus_points() -> list[dict[str, str]]:
+    parsed, _ = _read_settings_from_rules_md()
+    fps = (parsed or {}).get("focus_points") if isinstance(parsed, dict) else None
+    if isinstance(fps, list) and fps:
         out: list[dict[str, str]] = []
-        for item in v:
+        for item in fps:
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or "").strip()
@@ -229,137 +467,121 @@ def _get_focus_points(conn: Any) -> list[dict[str, str]]:
     return DEFAULT_FOCUS_POINTS
 
 
-def _get_focus_presets(conn: Any) -> list[dict[str, Any]]:
-    """
-    Stored in app_settings.focus_presets as JSON.
-    Shape: [{id,name,focus_points:[name,...]}]
-    """
-    v = dbm.get_app_setting_json(conn, "focus_presets")
-    if not isinstance(v, list):
-        return []
-    out: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    for item in v:
-        if not isinstance(item, dict):
-            continue
-        pid = str(item.get("id") or "").strip()
-        name = str(item.get("name") or "").strip()
-        fps = item.get("focus_points")
-        if not pid or not name or not isinstance(fps, list):
-            continue
-        if pid in seen_ids:
-            continue
-        focus_points = [str(x).strip() for x in fps if str(x).strip()]
-        if not focus_points:
-            continue
-        seen_ids.add(pid)
-        out.append({"id": pid, "name": name, "focus_points": focus_points})
-    return out
+def _get_focus_presets() -> list[dict[str, Any]]:
+    parsed, _ = _read_settings_from_rules_md()
+    tips = _read_focus_combo_tips_from_rules_md()
+    focus_defs = _get_focus_points()
+    derived = _derive_focus_presets_from_combo_tips(tips, focus_defs)
+    # If future rules.md adds explicit presets, prefer that. For now derived is authoritative.
+    return derived
 
 
-def _get_chunk_limit(conn: Any) -> int:
-    v = dbm.get_app_setting_json(conn, "chunk_limit")
+def _get_chunk_limit() -> int:
+    app_cfg, _ = _read_app_settings_md()
+    v = app_cfg.get("chunk_limit") if isinstance(app_cfg, dict) else None
     if isinstance(v, int) and 1 <= v <= 500:
         return v
     return DEFAULT_CHUNK_LIMIT
 
 
-def _get_disable_image_parse(conn: Any) -> bool:
-    v = dbm.get_app_setting_json(conn, "disable_image_parse")
+def _get_disable_image_parse() -> bool:
+    app_cfg, _ = _read_app_settings_md()
+    v = app_cfg.get("disable_image_parse") if isinstance(app_cfg, dict) else None
     if isinstance(v, bool):
         return v
     return True
 
 
-def _get_llm_api_key_from_db(conn: Any) -> str | None:
-    v = dbm.get_app_setting_json(conn, "llm_api_key")
-    if isinstance(v, str) and v.strip():
-        return v.strip()
-    return None
-
-
-def _get_text_llm_api_key_from_db(conn: Any) -> str | None:
-    v = dbm.get_app_setting_json(conn, "llm_text_api_key")
-    if v:
-        return v
-    return _get_llm_api_key_from_db(conn)
-
-
-def _get_vl_llm_api_key_from_db(conn: Any) -> str | None:
-    v = dbm.get_app_setting_json(conn, "llm_vl_api_key")
-    if v:
-        return v
-    return _get_llm_api_key_from_db(conn)
-
-
-def _get_text_llm_api_key_effective(conn: Any) -> str | None:
-    v = _get_text_llm_api_key_from_db(conn)
-    if v:
-        return v
+def _get_text_llm_api_key_effective() -> str | None:
+    app_cfg, _ = _read_app_settings_md()
+    if isinstance(app_cfg, dict):
+        v = app_cfg.get("llm_text_api_key") or app_cfg.get("llm_api_key")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
     return get_settings().llm_api_key
 
 
-def _get_vl_llm_api_key_effective(conn: Any) -> str | None:
-    v = _get_vl_llm_api_key_from_db(conn)
-    if v:
-        return v
+def _get_vl_llm_api_key_effective() -> str | None:
+    app_cfg, _ = _read_app_settings_md()
+    if isinstance(app_cfg, dict):
+        v = app_cfg.get("llm_vl_api_key") or app_cfg.get("llm_api_key")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
     return get_settings().llm_api_key
 
 
-def _get_text_model(conn: Any) -> str:
-    v = dbm.get_app_setting_json(conn, "llm_text_model")
+def _get_text_model() -> str:
+    app_cfg, _ = _read_app_settings_md()
+    raw = (app_cfg.get("llm_settings") or {}) if isinstance(app_cfg, dict) else {}
+    v = raw.get("text_model") if isinstance(raw, dict) else None
     if isinstance(v, str) and v.strip():
         return v.strip()
     return DEFAULT_TEXT_MODEL
 
 
-def _get_text_provider(conn: Any) -> str:
-    v = dbm.get_app_setting_json(conn, "llm_text_provider")
+def _get_text_provider() -> str:
+    app_cfg, _ = _read_app_settings_md()
+    raw = (app_cfg.get("llm_settings") or {}) if isinstance(app_cfg, dict) else {}
+    v = raw.get("text_provider") if isinstance(raw, dict) else None
     if isinstance(v, str) and v.strip():
         return v.strip()
     st = get_settings()
     return (st.llm_provider or "").strip() or DEFAULT_TEXT_PROVIDER
 
 
-def _get_text_base_url(conn: Any) -> str:
-    v = dbm.get_app_setting_json(conn, "llm_text_base_url")
+def _get_text_base_url() -> str:
+    app_cfg, _ = _read_app_settings_md()
+    raw = (app_cfg.get("llm_settings") or {}) if isinstance(app_cfg, dict) else {}
+    v = raw.get("text_base_url") if isinstance(raw, dict) else None
     if isinstance(v, str) and v.strip():
         return v.strip()
+    # model-aware fallback (avoid confusing "base_url required" errors)
+    model = str((raw.get("text_model") if isinstance(raw, dict) else None) or "").strip()
+    if model.lower().startswith("minimax-"):
+        return DEFAULT_MINIMAX_TEXT_BASE_URL
     return str(get_settings().llm_base_url or "").strip()
 
 
-def _get_vl_model(conn: Any) -> str:
-    v = dbm.get_app_setting_json(conn, "llm_vl_model")
+def _get_vl_model() -> str:
+    app_cfg, _ = _read_app_settings_md()
+    raw = (app_cfg.get("llm_settings") or {}) if isinstance(app_cfg, dict) else {}
+    v = raw.get("vl_model") if isinstance(raw, dict) else None
     if isinstance(v, str) and v.strip():
         return v.strip()
     return DEFAULT_VL_MODEL
 
 
-def _get_vl_base_url(conn: Any) -> str:
-    v = dbm.get_app_setting_json(conn, "llm_vl_base_url")
+def _get_vl_base_url() -> str:
+    app_cfg, _ = _read_app_settings_md()
+    raw = (app_cfg.get("llm_settings") or {}) if isinstance(app_cfg, dict) else {}
+    v = raw.get("vl_base_url") if isinstance(raw, dict) else None
     if isinstance(v, str) and v.strip():
         return v.strip()
+    # model-aware fallback for qwen-vl on DashScope openai-compatible endpoint (CN)
+    model = str((raw.get("vl_model") if isinstance(raw, dict) else None) or "").strip()
+    if model.lower() in {"qwen3-vl-plus"}:
+        return DEFAULT_DASHSCOPE_COMPAT_BASE_URL_CN
     return str(get_settings().llm_base_url or "").strip()
 
 
-def _get_llm_settings(conn: Any) -> dict[str, Any]:
+def _get_llm_settings() -> dict[str, Any]:
     return {
-        "text_provider": _get_text_provider(conn),
-        "text_base_url": _get_text_base_url(conn),
-        "text_model": _get_text_model(conn),
-        "vl_model": _get_vl_model(conn),
-        "vl_base_url": _get_vl_base_url(conn),
-        "has_text_api_key": bool(_get_text_llm_api_key_effective(conn)),
-        "has_vl_api_key": bool(_get_vl_llm_api_key_effective(conn)),
+        "text_provider": _get_text_provider(),
+        "text_base_url": _get_text_base_url(),
+        "text_model": _get_text_model(),
+        "vl_model": _get_vl_model(),
+        "vl_base_url": _get_vl_base_url(),
+        "has_text_api_key": bool(_get_text_llm_api_key_effective()),
+        "has_vl_api_key": bool(_get_vl_llm_api_key_effective()),
     }
 
 
 def _build_text_llm_config(conn: Any, timeout_s: float) -> LLMConfig:
     return LLMConfig(
-        provider=_get_text_provider(conn),
-        model=_get_text_model(conn),
-        base_url=_get_text_base_url(conn) or None,
-        api_key=_get_text_llm_api_key_effective(conn),
+        provider=_get_text_provider(),
+        model=_get_text_model(),
+        base_url=_get_text_base_url() or None,
+        api_key=_get_text_llm_api_key_effective(),
         timeout_s=timeout_s,
     )
 
@@ -419,16 +641,13 @@ def get_app_settings() -> JSONResponse:
     conn = _conn()
     file_data, parse_error = _read_settings_from_rules_md()
     combo_tips = _read_focus_combo_tips_from_rules_md()
-    if isinstance(file_data, dict):
-        fp = file_data.get("focus_points")
-        cl = file_data.get("chunk_limit")
-        if isinstance(fp, list):
-            dbm.set_app_setting_json(conn, "focus_points", fp)
-        if isinstance(cl, int):
-            dbm.set_app_setting_json(conn, "chunk_limit", cl)
     payload = _build_settings_payload(conn)
     payload["focus_combo_tips"] = combo_tips
     payload["rules_md_error"] = parse_error
+    app_cfg, app_err, app_src = _read_app_settings_md_debug()
+    payload["app_settings_error"] = app_err
+    payload["app_settings_source"] = app_src
+    payload["repo_root"] = str(repository_root())
     return JSONResponse(ok(payload))
 
 
@@ -444,6 +663,8 @@ def get_helpme_markdown() -> JSONResponse:
 @app.post("/api/v1/settings")
 def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
     conn = _conn()
+    current = _build_settings_payload(conn)
+    app_cfg, _ = _read_app_settings_md()
     if "chunk_limit" in payload:
         raw = payload.get("chunk_limit")
         try:
@@ -452,9 +673,11 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
             return JSONResponse(err("chunk_limit must be integer"), status_code=400)
         if val < 1 or val > 500:
             return JSONResponse(err("chunk_limit must be between 1 and 500"), status_code=400)
-        dbm.set_app_setting_json(conn, "chunk_limit", val)
+        current["chunk_limit"] = val
+        app_cfg["chunk_limit"] = val
     if "disable_image_parse" in payload:
-        dbm.set_app_setting_json(conn, "disable_image_parse", bool(payload.get("disable_image_parse")))
+        current["disable_image_parse"] = bool(payload.get("disable_image_parse"))
+        app_cfg["disable_image_parse"] = current["disable_image_parse"]
     if "focus_points" in payload:
         raw_fp = payload.get("focus_points")
         if not isinstance(raw_fp, list):
@@ -475,11 +698,11 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
             )
         if not out:
             return JSONResponse(err("focus_points cannot be empty"), status_code=400)
-        dbm.set_app_setting_json(conn, "focus_points", out)
+        current["focus_points"] = out
     if "focus_presets" in payload:
         raw_presets = payload.get("focus_presets")
         if raw_presets is None:
-            dbm.set_app_setting_json(conn, "focus_presets", [])
+            current["focus_presets"] = []
         elif not isinstance(raw_presets, list):
             return JSONResponse(err("focus_presets must be a list"), status_code=400)
         else:
@@ -500,7 +723,7 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
                     continue
                 cleaned.append({"id": pid, "name": name, "focus_points": focus_points})
                 seen.add(pid)
-            dbm.set_app_setting_json(conn, "focus_presets", cleaned)
+            current["focus_presets"] = cleaned
     if "llm_settings" in payload:
         raw_llm = payload.get("llm_settings")
         if not isinstance(raw_llm, dict):
@@ -510,33 +733,47 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
         text_model = str(raw_llm.get("text_model") or "").strip() or DEFAULT_TEXT_MODEL
         vl_model = str(raw_llm.get("vl_model") or "").strip() or DEFAULT_VL_MODEL
         vl_base_url = str(raw_llm.get("vl_base_url") or "").strip()
-        dbm.set_app_setting_json(conn, "llm_text_provider", text_provider)
-        dbm.set_app_setting_json(conn, "llm_text_base_url", text_base_url or None)
-        dbm.set_app_setting_json(conn, "llm_text_model", text_model)
-        dbm.set_app_setting_json(conn, "llm_vl_model", vl_model)
-        dbm.set_app_setting_json(conn, "llm_vl_base_url", vl_base_url or None)
-    # Backward compatibility: legacy llm_api_key sets both text/vl keys.
+        current["llm_settings"] = {
+            "text_provider": text_provider,
+            "text_base_url": text_base_url,
+            "text_model": text_model,
+            "vl_model": vl_model,
+            "vl_base_url": vl_base_url,
+            # 先占位，后面会根据 payload 覆盖
+            "has_text_api_key": bool(_get_text_llm_api_key_effective()),
+            "has_vl_api_key": bool(_get_vl_llm_api_key_effective()),
+        }
+        app_cfg["llm_settings"] = {
+            "text_provider": text_provider,
+            "text_base_url": text_base_url,
+            "text_model": text_model,
+            "vl_model": vl_model,
+            "vl_base_url": vl_base_url,
+        }
+
+    # API Key: 保存到 rules.md（不再写数据库）
+    text_key = None
+    vl_key = None
     if "llm_api_key" in payload:
-        raw_key = payload.get("llm_api_key")
-        key = str(raw_key or "").strip()
-        if key:
-            dbm.set_app_setting_json(conn, "llm_text_api_key", key)
-            dbm.set_app_setting_json(conn, "llm_vl_api_key", key)
-            dbm.set_app_setting_json(conn, "llm_api_key", key)
-        else:
-            dbm.set_app_setting_json(conn, "llm_text_api_key", None)
-            dbm.set_app_setting_json(conn, "llm_vl_api_key", None)
-            dbm.set_app_setting_json(conn, "llm_api_key", None)
+        current["llm_api_key"] = str(payload.get("llm_api_key") or "").strip()
     if "llm_text_api_key" in payload:
-        raw_text_key = payload.get("llm_text_api_key")
-        text_key = str(raw_text_key or "").strip()
-        dbm.set_app_setting_json(conn, "llm_text_api_key", text_key or None)
+        text_key = str(payload.get("llm_text_api_key") or "").strip()
+        current["llm_text_api_key"] = text_key
+        app_cfg["llm_text_api_key"] = text_key
     if "llm_vl_api_key" in payload:
-        raw_vl_key = payload.get("llm_vl_api_key")
-        vl_key = str(raw_vl_key or "").strip()
-        dbm.set_app_setting_json(conn, "llm_vl_api_key", vl_key or None)
-    current = _build_settings_payload(conn)
+        vl_key = str(payload.get("llm_vl_api_key") or "").strip()
+        current["llm_vl_api_key"] = vl_key
+        app_cfg["llm_vl_api_key"] = vl_key
+
+    if isinstance(current.get("llm_settings"), dict):
+        # 让本次响应立即体现 key 的变化（测试也依赖此行为）
+        if text_key is not None:
+            current["llm_settings"]["has_text_api_key"] = bool(text_key)
+        if vl_key is not None:
+            current["llm_settings"]["has_vl_api_key"] = bool(vl_key)
+
     _write_settings_to_rules_md(current)
+    _write_app_settings_md(app_cfg)
     current["rules_md_error"] = None
     return JSONResponse(ok(current))
 
@@ -562,7 +799,6 @@ def import_rules_md_payload(payload: dict[str, Any]) -> JSONResponse:
         return JSONResponse(err("rules.md 中未解析到有效关注点"), status_code=400)
 
     conn = _conn()
-    dbm.set_app_setting_json(conn, "focus_points", focus_points)
     _rules_md_path().write_text(text, encoding="utf-8")
     current = _build_settings_payload(conn)
     current["rules_md_error"] = None
@@ -762,7 +998,7 @@ def _resolve_focus_definitions_for_subset(conn: Any, focus_names: list[str]) -> 
     """按名称从已加载关注点定义中解析本次审查子集（顺序去重）。"""
     if not focus_names:
         return [], "focus_points 不能为空"
-    all_defs = _get_focus_points(conn)
+    all_defs = _get_focus_points()
     by_name = {d["name"]: d for d in all_defs}
     seen: set[str] = set()
     ordered_names: list[str] = []
@@ -923,11 +1159,16 @@ def _coerce_model_output_to_markdown(full_text: str) -> str:
     Otherwise treat it as Markdown/plain text.
     """
     cleaned = (full_text or "").strip()
+    # Always drop <think> before any parsing/normalization so that:
+    # - streamed preamble doesn't leak into final output
+    # - JSON extraction is not disturbed by think blocks
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", cleaned, flags=re.IGNORECASE).strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
         cleaned = re.sub(r"\s*```\s*$", "", cleaned)
         cleaned = cleaned.strip()
-    # Try parse as JSON object
+    # Try parse as JSON object; tolerate leading "reasoning"/preamble text by extracting the first JSON object.
+    obj = None
     try:
         obj = json.loads(cleaned)
     except json.JSONDecodeError:
@@ -936,12 +1177,15 @@ def _coerce_model_output_to_markdown(full_text: str) -> str:
             try:
                 obj = json.loads(extracted)
             except json.JSONDecodeError:
-                return cleaned + ("\n" if cleaned and not cleaned.endswith("\n") else "")
-        else:
-            return cleaned + ("\n" if cleaned and not cleaned.endswith("\n") else "")
+                obj = None
+    if obj is None:
+        # Treat as Markdown/plain text.
+        return cleaned + ("\n" if cleaned and not cleaned.endswith("\n") else "")
     # Parsed JSON
     analysis = _normalize_analysis_for_ui(obj)
-    return _analysis_blocks_to_markdown(analysis)
+    md = _analysis_blocks_to_markdown(analysis)
+    md = re.sub(r"<think>[\s\S]*?</think>", "", md, flags=re.IGNORECASE).strip()
+    return md + ("\n" if md and not md.endswith("\n") else "")
 
 
 @app.get("/api/v1/projects/{project_id}/convert-md/stream")
@@ -963,10 +1207,10 @@ def convert_md_stream(project_id: int) -> StreamingResponse:
                 input_dir=src,
                 output_dir=out_dir,
                 format_="md",
-                vl_api_key=_get_vl_llm_api_key_effective(conn),
-                vl_model=_get_vl_model(conn),
-                vl_base_url=_get_vl_base_url(conn),
-                disable_image_parse=_get_disable_image_parse(conn),
+                vl_api_key=_get_vl_llm_api_key_effective(),
+                vl_model=_get_vl_model(),
+                vl_base_url=_get_vl_base_url(),
+                disable_image_parse=_get_disable_image_parse(),
             ):
                 yield _sse_line({"type": "log", "text": line.rstrip("\n")})
             yield _sse_line({"type": "complete", "md_out": str(out_dir)})
@@ -1025,7 +1269,12 @@ def analyze_stream_post(project_id: int, payload: AnalyzeStreamBody) -> Streamin
             yield _sse_line({"type": "final", "markdown": markdown})
             yield _sse_stage("呈现结果", "end")
         except LLMError as e:
-            yield _sse_line({"type": "error", "message": str(e)})
+            yield _sse_line(
+                {
+                    "type": "error",
+                    "message": f"[text-llm provider={cfg.provider} model={cfg.model} base_url={cfg.base_url or ''} repo_root={str(repository_root())}] {str(e)}",
+                }
+            )
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

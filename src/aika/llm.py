@@ -108,8 +108,6 @@ class OpenAICompatibleProvider(LLMProvider):
                 {"role": "user", "content": user},
             ],
             "temperature": 0.2,
-            # 协议层约束：优先要求模型返回合法 JSON 对象
-            "response_format": {"type": "json_object"},
         }
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, method="POST")
@@ -121,22 +119,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 body = resp.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as e:
             err = e.read().decode("utf-8", errors="replace")
-            if self._should_retry_without_response_format(e.code, err):
-                payload.pop("response_format", None)
-                data = json.dumps(payload).encode("utf-8")
-                req2 = urllib.request.Request(url, data=data, method="POST")
-                req2.add_header("Content-Type", "application/json")
-                req2.add_header("Authorization", f"Bearer {api_key}")
-                try:
-                    with urllib.request.urlopen(req2, timeout=float(config.timeout_s)) as resp:
-                        body = resp.read().decode("utf-8", errors="replace")
-                except urllib.error.HTTPError as e2:
-                    err2 = e2.read().decode("utf-8", errors="replace")
-                    raise LLMError(f"http error {e2.code}: {err2}") from e2
-                except Exception as e2:
-                    raise LLMError(str(e2)) from e2
-            else:
-                raise LLMError(f"http error {e.code}: {err}") from e
+            raise LLMError(f"http error {e.code}: {err}") from e
         except Exception as e:
             raise LLMError(str(e)) from e
 
@@ -171,8 +154,6 @@ class OpenAICompatibleProvider(LLMProvider):
             ],
             "temperature": 0.2,
             "stream": True,
-            # 协议层约束：优先要求模型返回合法 JSON 对象
-            "response_format": {"type": "json_object"},
         }
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, method="POST")
@@ -184,22 +165,7 @@ class OpenAICompatibleProvider(LLMProvider):
             resp = urllib.request.urlopen(req, timeout=float(config.timeout_s))
         except urllib.error.HTTPError as e:
             err = e.read().decode("utf-8", errors="replace")
-            if self._should_retry_without_response_format(e.code, err):
-                payload.pop("response_format", None)
-                data = json.dumps(payload).encode("utf-8")
-                req2 = urllib.request.Request(url, data=data, method="POST")
-                req2.add_header("Content-Type", "application/json")
-                req2.add_header("Authorization", f"Bearer {api_key}")
-                req2.add_header("Accept", "text/event-stream")
-                try:
-                    resp = urllib.request.urlopen(req2, timeout=float(config.timeout_s))
-                except urllib.error.HTTPError as e2:
-                    err2 = e2.read().decode("utf-8", errors="replace")
-                    raise LLMError(f"http error {e2.code}: {err2}") from e2
-                except Exception as e2:
-                    raise LLMError(str(e2)) from e2
-            else:
-                raise LLMError(f"http error {e.code}: {err}") from e
+            raise LLMError(f"http error {e.code}: {err}") from e
         except Exception as e:
             raise LLMError(str(e)) from e
 

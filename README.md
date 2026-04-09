@@ -75,6 +75,10 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8765
 
 浏览器打开 Vite 提示的地址（默认 `http://localhost:5173`），通过代理访问 `/api`。
 
+### 3.3.1 Docker 部署
+
+在项目根目录执行 `docker compose up -d --build`，浏览器访问 **http://localhost:8765**（前后端同源）。详细说明见 [docs/docker-deploy.md](docs/docker-deploy.md)。
+
 ### 3.4 使用流程（一键分析）
 
 1. **分析配置**：设定 chunk 上限（参与大模型分析的 Markdown 分块数量，越大上下文越多、耗时与费用通常越高）、选择关注点。若 `rules.md` 含有“组合使用建议”表格，首页关注点下拉框后会显示 `Tips` 入口用于快速参考。

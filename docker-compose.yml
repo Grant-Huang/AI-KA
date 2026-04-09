@@ -1,0 +1,25 @@
+services:
+  ai-ka:
+    build: .
+    image: ai-ka:latest
+    ports:
+      - "8765:8765"
+    environment:
+      # 必须：仓库根（SQLite、.tmp、rules.md 等路径）
+      AIKA_REPO_ROOT: /app
+      # 浏览器从宿主机访问时的来源（按需增删）
+      AIKA_CORS_ORIGINS: "http://localhost:8765,http://127.0.0.1:8765"
+      # 可选：LLM（也可在容器外通过 app_settings.md 配置，需挂载卷）
+      # AIKA_LLM_BASE_URL: ""
+      # AIKA_LLM_API_KEY: ""
+      # AIKA_LLM_PROVIDER: "openai_compatible"
+    volumes:
+      # 持久化：项目索引、转换产物、SQLite
+      - ai-ka-data:/app/.tmp
+      # 可选：挂载本机规则与本地应用设置（首次可把仓库内 default_rules.md 复制为 rules.md）
+      # - ./rules.md:/app/rules.md:ro
+      # - ./app_settings.md:/app/app_settings.md
+    restart: unless-stopped
+
+volumes:
+  ai-ka-data:

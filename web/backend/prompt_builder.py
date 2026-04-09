@@ -5,28 +5,22 @@ from typing import Any
 
 
 DEFAULT_RULES: dict[str, Any] = {
-    "goal": "对项目文档进行结构化分析，输出可在前端渲染的 blocks。",
+    "goal": "对项目文档进行结构化分析，输出适合阅读与导出的 Markdown。",
     "dimensions": ["需求", "风险", "接口与集成", "待确认事项"],
     "style": {"prefer": ["cards", "table", "tabs"]},
 }
 
 
-BLOCK_SCHEMA_HINT = """
-【强制输出格式】只能输出一个合法 JSON 对象，不得包含任何前缀文字、后缀说明、注释或 Markdown 围栏（```json ... ```）。
-输出必须能被 json.loads() 直接解析，结构如下：
-{
-  "title": "可选标题",
-  "blocks": [
-    {"type": "heading", "level": 2, "text": "章节"},
-    {"type": "paragraph", "text": "段落"},
-    {"type": "tags", "items": ["标签1", "标签2"]},
-    {"type": "table", "headers": ["列A","列B"], "rows": [["a","b"]]},
-    {"type": "cards", "items": [{"title":"卡片标题","body":"内容","tags":["t1"]}]},
-    {"type": "tabs", "title": "可选", "items": [{"tab":"页签名","blocks":[ ... 内嵌同结构 ... ]}]},
-    {"type": "callout", "style": "info|warning|danger|success", "title": "可选", "text": "提示内容"}
-  ]
-}
-第一个字符必须是 {，最后一个字符必须是 }，JSON 之外不能有任何其他内容。
+MARKDOWN_OUTPUT_HINT = """
+【强制输出格式】只输出一份可渲染的 Markdown 正文（UTF-8），不要输出 JSON，不要输出任何代码围栏（```）。
+要求：
+- 必须使用简体中文（专有名词/缩写除外）；
+- 必须分章节输出（使用 `##` / `###`）；
+- 必须给出“结论”与“建议”（如无证据需说明“未在片段中发现”）；
+- 如引用证据，请标注片段编号（例如：片段 12）。
+禁止：
+- 不要输出 `<think>` / `</think>`；
+- 不要输出任何“我将如何分析/Let me analyze...”之类的过程性文字。
 """
 
 
@@ -67,7 +61,7 @@ def build_system_prompt(
             + json.dumps(DEFAULT_RULES.get("style", {}), ensure_ascii=False)
             + "\n"
         )
-        return "".join(lines) + BLOCK_SCHEMA_HINT
+        return "".join(lines) + MARKDOWN_OUTPUT_HINT
 
     r = merge_rules(rules)
     return (
@@ -76,7 +70,7 @@ def build_system_prompt(
         f"分析目标：{r.get('goal', '')}\n"
         f"关注维度：{json.dumps(r.get('dimensions', []), ensure_ascii=False)}\n"
         f"输出风格偏好：{json.dumps(r.get('style', {}), ensure_ascii=False)}\n"
-        + BLOCK_SCHEMA_HINT
+        + MARKDOWN_OUTPUT_HINT
     )
 
 
@@ -89,4 +83,4 @@ def build_user_prompt(*, chunk_texts: list[str], max_chars: int = 120_000) -> st
             break
         parts.append(block)
         total += len(block)
-    return "以下是项目 Markdown 片段（可能经 docs2md 转换）。请按系统要求输出中文 JSON：\n\n" + "\n".join(parts)
+    return "以下是项目 Markdown 片段（可能经 docs2md 转换）。请按系统要求输出中文 Markdown：\n\n" + "\n".join(parts)

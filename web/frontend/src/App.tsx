@@ -62,6 +62,15 @@ type LogGroup = {
   text: string;
 };
 
+type MilestoneStatus = "running" | "done" | "error";
+type Milestone = {
+  id: string;
+  name: string;
+  status: MilestoneStatus;
+  detailKind: LogGroupKind;
+  detailText: string;
+};
+
 export default function App() {
   const TEXT_MODEL_OPTIONS = ["qwen3", "MiniMax-M2.5"];
   const VL_MODEL_OPTIONS = ["qwen3-vl-plus"];
@@ -70,8 +79,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [pickedRootPath, setPickedRootPath] = useState<string>("");
 
-  const [groups, setGroups] = useState<LogGroup[]>([]);
-  const [activeGroupKeys, setActiveGroupKeys] = useState<string[]>([]);
+  const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [finalMarkdown, setFinalMarkdown] = useState<string>("");
 
   const [chunkLimit, setChunkLimit] = useState(40);
@@ -94,10 +102,10 @@ export default function App() {
     disable_image_parse: true,
     llm_settings: {
       text_provider: "openai_compatible",
-      text_base_url: "",
-      text_model: "qwen3",
+      text_base_url: "https://api.minimax.io/v1",
+      text_model: "MiniMax-M2.5",
       vl_model: "qwen3-vl-plus",
-      vl_base_url: "",
+      vl_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
       has_text_api_key: false,
       has_vl_api_key: false,
     },
@@ -117,27 +125,26 @@ export default function App() {
   const terminatedRef = useRef(false);
   const deltaAccRef = useRef<string>(""); // accumulated model-output text used for dedup
   const currentStageKeyRef = useRef<string>("");
+  const lastMilestoneIdRef = useRef<string>("");
 
-  const ensureGroup = useCallback((key: string, title: string, kind: LogGroupKind, collapsed: boolean) => {
-    setGroups((prev) => {
-      if (prev.some((g) => g.key === key)) return prev;
-      return [...prev, { key, title, kind, collapsed, text: "" }];
-    });
-    setActiveGroupKeys((prev) => {
-      if (collapsed) return prev;
-      if (prev.includes(key)) return prev;
-      return [...prev, key];
+  const ensureMilestone = useCallback((id: string, name: string, detailKind: LogGroupKind) => {
+    setMilestones((prev) => {
+      if (prev.some((m) => m.id === id)) return prev;
+      lastMilestoneIdRef.current = id;
+      return [...prev, { id, name, status: "running", detailKind, detailText: "" }];
     });
   }, []);
 
-  const appendToGroup = useCallback((key: string, chunk: string) => {
+  const appendMilestoneDetail = useCallback((id: string, chunk: string) => {
     const s = String(chunk || "");
     if (!s) return;
-    setGroups((prev) => prev.map((g) => (g.key === key ? { ...g, text: g.text + s } : g)));
+    setMilestones((prev) =>
+      prev.map((m) => (m.id === id ? { ...m, detailText: m.detailText + s } : m)),
+    );
   }, []);
 
-  const setGroupTitle = useCallback((key: string, title: string) => {
-    setGroups((prev) => prev.map((g) => (g.key === key ? { ...g, title } : g)));
+  const setMilestoneStatus = useCallback((id: string, status: MilestoneStatus) => {
+    setMilestones((prev) => prev.map((m) => (m.id === id ? { ...m, status } : m)));
   }, []);
 
   const loadProjects = useCallback(async () => {
@@ -169,6 +176,12 @@ export default function App() {
     loadProjects().catch((e) => message.error(String((e as Error).message)));
     loadSettings().catch((e) => message.error(String((e as Error).message)));
   }, [loadProjects, loadSettings]);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    // 每次打开设置时都从后端刷新，避免显示旧值/读错配置源时难以定位
+    loadSettings().catch((e) => message.error(String((e as Error).message)));
+  }, [settingsOpen, loadSettings]);
 
   useEffect(() => {
     apiJson<{ native_folder_picker: boolean }>("/api/v1/fs/capabilities")
@@ -341,20 +354,37 @@ export default function App() {
         const delta = p.slice(acc.length);
         if (delta) {
           deltaAccRef.current += delta;
-          appendToGroup(currentStageKeyRef.current || "stage:分析内容", delta);
+          appendMilestoneDetail(currentStageKeyRef.current || "stage:分析内容", delta);
         }
         return;
       }
       if (acc && acc.startsWith(p)) return;
       deltaAccRef.current += p;
-      appendToGroup(currentStageKeyRef.current || "stage:分析内容", p);
+      appendMilestoneDetail(currentStageKeyRef.current || "stage:分析内容", p);
     },
-    [appendToGroup],
+    [appendMilestoneDetail],
   );
 
   const parseRecommendedFocus = (s: string): string[] => {
     const raw = String(s || "").trim();
     if (!raw) return [];
+    // 优先解析 rules.md 中稳定的 `focus:<id>` 格式
+    const ids = Array.from(raw.matchAll(/focus:([a-zA-Z0-9_\-]+)/g)).map((m) => String(m[1] || "").trim()).filter(Boolean);
+    const idToName = new Map(focusDefs.map((x) => [x.id, x.name]));
+    if (ids.length) {
+      const out: string[] = [];
+      const seen = new Set<string>();
+      for (const id of ids) {
+        const name = idToName.get(id);
+        if (!name) continue;
+        if (seen.has(name)) continue;
+        seen.add(name);
+        out.push(name);
+      }
+      return out;
+    }
+
+    // 兼容旧格式：直接按名称拆分
     const parts = raw.split(/[,+、\s]+/g).map((x) => x.trim()).filter(Boolean);
     const allow = new Set(focusDefs.map((x) => x.name));
     const out: string[] = [];
@@ -368,11 +398,28 @@ export default function App() {
     return out;
   };
 
-  const renderGroupContent = (g: LogGroup) => {
-    const t = g.text || "";
-    if (g.kind === "system" || g.kind === "error") {
-      const wrapped = "```text\n" + t.replace(/\n?$/, "\n") + "```";
-      return <SimpleMarkdown markdown={wrapped} />;
+  const renderMilestoneDetail = (m: Milestone) => {
+    const t = m.detailText || "";
+    if (m.detailKind === "system") {
+      return (
+        <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
+          {t}
+        </pre>
+      );
+    }
+    if (m.detailKind === "error") {
+      return (
+        <pre
+          style={{
+            margin: 0,
+            whiteSpace: "pre-wrap",
+            color: "#cf1322",
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+          }}
+        >
+          {t}
+        </pre>
+      );
     }
     return <SimpleMarkdown markdown={t || "（暂无内容）"} />;
   };
@@ -387,8 +434,9 @@ export default function App() {
     stopConvertRef.current = null;
     stopAnalyzeRef.current = null;
     setPipelineRunning(false);
-    ensureGroup("sys:control", "系统调用", "system", true);
-    appendToGroup("sys:control", "[info] 用户已终止流程。\n");
+    ensureMilestone("sys:control", "系统调用", "system");
+    appendMilestoneDetail("sys:control", "[info] 用户已终止流程。\n");
+    setMilestoneStatus("sys:control", "done");
     message.info("流程已终止");
   };
 
@@ -405,57 +453,57 @@ export default function App() {
     terminatedRef.current = false;
     deltaAccRef.current = "";
     currentStageKeyRef.current = "";
-    setGroups([]);
-    setActiveGroupKeys([]);
+    setMilestones([]);
     setFinalMarkdown("");
     try {
-      ensureGroup("biz:overview", "流程概览", "business", false);
-      appendToGroup("biz:overview", "【一键分析】文档转换 → 索引 → 大模型审查（按所选关注点）\n\n");
-
-      ensureGroup("sys:convert", "系统调用：转换文档", "system", true);
-      appendToGroup("sys:convert", "【docs2md】开始转换…\n");
+      ensureMilestone("sys:convert", "文档转换", "system");
+      appendMilestoneDetail("sys:convert", "【docs2md】开始转换…\n");
       await new Promise<void>((resolve, reject) => {
         const stop = openConvertStream(
           selectedId,
           (ev) => {
             if (ev.type === "log" && typeof ev.text === "string") {
-              appendToGroup("sys:convert", ev.text + "\n");
+              appendMilestoneDetail("sys:convert", ev.text + "\n");
             }
             if (ev.type === "complete") {
               stop();
               stopConvertRef.current = null;
+              setMilestoneStatus("sys:convert", "done");
               resolve();
             }
             if (ev.type === "error") {
               stop();
               stopConvertRef.current = null;
+              setMilestoneStatus("sys:convert", "error");
               reject(new Error(String(ev.message)));
             }
           },
           (e) => {
             stop();
             stopConvertRef.current = null;
+            setMilestoneStatus("sys:convert", "error");
             reject(e);
           },
         );
         stopConvertRef.current = () => {
           stop();
           stopConvertRef.current = null;
+          setMilestoneStatus("sys:convert", "done");
           resolve();
         };
       });
       if (terminatedRef.current) return;
-      appendToGroup("sys:convert", "【docs2md】转换完成。\n");
+      appendMilestoneDetail("sys:convert", "【docs2md】转换完成。\n");
 
-      ensureGroup("sys:index", "系统调用：索引与分块", "system", true);
-      appendToGroup("sys:index", "【索引】正在将 Markdown 写入索引与分块…\n");
+      ensureMilestone("sys:index", "索引与分块", "system");
+      appendMilestoneDetail("sys:index", "【索引】正在将 Markdown 写入索引与分块…\n");
       const idx = await apiJson<{ indexed_documents: number }>(`/api/v1/projects/${selectedId}/index-md`, { method: "POST" });
-      appendToGroup("sys:index", `【索引】完成，已索引 ${idx.indexed_documents} 个文档。\n`);
+      appendMilestoneDetail("sys:index", `【索引】完成，已索引 ${idx.indexed_documents} 个文档。\n`);
+      setMilestoneStatus("sys:index", "done");
       if (terminatedRef.current) return;
 
-      ensureGroup("biz:analysis", "分析内容", "business", false);
-      currentStageKeyRef.current = "biz:analysis";
-      appendToGroup("biz:analysis", "（开始流式输出…）\n\n");
+      // 分析阶段由后端 stage 事件驱动，不预先创建未来里程碑
+      currentStageKeyRef.current = "";
 
       const analyzeAbort = new AbortController();
       analyzeAbortRef.current = analyzeAbort;
@@ -490,14 +538,14 @@ export default function App() {
               const key = `stage:${name}`;
               const kind: LogGroupKind =
                 name.includes("错误") ? "error" : name.includes("分析") || name.includes("呈现") ? "business" : "system";
-              ensureGroup(key, name, kind, kind !== "business");
-              setGroupTitle(key, name);
+              ensureMilestone(key, name, kind);
               currentStageKeyRef.current = key;
               if (state === "start") {
-                const detail = typeof (ev as any).detail === "string" ? ` ${String((ev as any).detail)}` : "";
-                appendToGroup(key, `> 开始：${name}${detail}\n\n`);
+                // 不输出冗余“开始/完成”提示，仅创建里程碑
+                const detail = typeof (ev as any).detail === "string" ? String((ev as any).detail) : "";
+                if (detail) appendMilestoneDetail(key, `${detail}\n`);
               } else if (state === "end") {
-                appendToGroup(key, `\n> 完成：${name}\n\n`);
+                setMilestoneStatus(key, "done");
               }
             }
             if (ev.type === "final") {
@@ -522,14 +570,14 @@ export default function App() {
 
       const md = fin.markdown || "";
       setFinalMarkdown(md);
-      ensureGroup("biz:result", "结果呈现", "business", false);
-      appendToGroup("biz:result", md || "（无结果输出）\n");
       message.success("全流程完成");
     } catch (e) {
       if ((e as Error)?.name === "AbortError" || terminatedRef.current) return;
       const msg = String((e as Error).message);
-      ensureGroup("err:main", "错误", "error", false);
-      appendToGroup("err:main", `[error] ${msg}\n`);
+      const target = currentStageKeyRef.current || lastMilestoneIdRef.current || "sys:control";
+      ensureMilestone(target, target.startsWith("stage:") ? target.slice(6) : "系统调用", "error");
+      appendMilestoneDetail(target, `[error] ${msg}\n`);
+      setMilestoneStatus(target, "error");
       message.error(msg);
     } finally {
       setPipelineRunning(false);
@@ -578,7 +626,7 @@ export default function App() {
             type="error"
             showIcon
             message={`rules.md 格式异常：${rulesMdError}`}
-            description="系统已自动回退到数据库中的上次有效设置。请修复 rules.md 后刷新页面，或在设置页保存一次。"
+            description="系统已自动回退到 default_rules.md。请修复 rules.md 后刷新页面，或在设置页保存一次。"
           />
         ) : null}
         <Space wrap>
@@ -641,7 +689,7 @@ export default function App() {
                           onClick={() => {
                             const next = parseRecommendedFocus(r.recommended || "");
                             if (!next.length) {
-                              message.warning("未解析到可用关注点（请确认名称与关注点列表一致）");
+                              message.warning("未解析到可用关注点（请确认 rules.md 推荐组合使用 focus:<id> 或名称能匹配关注点列表）");
                               return;
                             }
                             setFocusPoints(next);
@@ -684,21 +732,46 @@ export default function App() {
       <div style={{ marginTop: 12, marginBottom: 16 }}>
         {pipelineRunning ? <Text type="secondary">分析进行中…（可滚动查看实时输出）</Text> : null}
         <div className="raw-stream stream-log process-stream">
-          {groups.length ? (
-            <Collapse
-              activeKey={activeGroupKeys}
-              onChange={(keys) => setActiveGroupKeys(Array.isArray(keys) ? (keys as string[]) : [String(keys)])}
-              items={groups.map((g) => ({
-                key: g.key,
-                label: g.title,
-                children: <div style={{ fontSize: 12 }}>{renderGroupContent(g)}</div>,
-              }))}
-            />
+          {milestones.length ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {milestones.map((m) => {
+                const showDetails = (m.detailText || "").trim().length > 0;
+                const done = m.status === "done";
+                const title = done ? `✓ ${m.name} >` : `${m.name} >`;
+                const titleColor = m.status === "error" ? "#cf1322" : "#374151";
+                return (
+                  <div key={m.id} style={{ fontSize: 12 }}>
+                    {showDetails ? (
+                      <details style={{ marginTop: 0 }}>
+                        <summary style={{ cursor: "pointer", listStyle: "none", color: titleColor }}>
+                          {title}
+                        </summary>
+                        <div style={{ marginTop: 6 }}>{renderMilestoneDetail(m)}</div>
+                      </details>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
           ) : (
-            <Text type="secondary">（输出将以折叠分组显示：业务内容默认展开，系统调用/错误默认折叠）</Text>
+            <Text type="secondary">（将按完成进度逐步显示里程碑；细节默认折叠）</Text>
           )}
         </div>
       </div>
+
+      {finalMarkdown.trim() ? (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <Text strong>结果</Text>
+            <Button icon={<DownloadOutlined />} onClick={exportMarkdown}>
+              导出 md
+            </Button>
+          </div>
+          <div style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12, background: "#fff" }}>
+            <SimpleMarkdown markdown={finalMarkdown} />
+          </div>
+        </div>
+      ) : null}
 
       <Modal title="设置" open={settingsOpen} onOk={saveSettings} onCancel={() => setSettingsOpen(false)} width={860} okText="保存">
         <Space direction="vertical" style={{ width: "100%", fontSize: 12 }} size={12}>
@@ -845,6 +918,7 @@ export default function App() {
                       mode="multiple"
                       allowClear
                       placeholder="选择该预设包含的关注点"
+                      style={{ width: "100%" }}
                       value={(settingsDraft.focus_presets || [])[presetSelectedIndex]?.focus_points || []}
                       options={(settingsDraft.focus_points || []).map((x) => ({ value: x.name, label: x.name }))}
                       onChange={(vals) => updatePresetAt(presetSelectedIndex, { focus_points: vals as string[] })}
@@ -911,11 +985,12 @@ export default function App() {
                     style={{ width: 280 }}
                     placeholder="选择或输入文本模型"
                     value={settingsDraft.llm_settings?.text_model ? [settingsDraft.llm_settings.text_model] : []}
+                    allowClear
                     options={TEXT_MODEL_OPTIONS.map((m) => ({ value: m, label: m }))}
                     onChange={(vals) =>
                       setSettingsDraft((s) => ({
                         ...s,
-                        llm_settings: { ...s.llm_settings, text_model: String(vals?.[0] || "") || "qwen3" },
+                        llm_settings: { ...s.llm_settings, text_model: String(vals?.[0] || "") },
                       }))
                     }
                   />
@@ -969,11 +1044,12 @@ export default function App() {
                     style={{ width: 320 }}
                     placeholder="选择或输入 VL 模型"
                     value={settingsDraft.llm_settings?.vl_model ? [settingsDraft.llm_settings.vl_model] : []}
+                    allowClear
                     options={VL_MODEL_OPTIONS.map((m) => ({ value: m, label: m }))}
                     onChange={(vals) =>
                       setSettingsDraft((s) => ({
                         ...s,
-                        llm_settings: { ...s.llm_settings, vl_model: String(vals?.[0] || "") || "qwen3-vl-plus" },
+                        llm_settings: { ...s.llm_settings, vl_model: String(vals?.[0] || "") },
                       }))
                     }
                   />
