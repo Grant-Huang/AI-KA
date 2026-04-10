@@ -13,7 +13,6 @@ venv
 dist
 build
 web/frontend/node_modules
-web/frontend/dist
 docs/epic-doc/out
 **/.DS_Store
 .env

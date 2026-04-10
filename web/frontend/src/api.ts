@@ -1,4 +1,19 @@
-const BASE = "";
+function resolveApiBase(): string {
+  // Prefer explicit Vite env var (build-time)
+  const fromEnv = String((import.meta as any)?.env?.VITE_API_BASE || "").trim();
+  if (fromEnv) return fromEnv.replace(/\/+$/, "");
+
+  // Runtime heuristic: when frontend dev server runs on :3000, backend is usually on :8765
+  if (typeof window !== "undefined") {
+    const { protocol, hostname, port } = window.location;
+    if (port === "3000") {
+      return `${protocol}//${hostname}:8765`;
+    }
+  }
+  return "";
+}
+
+const BASE = resolveApiBase();
 
 export type ApiOk<T> = { status: "success"; data: T; message?: string };
 export type ApiErr = { status: "error"; message: string; data?: unknown };

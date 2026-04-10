@@ -7,7 +7,7 @@ import pytest
 from aika import db as dbm
 from aika.analyze import AnalyzeScope, run_extract_annotations
 from aika.epic_doc import build_generate_command
-from aika.indexer import compute_sha256, sync_project
+from aika.indexer import CHUNK_STRATEGY_BLANK, CHUNK_STRATEGY_STRUCTURED, compute_sha256, sync_project
 from aika.llm import LLMConfig
 
 
@@ -152,4 +152,48 @@ def test_list_annotations_with_evidence_returns_doc_and_locator(tmp_path: Path) 
     r0 = rows[0]
     assert "doc_path" in r0.keys()
     assert "locator_json" in r0.keys()
+
+
+def test_sync_blank_md_sets_locator_kind_blank(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    db_file = repo_root / ".tmp" / "aika" / "aika.sqlite3"
+
+    proj_root = tmp_path / "proj"
+    write_text(proj_root / "01_调研" / "a.md", "p1\n\np2\n")
+
+    conn = dbm.connect(db_file)
+    dbm.ensure_schema(conn)
+    prj = dbm.create_project(conn, "demo", proj_root.as_posix())
+    sync_project(conn, project=prj, chunk_strategy=CHUNK_STRATEGY_BLANK)
+
+    entries = dbm.list_chunk_entries(conn, project_id=prj.id, limit=50)
+    assert entries
+    md_entries = [e for e in entries if str(e["doc_path"]).endswith(".md")]
+    assert md_entries
+    assert any(e["locator"].get("kind") == "blank" for e in md_entries)
+
+
+def test_sync_structured_md_sets_md_structured_locator(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    db_file = repo_root / ".tmp" / "aika" / "aika.sqlite3"
+
+    proj_root = tmp_path / "proj"
+    write_text(
+        proj_root / "01_调研" / "a.md",
+        "# Doc\n\nintro line\n\n## S1\n\nalpha\n\n## S2\n\nbeta\n",
+    )
+
+    conn = dbm.connect(db_file)
+    dbm.ensure_schema(conn)
+    prj = dbm.create_project(conn, "demo", proj_root.as_posix())
+    sync_project(conn, project=prj, chunk_strategy=CHUNK_STRATEGY_STRUCTURED)
+
+    entries = dbm.list_chunk_entries(conn, project_id=prj.id, limit=50)
+    assert entries
+    kinds = {e["locator"].get("kind") for e in entries}
+    assert "md_structured" in kinds
+    with_heading = [e for e in entries if e["locator"].get("heading_path")]
+    assert with_heading
 

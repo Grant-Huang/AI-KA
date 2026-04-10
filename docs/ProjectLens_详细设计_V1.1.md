@@ -3,7 +3,7 @@
 
 详细设计文档（Detailed Design）
 
-V1.1  |  2026-03-25
+V1.2  |  2026-04-10
 
 ---
 
@@ -11,6 +11,7 @@ V1.1  |  2026-03-25
 
 | 版本 | 日期 | 修改内容 | 作者 |
 | :-- | :-- | :-- | :-- |
+| V1.2 | 2026-04-10 | 索引器双策略、`locator_json` 扩展字段；`list_chunk_entries`；`build_user_prompt_from_entries` 块头；`analyze/stream` 追加索引表；`GET/POST /api/v1/settings` 的 `chunk_strategy`；`index-md` 传入策略 | AI 协作 |
 | V1.1 | 2026-03-25 | 基于《需求与设计文档 V1.0》补齐详细设计：模块边界、数据模型、接口契约、时序、异常与审计 | AI 协作 |
 
 ---
@@ -134,8 +135,17 @@ V1.1  |  2026-03-25
 | token_count | int |  | 估算 token |
 | locator_json | text/json |  | 定位信息（段落 id、偏移、页码等） |
 
+**locator_json（当前实现补充）**：除 `start_line` / `end_line` / `paragraph_count` 外，可含 `kind`（`blank` | `md_structured` | `txt_plain`）、`heading_path`（字符串数组）、`section_level`、`section_title`；`blank` 策略下章节类字段可为空，下游展示时用「—」占位。
+
 索引建议：
 - `(document_id, chunk_index)`
+
+#### 3.1.3.1 索引与提示词（Web 分析链路）
+
+- **索引器**（`src/aika/indexer.py`）：`sync_project` / `sync_project_md_root` 接收 `chunk_strategy`；Web 调用 `index-md` 时**必须**传入设置中的策略（不得仅依赖环境变量）。CLI 无设置文件时可用 `AIKA_CHUNK_STRATEGY` 作为后备，默认 `blank`。
+- **数据访问**（`src/aika/db.py`）：`list_chunk_entries(project_id, limit)` 返回 `doc_path`、`chunk_index`、`text`、解析后的 `locator`；`list_chunk_texts` 可视为对其封装。
+- **提示词**（`web/backend/prompt_builder.py`）：`build_user_prompt_from_entries` 生成带「片段 n | 文件 | 章节 | 行」的块头；`format_chunk_index_markdown` 生成文末 GFM 索引表。
+- **分析 API**（`web/backend/main.py`）：流式结束后将模型输出规范化 Markdown，再**拼接**上述索引表（仅包含实际送入模型的片段）。
 
 #### 3.1.4 annotations
 

@@ -1,5 +1,7 @@
 # Docker 部署 AI-KA
 
+更完整的运维说明（环境变量清单、数据与权限、升级与排错）见 [《系统管理员手册》](System_Admin_Manual_zh.md)。
+
 ## 前置
 
 - 已安装 [Docker](https://docs.docker.com/get-docker/) 与 Docker Compose v2。

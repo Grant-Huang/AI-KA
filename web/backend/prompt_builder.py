@@ -17,7 +17,7 @@ MARKDOWN_OUTPUT_HINT = """
 - 必须使用简体中文（专有名词/缩写除外）；
 - 必须分章节输出（使用 `##` / `###`）；
 - 必须给出“结论”与“建议”（如无证据需说明“未在片段中发现”）；
-- 如引用证据，请标注片段编号（例如：片段 12）。
+- 如引用证据，请标注片段编号（例如：片段 12），并与各片段块头中的「文件 / 章节」一致。
 禁止：
 - 不要输出 `<think>` / `</think>`；
 - 不要输出任何“我将如何分析/Let me analyze...”之类的过程性文字。
@@ -84,3 +84,66 @@ def build_user_prompt(*, chunk_texts: list[str], max_chars: int = 120_000) -> st
         parts.append(block)
         total += len(block)
     return "以下是项目 Markdown 片段（可能经 docs2md 转换）。请按系统要求输出中文 Markdown：\n\n" + "\n".join(parts)
+
+
+def _format_section_from_locator(loc: dict[str, Any]) -> str:
+    hp = loc.get("heading_path")
+    if isinstance(hp, list) and hp:
+        return " > ".join(str(x) for x in hp if str(x).strip())
+    return "—"
+
+
+def _format_lines_from_locator(loc: dict[str, Any]) -> str:
+    sl = loc.get("start_line")
+    el = loc.get("end_line")
+    if isinstance(sl, int) and isinstance(el, int):
+        return f"{sl}-{el}"
+    return "—"
+
+
+def build_user_prompt_from_entries(
+    entries: list[dict[str, Any]],
+    *,
+    max_chars: int = 120_000,
+) -> tuple[str, list[dict[str, Any]]]:
+    """
+    返回 (prompt 文本, 实际纳入 prompt 的 entries 子列表)，用于与文末索引表一致。
+    """
+    parts: list[str] = []
+    total = 0
+    used: list[dict[str, Any]] = []
+    for i, e in enumerate(entries):
+        loc = e.get("locator") if isinstance(e.get("locator"), dict) else {}
+        path = str(e.get("doc_path") or "")
+        section = _format_section_from_locator(loc)
+        lines_rng = _format_lines_from_locator(loc)
+        body = str(e.get("text") or "")
+        header = f"--- 片段 {i + 1} | 文件: {path} | 章节: {section} | 行: {lines_rng} ---\n"
+        block = header + body + "\n"
+        if total + len(block) > max_chars:
+            break
+        parts.append(block)
+        total += len(block)
+        used.append(e)
+    intro = "以下是项目 Markdown 片段（可能经 docs2md 转换）。请按系统要求输出中文 Markdown：\n\n"
+    return intro + "\n".join(parts), used
+
+
+def format_chunk_index_markdown(entries: list[dict[str, Any]]) -> str:
+    if not entries:
+        return ""
+    rows: list[str] = [
+        "",
+        "## 片段与来源索引",
+        "",
+        "| 片段 | 文件 | 章节 | 行号 |",
+        "| --- | --- | --- | --- |",
+    ]
+    for i, e in enumerate(entries, start=1):
+        loc = e.get("locator") if isinstance(e.get("locator"), dict) else {}
+        path = str(e.get("doc_path") or "").replace("|", "\\|")
+        section = _format_section_from_locator(loc).replace("|", "\\|")
+        lines_rng = _format_lines_from_locator(loc)
+        rows.append(f"| {i} | {path} | {section} | {lines_rng} |")
+    rows.append("")
+    return "\n".join(rows)

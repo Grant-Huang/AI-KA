@@ -3,15 +3,13 @@
 # 运行：见 docker-compose.yml
 
 # ---------- 前端 ----------
-FROM node:22-bookworm-slim AS frontend-build
-WORKDIR /src/web/frontend
-COPY web/frontend/package.json web/frontend/package-lock.json ./
-RUN npm ci
-COPY web/frontend/ ./
-RUN npm run build
+# 前端已构建，直接复制 dist 目录
+FROM python:3.12 AS frontend-build
+WORKDIR /app
+COPY web/frontend/dist ./web/frontend/dist
 
 # ---------- 后端 ----------
-FROM python:3.13-slim-bookworm
+FROM python:3.12
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -40,7 +38,7 @@ COPY src ./src
 COPY web ./web
 
 # 用构建阶段产物覆盖 web/frontend/dist（供 backend 挂载静态站）
-COPY --from=frontend-build /src/web/frontend/dist ./web/frontend/dist
+COPY --from=frontend-build /app/web/frontend/dist ./web/frontend/dist
 
 RUN pip install --upgrade pip setuptools wheel \
     && pip install .

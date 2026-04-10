@@ -20,7 +20,7 @@ class _FakeAnalyzeProvider:
     def chat_stream(self, *, system: str, user: str, config: object):  # type: ignore[no-untyped-def]
         assert "关注点审查清单" in system
         assert "需求" in system
-        assert "片段" in user or "hello" in user
+        assert "片段" in user and ("hello" in user or "文件" in user)
         del config
         yield '{"title":"T","blocks":[]}'
 
@@ -51,7 +51,18 @@ def test_analyze_stream_post_streams_success(monkeypatch: pytest.MonkeyPatch, tm
     import backend.main as main_mod
 
     monkeypatch.setattr(main_mod, "get_provider", lambda _p: _FakeAnalyzeProvider())
-    monkeypatch.setattr(main_mod.dbm, "list_chunk_texts", lambda *a, **k: ["hello chunk"])
+    monkeypatch.setattr(
+        main_mod.dbm,
+        "list_chunk_entries",
+        lambda *a, **k: [
+            {
+                "doc_path": "a.md",
+                "chunk_index": 0,
+                "text": "hello chunk",
+                "locator": {"start_line": 1, "end_line": 1, "heading_path": []},
+            }
+        ],
+    )
 
     from backend.main import app
 
@@ -72,3 +83,4 @@ def test_analyze_stream_post_streams_success(monkeypatch: pytest.MonkeyPatch, tm
     assert resp.status_code == 200
     assert b"final" in resp.content
     assert b'"type"' in resp.content
+    assert "片段与来源索引".encode("utf-8") in resp.content

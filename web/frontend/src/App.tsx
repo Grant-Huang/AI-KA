@@ -8,6 +8,7 @@ import {
   Input,
   InputNumber,
   Modal,
+  Radio,
   Popover,
   Select,
   Space,
@@ -43,10 +44,13 @@ type LlmSettings = {
 };
 type FocusComboTip = { stage: string; recommended: string };
 type FocusPreset = { id: string; name: string; focus_points: string[] };
+type ChunkStrategy = "blank" | "structured";
+
 type SettingsData = {
   focus_points: FocusPoint[];
   focus_presets?: FocusPreset[];
   chunk_limit: number;
+  chunk_strategy?: ChunkStrategy;
   disable_image_parse?: boolean;
   llm_settings: LlmSettings;
   focus_combo_tips?: FocusComboTip[];
@@ -85,12 +89,15 @@ export default function App() {
   const [chunkLimit, setChunkLimit] = useState(40);
   const [nativePickerAvailable, setNativePickerAvailable] = useState(true);
   const [pickLoading, setPickLoading] = useState(false);
+  const [manualRootInput, setManualRootInput] = useState("");
+  const [manualLoadLoading, setManualLoadLoading] = useState(false);
   const [focusPoints, setFocusPoints] = useState<string[]>([]);
   const [focusDefs, setFocusDefs] = useState<FocusPoint[]>([]);
   const [focusComboTips, setFocusComboTips] = useState<FocusComboTip[]>([]);
   const [focusPresets, setFocusPresets] = useState<FocusPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState<string>("");
   const [pipelineRunning, setPipelineRunning] = useState(false);
+  const [pipelineTaskBrief, setPipelineTaskBrief] = useState("");
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -99,6 +106,7 @@ export default function App() {
   const [settingsDraft, setSettingsDraft] = useState<SettingsData>({
     focus_points: [],
     chunk_limit: 40,
+    chunk_strategy: "blank",
     disable_image_parse: true,
     llm_settings: {
       text_provider: "openai_compatible",
@@ -118,6 +126,8 @@ export default function App() {
   const [focusSelectedIndex, setFocusSelectedIndex] = useState(0);
   const [presetSelectedIndex, setPresetSelectedIndex] = useState(0);
 
+  const chunkStrategyAtOpenRef = useRef<ChunkStrategy>("blank");
+  const [milestoneOpenOverrides, setMilestoneOpenOverrides] = useState<Record<string, boolean>>({});
   const rulesFileInputRef = useRef<HTMLInputElement | null>(null);
   const stopConvertRef = useRef<(() => void) | null>(null);
   const stopAnalyzeRef = useRef<(() => void) | null>(null);
@@ -156,16 +166,21 @@ export default function App() {
     });
   }, []);
 
-  const loadSettings = useCallback(async () => {
+  const loadSettings = useCallback(async (opts?: { snapshot_chunk_strategy?: boolean }) => {
     const data = await apiJson<SettingsData>("/api/v1/settings");
-    setChunkLimit(data.chunk_limit);
-    setFocusDefs(data.focus_points);
-    setFocusComboTips(data.focus_combo_tips || []);
-    setFocusPresets(data.focus_presets || []);
-    setSettingsDraft(data);
+    const cs: ChunkStrategy = data.chunk_strategy === "structured" ? "structured" : "blank";
+    const merged = { ...data, chunk_strategy: cs };
+    if (opts?.snapshot_chunk_strategy) {
+      chunkStrategyAtOpenRef.current = cs;
+    }
+    setChunkLimit(merged.chunk_limit);
+    setFocusDefs(merged.focus_points);
+    setFocusComboTips(merged.focus_combo_tips || []);
+    setFocusPresets(merged.focus_presets || []);
+    setSettingsDraft(merged);
     setFocusSelectedIndex(0);
     setPresetSelectedIndex(0);
-    setRulesMdError(data.rules_md_error || null);
+    setRulesMdError(merged.rules_md_error || null);
     setTextApiKeyDraft("");
     setTextApiKeyTouched(false);
     setVlApiKeyDraft("");
@@ -180,7 +195,7 @@ export default function App() {
   useEffect(() => {
     if (!settingsOpen) return;
     // 每次打开设置时都从后端刷新，避免显示旧值/读错配置源时难以定位
-    loadSettings().catch((e) => message.error(String((e as Error).message)));
+    loadSettings({ snapshot_chunk_strategy: true }).catch((e) => message.error(String((e as Error).message)));
   }, [settingsOpen, loadSettings]);
 
   useEffect(() => {
@@ -235,6 +250,23 @@ export default function App() {
     }
   };
 
+  const onLoadManualPath = async () => {
+    const p = manualRootInput.trim();
+    if (!p) {
+      message.warning("请先填写项目根路径");
+      return;
+    }
+    setManualLoadLoading(true);
+    try {
+      setPickedRootPath(p);
+      await ensureProjectForPath(p);
+    } catch (e) {
+      message.error(String((e as Error).message));
+    } finally {
+      setManualLoadLoading(false);
+    }
+  };
+
   const saveSettings = async () => {
     if (!settingsDraft.focus_points.length) {
       message.warning("关注点不能为空");
@@ -260,6 +292,10 @@ export default function App() {
       setTextApiKeyTouched(false);
       setVlApiKeyDraft("");
       setVlApiKeyTouched(false);
+      const savedCs: ChunkStrategy = data.chunk_strategy === "structured" ? "structured" : "blank";
+      if (savedCs !== chunkStrategyAtOpenRef.current) {
+        message.warning("分块策略已更新，请重新执行「索引与分块」（或全流程中的索引步骤），否则分析仍基于旧分块结果。");
+      }
       setSettingsOpen(false);
       message.success("设置已保存");
     } catch (e) {
@@ -454,7 +490,13 @@ export default function App() {
     deltaAccRef.current = "";
     currentStageKeyRef.current = "";
     setMilestones([]);
+    setMilestoneOpenOverrides({});
     setFinalMarkdown("");
+    const projName = selected?.name ? String(selected.name) : "当前项目";
+    const fpSample = focusPoints.slice(0, 3).join("、");
+    const fpRest = focusPoints.length > 3 ? "等" : "";
+    const taskBrief = `本次针对项目「${projName}」，将围绕${fpSample}${fpRest}共 ${focusPoints.length} 项关注点开展关联审查。流程将顺序执行：① 文档转换（docs2md 将源文档转为 Markdown）；② 索引与分块（按设置中的分块策略建立可检索片段）；③ 模型分析（结合关注点生成结构化审查结论）。请关注下方各步骤日志；若您刚在设置中修改过分块策略，请务必重新执行索引后再解读分析结果，以免结论仍基于旧分块边界。`;
+    setPipelineTaskBrief(taskBrief);
     try {
       ensureMilestone("sys:convert", "文档转换", "system");
       appendMilestoneDetail("sys:convert", "【docs2md】开始转换…\n");
@@ -569,6 +611,9 @@ export default function App() {
       if (terminatedRef.current) return;
 
       const md = fin.markdown || "";
+      ensureMilestone("sys:complete", "流程状态", "system");
+      appendMilestoneDetail("sys:complete", "已完成。\n");
+      setMilestoneStatus("sys:complete", "done");
       setFinalMarkdown(md);
       message.success("全流程完成");
     } catch (e) {
@@ -580,6 +625,7 @@ export default function App() {
       setMilestoneStatus(target, "error");
       message.error(msg);
     } finally {
+      setPipelineTaskBrief("");
       setPipelineRunning(false);
       analyzeAbortRef.current = null;
       stopConvertRef.current = null;
@@ -629,9 +675,36 @@ export default function App() {
             description="系统已自动回退到 default_rules.md。请修复 rules.md 后刷新页面，或在设置页保存一次。"
           />
         ) : null}
-        <Space wrap>
-          <Button type="primary" loading={pickLoading} disabled={!nativePickerAvailable} onClick={onPickDirectory}>
-            选择项目
+        {!nativePickerAvailable ? (
+          <Alert
+            type="info"
+            showIcon
+            message="本机文件夹对话框不可用（常见于 Docker 或经网关访问）。请使用下方输入框填写后端可见的项目根路径并点击「加载路径」。"
+            description="若需分析宿主机目录，请在 docker-compose 中把该目录挂载进容器（例如 /projects），并填写容器内对应路径。"
+            style={{ marginBottom: 4 }}
+          />
+        ) : null}
+        <Space wrap align="center">
+          <Tooltip
+            title={
+              nativePickerAvailable
+                ? "调用本机原生目录选择（仅适用于后端跑在本机桌面环境）"
+                : "当前后端判定无法安全弹出本机选目录；请用手动路径。"
+            }
+          >
+            <Button type="primary" loading={pickLoading} disabled={!nativePickerAvailable} onClick={onPickDirectory}>
+              选择项目
+            </Button>
+          </Tooltip>
+          <Input
+            style={{ minWidth: 280, maxWidth: 480 }}
+            placeholder="或填写项目根路径（后端/容器内可见路径）"
+            value={manualRootInput}
+            onChange={(e) => setManualRootInput(e.target.value)}
+            onPressEnter={() => void onLoadManualPath()}
+          />
+          <Button type="default" loading={manualLoadLoading} onClick={() => void onLoadManualPath()}>
+            加载路径
           </Button>
           {pickedRootPath ? <Text code>{pickedRootPath}</Text> : <Text type="secondary">未选择项目路径</Text>}
         </Space>
@@ -731,6 +804,11 @@ export default function App() {
 
       <div style={{ marginTop: 12, marginBottom: 16 }}>
         {pipelineRunning ? <Text type="secondary">分析进行中…（可滚动查看实时输出）</Text> : null}
+        {pipelineRunning && pipelineTaskBrief ? (
+          <Text style={{ display: "block", marginTop: 8, marginBottom: 10, fontSize: 12, color: "#374151", lineHeight: 1.65 }}>
+            {pipelineTaskBrief}
+          </Text>
+        ) : null}
         <div className="raw-stream stream-log process-stream">
           {milestones.length ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -739,14 +817,22 @@ export default function App() {
                 const done = m.status === "done";
                 const title = done ? `✓ ${m.name} >` : `${m.name} >`;
                 const titleColor = m.status === "error" ? "#cf1322" : "#374151";
+                const defaultOpen = m.status === "running";
+                const o = milestoneOpenOverrides[m.id];
+                const expanded = o !== undefined ? o : defaultOpen;
                 return (
                   <div key={m.id} style={{ fontSize: 12 }}>
                     {showDetails ? (
-                      <details style={{ marginTop: 0 }}>
-                        <summary style={{ cursor: "pointer", listStyle: "none", color: titleColor }}>
-                          {title}
-                        </summary>
-                        <div style={{ marginTop: 6 }}>{renderMilestoneDetail(m)}</div>
+                      <details
+                        style={{ marginTop: 0 }}
+                        open={expanded}
+                        onToggle={(ev) => {
+                          const el = ev.currentTarget;
+                          setMilestoneOpenOverrides((prev) => ({ ...prev, [m.id]: el.open }));
+                        }}
+                      >
+                        <summary style={{ cursor: "pointer", listStyle: "none", color: titleColor }}>{title}</summary>
+                        <div style={{ marginTop: 6, color: "#6b7280" }}>{renderMilestoneDetail(m)}</div>
                       </details>
                     ) : null}
                   </div>
@@ -784,6 +870,16 @@ export default function App() {
                 value={settingsDraft.chunk_limit}
                 onChange={(v) => setSettingsDraft((s) => ({ ...s, chunk_limit: Math.max(1, Math.min(500, Number(v) || 40)) }))}
               />
+              <Text strong>分块方式</Text>
+              <Radio.Group
+                value={settingsDraft.chunk_strategy === "structured" ? "structured" : "blank"}
+                onChange={(e) =>
+                  setSettingsDraft((s) => ({ ...s, chunk_strategy: e.target.value as ChunkStrategy }))
+                }
+              >
+                <Radio value="blank">空行分块（与升级前一致）</Radio>
+                <Radio value="structured">标题与结构感知（.md 按标题/代码围栏）</Radio>
+              </Radio.Group>
               <Checkbox checked={!!settingsDraft.disable_image_parse} onChange={(e) => setSettingsDraft((s) => ({ ...s, disable_image_parse: e.target.checked }))}>
                 不解析文件中的图片
               </Checkbox>

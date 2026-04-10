@@ -138,6 +138,16 @@ V1.0  |  2026-03-25
 
 ---
 
+## 3.5 迭代记录（2026-04-10：结构分块与片段索引）
+
+- [x] Web `app_settings` / 设置 API 增加 `chunk_strategy`（`blank` | `structured`），`index-md` 按设置传入索引器。
+- [x] 索引器：`structured` 下 `.md` 标题栈 + 代码围栏 + 节内装箱；`locator_json` 含 `kind` / `heading_path` 等。
+- [x] 分析：`list_chunk_entries`、提示词块头、流式结果末尾追加「片段与来源索引」表。
+- [x] 前端：分块方式单选、策略变更保存后提示重新索引；流程区任务说明、里程碑折叠规则、「已完成。」
+- [x] 文档：`docs/User_Manual_zh.md`、`docs/System_Admin_Manual_zh.md` 与 ProjectLens 系列文档修订。
+
+---
+
 ## 4. 风险与对策（提前声明）
 
 - **输入文档格式复杂**（docx/pdf/xlsx）：先从 md/txt 开始，逐步扩展；每扩展一种格式，必须补齐定位/证据链。

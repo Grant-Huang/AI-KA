@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from aika import db as dbm
 from aika.epic_doc import EpicDocError, generate_docx
-from aika.indexer import sync_project_md_root
+from aika.indexer import CHUNK_STRATEGY_BLANK, CHUNK_STRATEGY_STRUCTURED, sync_project_md_root
 from aika.llm import LLMConfig, LLMError, get_provider
 from aika.paths import db_path
 
@@ -23,7 +23,12 @@ from backend.folder_picker import FolderPickerError, pick_folder_native
 from backend.epic_mapper import analysis_to_epic_doc_config, dump_epic_config_json
 from backend.frontend_static import dev_dist_dir, packaged_dist_dir
 from backend.path_validate import PathValidationError, validate_path_under_dir, validate_project_root
-from backend.prompt_builder import build_system_prompt, build_user_prompt, merge_rules
+from backend.prompt_builder import (
+    build_system_prompt,
+    build_user_prompt_from_entries,
+    format_chunk_index_markdown,
+    merge_rules,
+)
 from backend.repo_paths import project_export_dir, project_md_out_dir, repository_root
 from backend.response import err, ok
 
@@ -58,6 +63,7 @@ DEFAULT_FOCUS_POINTS: list[dict[str, str]] = [
     {"id": "data", "name": "数据一致性", "prompt": "关注关键主数据、口径与跨系统一致性问题。"},
 ]
 DEFAULT_CHUNK_LIMIT = 40
+DEFAULT_CHUNK_STRATEGY = CHUNK_STRATEGY_BLANK
 DEFAULT_TEXT_MODEL = "qwen3"
 DEFAULT_VL_MODEL = "qwen3-vl-plus"
 DEFAULT_TEXT_PROVIDER = "openai_compatible"
@@ -164,10 +170,19 @@ def _read_app_settings_md_debug() -> tuple[dict[str, Any], str | None, str]:
     return cfg, err, "none"
 
 
+def _normalize_chunk_strategy(raw: Any) -> str:
+    if isinstance(raw, str):
+        v = raw.strip().lower()
+        if v in (CHUNK_STRATEGY_BLANK, CHUNK_STRATEGY_STRUCTURED):
+            return v
+    return DEFAULT_CHUNK_STRATEGY
+
+
 def _write_app_settings_md(payload: dict[str, Any]) -> None:
     p = _app_settings_md_path()
     obj = {
         "chunk_limit": int(payload.get("chunk_limit") or DEFAULT_CHUNK_LIMIT),
+        "chunk_strategy": _normalize_chunk_strategy(payload.get("chunk_strategy")),
         "disable_image_parse": bool(payload.get("disable_image_parse", True)),
         "llm_settings": payload.get("llm_settings") if isinstance(payload.get("llm_settings"), dict) else {},
         "llm_text_api_key": str(payload.get("llm_text_api_key") or ""),
@@ -189,6 +204,7 @@ def _build_settings_payload(conn: Any) -> dict[str, Any]:
         "focus_points": _get_focus_points(),
         "focus_presets": _get_focus_presets(),
         "chunk_limit": _get_chunk_limit(),
+        "chunk_strategy": _get_chunk_strategy(),
         "disable_image_parse": _get_disable_image_parse(),
         "llm_settings": _get_llm_settings(),
     }
@@ -484,6 +500,12 @@ def _get_chunk_limit() -> int:
     return DEFAULT_CHUNK_LIMIT
 
 
+def _get_chunk_strategy() -> str:
+    app_cfg, _ = _read_app_settings_md()
+    v = app_cfg.get("chunk_strategy") if isinstance(app_cfg, dict) else None
+    return _normalize_chunk_strategy(v)
+
+
 def _get_disable_image_parse() -> bool:
     app_cfg, _ = _read_app_settings_md()
     v = app_cfg.get("disable_image_parse") if isinstance(app_cfg, dict) else None
@@ -675,6 +697,15 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
             return JSONResponse(err("chunk_limit must be between 1 and 500"), status_code=400)
         current["chunk_limit"] = val
         app_cfg["chunk_limit"] = val
+    if "chunk_strategy" in payload:
+        raw_cs = payload.get("chunk_strategy")
+        if not isinstance(raw_cs, str):
+            return JSONResponse(err("chunk_strategy must be a string"), status_code=400)
+        v = raw_cs.strip().lower()
+        if v not in (CHUNK_STRATEGY_BLANK, CHUNK_STRATEGY_STRUCTURED):
+            return JSONResponse(err("chunk_strategy must be blank or structured"), status_code=400)
+        current["chunk_strategy"] = v
+        app_cfg["chunk_strategy"] = v
     if "disable_image_parse" in payload:
         current["disable_image_parse"] = bool(payload.get("disable_image_parse"))
         app_cfg["disable_image_parse"] = current["disable_image_parse"]
@@ -1229,7 +1260,12 @@ def index_md(project_id: int) -> JSONResponse:
     md_root = project_md_out_dir(project_id)
     if not md_root.is_dir():
         return JSONResponse(err("md_out does not exist; run convert-md first"), status_code=400)
-    n = sync_project_md_root(conn, project=prj, md_root=md_root)
+    n = sync_project_md_root(
+        conn,
+        project=prj,
+        md_root=md_root,
+        chunk_strategy=_get_chunk_strategy(),
+    )
     return JSONResponse(ok({"indexed_documents": n}))
 
 
@@ -1244,19 +1280,19 @@ def analyze_stream_post(project_id: int, payload: AnalyzeStreamBody) -> Streamin
     if err:
         raise HTTPException(status_code=400, detail=err)
 
-    texts = dbm.list_chunk_texts(conn, project_id=project_id, limit=payload.chunk_limit)
-    if not texts:
+    entries = dbm.list_chunk_entries(conn, project_id=project_id, limit=payload.chunk_limit)
+    if not entries:
         raise HTTPException(status_code=400, detail="no chunks; run index-md after convert-md")
 
     cfg = _build_text_llm_config(conn, timeout_s=300.0)
     system = build_system_prompt(None, focus_definitions=resolved)
-    user = build_user_prompt(chunk_texts=texts)
+    user, used_entries = build_user_prompt_from_entries(entries)
 
     def gen():
         provider = get_provider(cfg.provider)
         acc: list[str] = []
         try:
-            yield _sse_stage("解析文档", "start", detail=f"chunks={len(texts)}")
+            yield _sse_stage("解析文档", "start", detail=f"chunks={len(used_entries)}")
             yield _sse_stage("解析文档", "end")
             yield _sse_stage("分析内容", "start", detail=f"model={cfg.model}")
             for piece in provider.chat_stream(system=system, user=user, config=cfg):
@@ -1265,7 +1301,7 @@ def analyze_stream_post(project_id: int, payload: AnalyzeStreamBody) -> Streamin
             yield _sse_stage("分析内容", "end")
             full = "".join(acc)
             yield _sse_stage("呈现结果", "start")
-            markdown = _coerce_model_output_to_markdown(full)
+            markdown = _coerce_model_output_to_markdown(full) + format_chunk_index_markdown(used_entries)
             yield _sse_line({"type": "final", "markdown": markdown})
             yield _sse_stage("呈现结果", "end")
         except LLMError as e:

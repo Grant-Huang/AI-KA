@@ -366,14 +366,14 @@ def commit(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def list_chunk_texts(
+def list_chunk_entries(
     conn: sqlite3.Connection,
     *,
     project_id: int,
     limit: int | None = None,
-) -> list[str]:
+) -> list[dict[str, Any]]:
     sql = """
-    SELECT c.text AS text
+    SELECT d.path AS doc_path, c.chunk_index AS chunk_index, c.text AS text, c.locator_json AS locator_json
     FROM document_chunks c
     JOIN documents d ON d.id = c.document_id
     WHERE d.project_id=?
@@ -384,7 +384,33 @@ def list_chunk_texts(
         sql += " LIMIT ?"
         params.append(int(limit))
     rows = conn.execute(sql, params).fetchall()
-    return [str(r["text"]) for r in rows]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        raw_loc = r["locator_json"]
+        try:
+            loc = json.loads(str(raw_loc)) if raw_loc else {}
+        except json.JSONDecodeError:
+            loc = {}
+        if not isinstance(loc, dict):
+            loc = {}
+        out.append(
+            {
+                "doc_path": str(r["doc_path"]),
+                "chunk_index": int(r["chunk_index"]),
+                "text": str(r["text"]),
+                "locator": loc,
+            }
+        )
+    return out
+
+
+def list_chunk_texts(
+    conn: sqlite3.Connection,
+    *,
+    project_id: int,
+    limit: int | None = None,
+) -> list[str]:
+    return [e["text"] for e in list_chunk_entries(conn, project_id=project_id, limit=limit)]
 
 
 def search_chunks(

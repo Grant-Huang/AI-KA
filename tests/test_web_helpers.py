@@ -9,7 +9,12 @@ pytest.importorskip("fastapi")
 
 from backend.epic_mapper import analysis_to_epic_doc_config
 from backend.path_validate import PathValidationError, validate_project_root
-from backend.prompt_builder import build_system_prompt, build_user_prompt
+from backend.prompt_builder import (
+    build_system_prompt,
+    build_user_prompt,
+    build_user_prompt_from_entries,
+    format_chunk_index_markdown,
+)
 
 
 def test_validate_project_root_rejects_parent_traversal(tmp_path: Path) -> None:
@@ -29,6 +34,22 @@ def test_prompt_builder_includes_dimensions() -> None:
     assert "a" in s and "b" in s
     u = build_user_prompt(chunk_texts=["hello"])
     assert "hello" in u
+
+
+def test_prompt_from_entries_includes_file_and_section() -> None:
+    entries = [
+        {
+            "doc_path": "x.md",
+            "chunk_index": 0,
+            "text": "body",
+            "locator": {"start_line": 1, "end_line": 3, "heading_path": ["A", "B"]},
+        }
+    ]
+    u, used = build_user_prompt_from_entries(entries)
+    assert "文件" in u and "片段" in u and "章节" in u and "body" in u
+    assert len(used) == 1
+    idx = format_chunk_index_markdown(used)
+    assert "片段与来源索引" in idx and "x.md" in idx
 
 
 def test_prompt_builder_focus_definitions() -> None:
