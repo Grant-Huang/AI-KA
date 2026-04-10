@@ -13,6 +13,7 @@ dependencies = [
   "uvicorn[standard]>=0.32.0",
   "docs2md @ git+https://github.com/Grant-Huang/docs2md.git",
   "epic-doc @ git+https://github.com/Grant-Huang/epic-doc.git",
+  "markitdown[xlsx]>=0.1.0",
 ]
 
 [project.scripts]

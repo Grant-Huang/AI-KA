@@ -72,6 +72,45 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_jobs_project_status ON analysis_jobs(project_id, status);
 
+CREATE TABLE IF NOT EXISTS conversations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL,
+  analysis_type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_project_updated ON conversations(project_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_created ON messages(conversation_id, created_at);
+
+CREATE TABLE IF NOT EXISTS analysis_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL,
+  job_id INTEGER,
+  focus_points_json TEXT NOT NULL,
+  chunk_limit INTEGER NOT NULL,
+  chunk_strategy TEXT NOT NULL,
+  used_entries_json TEXT NOT NULL,
+  output_markdown_path TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+  FOREIGN KEY(job_id) REFERENCES analysis_jobs(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_runs_conversation_created ON analysis_runs(conversation_id, created_at);
+
 CREATE TABLE IF NOT EXISTS annotations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id INTEGER NOT NULL,
@@ -144,6 +183,34 @@ class AnnotationRow:
     source: str
     confidence: str | None
     is_verified: bool
+
+
+@dataclass(frozen=True)
+class ConversationRow:
+    id: int
+    project_id: int
+    analysis_type: str
+    title: str
+
+
+@dataclass(frozen=True)
+class MessageRow:
+    id: int
+    conversation_id: int
+    role: str
+    content: str
+
+
+@dataclass(frozen=True)
+class AnalysisRunRow:
+    id: int
+    conversation_id: int
+    job_id: int | None
+    focus_points_json: str
+    chunk_limit: int
+    chunk_strategy: str
+    used_entries_json: str
+    output_markdown_path: str
 
 
 def connect(db_file: Path) -> sqlite3.Connection:
@@ -517,6 +584,179 @@ def get_analysis_job(conn: sqlite3.Connection, job_id: int) -> AnalysisJobRow | 
         progress=int(r["progress"]),
         error_code=(str(r["error_code"]) if r["error_code"] is not None else None),
         error_message=(str(r["error_message"]) if r["error_message"] is not None else None),
+    )
+
+
+def create_conversation(
+    conn: sqlite3.Connection,
+    *,
+    project_id: int,
+    analysis_type: str,
+    title: str,
+) -> ConversationRow:
+    cur = conn.execute(
+        """
+        INSERT INTO conversations(project_id, analysis_type, title)
+        VALUES (?, ?, ?)
+        """,
+        (project_id, str(analysis_type), str(title)),
+    )
+    conn.commit()
+    cid = int(cur.lastrowid)
+    return ConversationRow(id=cid, project_id=project_id, analysis_type=str(analysis_type), title=str(title))
+
+
+def list_conversations(conn: sqlite3.Connection, *, project_id: int, limit: int = 50) -> list[ConversationRow]:
+    rows = conn.execute(
+        """
+        SELECT id, project_id, analysis_type, title
+        FROM conversations
+        WHERE project_id=?
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?
+        """,
+        (project_id, int(limit)),
+    ).fetchall()
+    return [
+        ConversationRow(
+            id=int(r["id"]),
+            project_id=int(r["project_id"]),
+            analysis_type=str(r["analysis_type"]),
+            title=str(r["title"]),
+        )
+        for r in rows
+    ]
+
+
+def get_conversation(conn: sqlite3.Connection, conversation_id: int) -> ConversationRow | None:
+    r = conn.execute(
+        """
+        SELECT id, project_id, analysis_type, title
+        FROM conversations
+        WHERE id=?
+        """,
+        (conversation_id,),
+    ).fetchone()
+    if r is None:
+        return None
+    return ConversationRow(
+        id=int(r["id"]),
+        project_id=int(r["project_id"]),
+        analysis_type=str(r["analysis_type"]),
+        title=str(r["title"]),
+    )
+
+
+def insert_message(
+    conn: sqlite3.Connection,
+    *,
+    conversation_id: int,
+    role: str,
+    content: str,
+) -> MessageRow:
+    cur = conn.execute(
+        """
+        INSERT INTO messages(conversation_id, role, content)
+        VALUES (?, ?, ?)
+        """,
+        (conversation_id, str(role), str(content)),
+    )
+    # touch conversation updated_at
+    conn.execute("UPDATE conversations SET updated_at=datetime('now') WHERE id=?", (conversation_id,))
+    conn.commit()
+    mid = int(cur.lastrowid)
+    return MessageRow(id=mid, conversation_id=conversation_id, role=str(role), content=str(content))
+
+
+def list_messages(conn: sqlite3.Connection, *, conversation_id: int, limit: int = 200) -> list[MessageRow]:
+    rows = conn.execute(
+        """
+        SELECT id, conversation_id, role, content
+        FROM messages
+        WHERE conversation_id=?
+        ORDER BY id ASC
+        LIMIT ?
+        """,
+        (conversation_id, int(limit)),
+    ).fetchall()
+    return [
+        MessageRow(
+            id=int(r["id"]),
+            conversation_id=int(r["conversation_id"]),
+            role=str(r["role"]),
+            content=str(r["content"]),
+        )
+        for r in rows
+    ]
+
+
+def insert_analysis_run(
+    conn: sqlite3.Connection,
+    *,
+    conversation_id: int,
+    job_id: int | None,
+    focus_points: list[str],
+    chunk_limit: int,
+    chunk_strategy: str,
+    used_entries: list[dict[str, Any]],
+    output_markdown_path: str,
+) -> AnalysisRunRow:
+    cur = conn.execute(
+        """
+        INSERT INTO analysis_runs(
+          conversation_id, job_id, focus_points_json, chunk_limit, chunk_strategy,
+          used_entries_json, output_markdown_path
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            conversation_id,
+            (int(job_id) if job_id is not None else None),
+            json.dumps(list(focus_points), ensure_ascii=False),
+            int(chunk_limit),
+            str(chunk_strategy),
+            json.dumps(list(used_entries), ensure_ascii=False),
+            str(output_markdown_path),
+        ),
+    )
+    conn.execute("UPDATE conversations SET updated_at=datetime('now') WHERE id=?", (conversation_id,))
+    conn.commit()
+    rid = int(cur.lastrowid)
+    return AnalysisRunRow(
+        id=rid,
+        conversation_id=conversation_id,
+        job_id=job_id,
+        focus_points_json=json.dumps(list(focus_points), ensure_ascii=False),
+        chunk_limit=int(chunk_limit),
+        chunk_strategy=str(chunk_strategy),
+        used_entries_json=json.dumps(list(used_entries), ensure_ascii=False),
+        output_markdown_path=str(output_markdown_path),
+    )
+
+
+def get_latest_analysis_run(conn: sqlite3.Connection, *, conversation_id: int) -> AnalysisRunRow | None:
+    r = conn.execute(
+        """
+        SELECT id, conversation_id, job_id, focus_points_json, chunk_limit, chunk_strategy,
+               used_entries_json, output_markdown_path
+        FROM analysis_runs
+        WHERE conversation_id=?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (conversation_id,),
+    ).fetchone()
+    if r is None:
+        return None
+    return AnalysisRunRow(
+        id=int(r["id"]),
+        conversation_id=int(r["conversation_id"]),
+        job_id=(int(r["job_id"]) if r["job_id"] is not None else None),
+        focus_points_json=str(r["focus_points_json"]),
+        chunk_limit=int(r["chunk_limit"]),
+        chunk_strategy=str(r["chunk_strategy"]),
+        used_entries_json=str(r["used_entries_json"]),
+        output_markdown_path=str(r["output_markdown_path"]),
     )
 
 

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from datetime import datetime
 
 from aika import db as dbm
 from aika.epic_doc import EpicDocError, generate_docx
@@ -238,11 +239,39 @@ def _read_settings_from_rules_md() -> tuple[dict[str, Any] | None, str | None]:
     return None, "rules.md 与 default_rules.md 均不存在"
 
 
+def _is_combo_suggestions_heading(line: str) -> bool:
+    """识别「组合使用建议」类二级标题（允许空格差异、括号说明等）。"""
+    s = line.strip()
+    m = re.match(r"^##\s+(.+)$", s)
+    if not m:
+        return False
+    title = m.group(1).strip()
+    if "组合" not in title:
+        return False
+    # 与「组合」相关且像「建议/预设」节，避免误匹配正文里的「字符组合」等
+    return any(x in title for x in ("建议", "预设", "搭配", "使用"))
+
+
+def _normalize_table_line(raw: str) -> str:
+    return raw.strip().replace("｜", "|")
+
+
+def _is_md_table_separator_row(cells: list[str]) -> bool:
+    if len(cells) < 2:
+        return False
+
+    def cell_is_sep(c: str) -> bool:
+        t = c.strip().replace(" ", "")
+        return bool(t) and all(ch in "-:" for ch in t)
+
+    return all(cell_is_sep(c) for c in cells)
+
+
 def _extract_focus_combo_tips_from_rules_text(text: str) -> list[dict[str, str]]:
     lines = text.splitlines()
     start = -1
     for i, raw in enumerate(lines):
-        if raw.strip() == "## 组合使用建议":
+        if _is_combo_suggestions_heading(raw):
             start = i
             break
     if start < 0:
@@ -251,7 +280,7 @@ def _extract_focus_combo_tips_from_rules_text(text: str) -> list[dict[str, str]]
     rows: list[dict[str, str]] = []
     in_table = False
     for raw in lines[start + 1 :]:
-        line = raw.strip()
+        line = _normalize_table_line(raw)
         if not line:
             continue
         if line.startswith("## ") and in_table:
@@ -263,16 +292,23 @@ def _extract_focus_combo_tips_from_rules_text(text: str) -> list[dict[str, str]]
         cells = [x.strip() for x in line.strip("|").split("|")]
         if len(cells) < 2:
             continue
-        # Skip header/separator rows.
-        if cells[0] in {"评审节点", "---"}:
+        if _is_md_table_separator_row(cells):
             in_table = True
             continue
-        if cells[0].startswith("---"):
+        # 表头：首列含「评审」或「阶段」等
+        c0, c1 = cells[0], cells[1]
+        if not in_table and ("评审" in c0 or "阶段" in c0 or "节点" in c0) and ("推荐" in c1 or "关注点" in c1):
+            in_table = True
+            continue
+        if c0 in {"评审节点", "---"} and not in_table:
+            in_table = True
+            continue
+        if c0.startswith("---") and len(c0) <= 5:
             in_table = True
             continue
         in_table = True
-        stage = cells[0]
-        recommended = cells[1]
+        stage = c0
+        recommended = c1
         if stage and recommended:
             rows.append({"stage": stage, "recommended": recommended})
     return rows
@@ -297,16 +333,18 @@ def _slugify_id(text: str) -> str:
 
 def _parse_focus_ids_from_recommended(text: str) -> list[str]:
     """
-    rules.md 的推荐组合通常形如：`focus:req` + `focus:data` + ...
-    返回 focus id 列表（如 req/data）。
+    rules.md 的推荐组合通常形如：`focus:req` + `` `focus:一审-文档结构` `` + ...
+    支持 ASCII / 中文等 id，与 ### focus:<id> | 名称 一致即可映射。
+    按在文本中出现的顺序去重。
     """
     t = str(text or "")
-    ids = re.findall(r"focus:([a-zA-Z0-9_\-]+)", t)
-    # 去重保序
     out: list[str] = []
     seen: set[str] = set()
-    for x in ids:
-        x = str(x).strip()
+    # 优先匹配反引号块，避免与裸 focus: 重复计数；单次扫描保证顺序
+    pat = re.compile(r"`\s*focus:([^`]+?)\s*`|focus:([^\s+|`]+)")
+    for m in pat.finditer(t):
+        raw = m.group(1) if m.group(1) is not None else m.group(2)
+        x = str(raw or "").strip()
         if not x or x in seen:
             continue
         seen.add(x)
@@ -406,7 +444,7 @@ def _write_settings_to_rules_md(payload: dict[str, Any]) -> None:
         lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
         start = -1
         for i, raw in enumerate(lines):
-            if raw.strip() == "## 组合使用建议":
+            if _is_combo_suggestions_heading(raw):
                 start = i
                 break
         if start >= 0:
@@ -806,6 +844,9 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
     _write_settings_to_rules_md(current)
     _write_app_settings_md(app_cfg)
     current["rules_md_error"] = None
+    # 与 GET /settings 对齐：保存后从 rules.md 再读一遍，避免前端拿不到 Tips/预设
+    current["focus_combo_tips"] = _read_focus_combo_tips_from_rules_md()
+    current["focus_presets"] = _get_focus_presets()
     return JSONResponse(ok(current))
 
 
@@ -954,6 +995,45 @@ def get_project(project_id: int) -> JSONResponse:
     )
 
 
+class CreateConversationBody(BaseModel):
+    analysis_type: str = Field(min_length=1)
+    title: str | None = None
+
+
+@app.get("/api/v1/projects/{project_id}/conversations")
+def list_conversations(project_id: int, limit: int = 50) -> JSONResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    items = dbm.list_conversations(conn, project_id=project_id, limit=int(limit))
+    return JSONResponse(
+        ok(
+            {
+                "conversations": [
+                    {"id": c.id, "analysis_type": c.analysis_type, "title": c.title}
+                    for c in items
+                ]
+            }
+        )
+    )
+
+
+@app.post("/api/v1/projects/{project_id}/conversations")
+def create_conversation(project_id: int, payload: CreateConversationBody) -> JSONResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    at = str(payload.analysis_type).strip()
+    title = str(payload.title).strip() if payload.title is not None else ""
+    if not title:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        title = f"{at} - {ts}"
+    c = dbm.create_conversation(conn, project_id=project_id, analysis_type=at, title=title)
+    return JSONResponse(ok({"id": c.id, "analysis_type": c.analysis_type, "title": c.title}))
+
+
 @app.get("/api/v1/projects/{project_id}/rules")
 def get_rules(project_id: int) -> JSONResponse:
     conn = _conn()
@@ -1023,6 +1103,10 @@ def _extract_first_json_object_text(raw: str) -> str | None:
 class AnalyzeStreamBody(BaseModel):
     chunk_limit: int = Field(default=40, ge=1, le=500)
     focus_points: list[str] = Field(min_length=1)
+
+
+class FollowupStreamBody(BaseModel):
+    question: str = Field(min_length=1)
 
 
 def _resolve_focus_definitions_for_subset(conn: Any, focus_names: list[str]) -> tuple[list[dict[str, str]], str | None]:
@@ -1304,6 +1388,169 @@ def analyze_stream_post(project_id: int, payload: AnalyzeStreamBody) -> Streamin
             markdown = _coerce_model_output_to_markdown(full) + format_chunk_index_markdown(used_entries)
             yield _sse_line({"type": "final", "markdown": markdown})
             yield _sse_stage("呈现结果", "end")
+        except LLMError as e:
+            yield _sse_line(
+                {
+                    "type": "error",
+                    "message": f"[text-llm provider={cfg.provider} model={cfg.model} base_url={cfg.base_url or ''} repo_root={str(repository_root())}] {str(e)}",
+                }
+            )
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+def _safe_slug(text: str) -> str:
+    s = re.sub(r"\s+", "_", str(text or "").strip())
+    s = re.sub(r"[^\w\u4e00-\u9fff\-]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s or "analysis"
+
+
+@app.post("/api/v1/projects/{project_id}/conversations/{conversation_id}/analyze/stream")
+def analyze_conversation_stream(project_id: int, conversation_id: int, payload: AnalyzeStreamBody) -> StreamingResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    conv = dbm.get_conversation(conn, conversation_id)
+    if conv is None or conv.project_id != project_id:
+        raise HTTPException(status_code=404, detail="conversation not found")
+
+    resolved, err = _resolve_focus_definitions_for_subset(conn, payload.focus_points)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+
+    entries = dbm.list_chunk_entries(conn, project_id=project_id, limit=payload.chunk_limit)
+    if not entries:
+        raise HTTPException(status_code=400, detail="no chunks; run index-md after convert-md")
+
+    cfg = _build_text_llm_config(conn, timeout_s=300.0)
+    system = build_system_prompt(None, focus_definitions=resolved)
+    user, used_entries = build_user_prompt_from_entries(entries)
+    # 记录“本次运行”的用户侧请求（便于历史追溯）
+    dbm.insert_message(
+        conn,
+        conversation_id=conversation_id,
+        role="system",
+        content=f"分析请求：focus_points={json.dumps(payload.focus_points, ensure_ascii=False)}; chunk_limit={int(payload.chunk_limit)}",
+    )
+
+    exp_dir = project_export_dir(project_id)
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    base = _safe_slug(conv.title)
+    out_path = exp_dir / f"{base}-{ts}.md"
+
+    def gen():
+        provider = get_provider(cfg.provider)
+        acc: list[str] = []
+        try:
+            yield _sse_stage("解析文档", "start", detail=f"chunks={len(used_entries)}")
+            yield _sse_stage("解析文档", "end")
+            yield _sse_stage("分析内容", "start", detail=f"model={cfg.model}")
+            for piece in provider.chat_stream(system=system, user=user, config=cfg):
+                acc.append(piece)
+                yield _sse_line({"type": "delta", "text": piece})
+            yield _sse_stage("分析内容", "end")
+            full = "".join(acc)
+            yield _sse_stage("呈现结果", "start")
+            markdown = _coerce_model_output_to_markdown(full) + format_chunk_index_markdown(used_entries)
+            out_path.write_text(markdown, encoding="utf-8")
+            dbm.insert_analysis_run(
+                conn,
+                conversation_id=conversation_id,
+                job_id=None,
+                focus_points=list(payload.focus_points),
+                chunk_limit=int(payload.chunk_limit),
+                chunk_strategy=_get_chunk_strategy(),
+                used_entries=list(used_entries),
+                output_markdown_path=str(out_path),
+            )
+            dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=markdown)
+            yield _sse_line({"type": "final", "markdown": markdown, "output_markdown_path": str(out_path)})
+            yield _sse_stage("呈现结果", "end")
+        except LLMError as e:
+            yield _sse_line(
+                {
+                    "type": "error",
+                    "message": f"[text-llm provider={cfg.provider} model={cfg.model} base_url={cfg.base_url or ''} repo_root={str(repository_root())}] {str(e)}",
+                }
+            )
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.post("/api/v1/projects/{project_id}/conversations/{conversation_id}/followup/stream")
+def followup_conversation_stream(project_id: int, conversation_id: int, payload: FollowupStreamBody) -> StreamingResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    conv = dbm.get_conversation(conn, conversation_id)
+    if conv is None or conv.project_id != project_id:
+        raise HTTPException(status_code=404, detail="conversation not found")
+
+    q = str(payload.question or "").strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="question is empty")
+
+    last_run = dbm.get_latest_analysis_run(conn, conversation_id=conversation_id)
+    if last_run is None:
+        raise HTTPException(status_code=400, detail="no prior analysis run; run analyze first")
+
+    try:
+        used_entries = json.loads(last_run.used_entries_json or "[]")
+    except json.JSONDecodeError:
+        used_entries = []
+    if not isinstance(used_entries, list):
+        used_entries = []
+
+    prev_md = ""
+    try:
+        p = Path(str(last_run.output_markdown_path))
+        if p.is_file():
+            prev_md = p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        prev_md = ""
+    prev_excerpt = prev_md.strip()
+    if len(prev_excerpt) > 6000:
+        prev_excerpt = prev_excerpt[:6000] + "\n\n（上次结果已截断）\n"
+
+    # 追问不再按关注点清单展开，改为通用“证据驱动”问答
+    system = (
+        "你是资深 IT 实施与项目评审顾问。用户将基于上一轮分析结果进行追问。\n"
+        "要求：只输出可渲染的 Markdown 正文；必须使用简体中文（专有名词/缩写除外）。\n"
+        "若引用证据，请标注片段编号（例如：片段 12），并与片段块头一致；若无证据，说明“未在片段中发现”。\n"
+    )
+
+    chunks_prompt, used_for_prompt = build_user_prompt_from_entries(used_entries)
+    user = (
+        "以下是上一轮分析结果（可能已截断）：\n\n"
+        + prev_excerpt
+        + "\n\n"
+        + chunks_prompt
+        + "\n\n用户追问：\n"
+        + q
+        + "\n"
+    )
+
+    dbm.insert_message(conn, conversation_id=conversation_id, role="user", content=q)
+
+    cfg = _build_text_llm_config(conn, timeout_s=300.0)
+
+    def gen():
+        provider = get_provider(cfg.provider)
+        acc: list[str] = []
+        try:
+            yield _sse_stage("追问", "start", detail=f"model={cfg.model}")
+            for piece in provider.chat_stream(system=system, user=user, config=cfg):
+                acc.append(piece)
+                yield _sse_line({"type": "delta", "text": piece})
+            yield _sse_stage("追问", "end")
+            full = "".join(acc)
+            markdown = _coerce_model_output_to_markdown(full) + format_chunk_index_markdown(used_for_prompt)
+            dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=markdown)
+            yield _sse_line({"type": "final", "markdown": markdown})
         except LLMError as e:
             yield _sse_line(
                 {

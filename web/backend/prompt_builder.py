@@ -86,6 +86,33 @@ def build_user_prompt(*, chunk_texts: list[str], max_chars: int = 120_000) -> st
     return "以下是项目 Markdown 片段（可能经 docs2md 转换）。请按系统要求输出中文 Markdown：\n\n" + "\n".join(parts)
 
 
+# 送入模型时排除的章节名（docs2md 等常把 Word 页眉页脚落成独立标题）
+_HEADER_FOOTER_TITLES_ZH: frozenset[str] = frozenset({"页眉", "页脚", "页眉页脚"})
+_HEADER_FOOTER_TITLES_EN: frozenset[str] = frozenset({"header", "footer"})
+
+
+def _is_header_footer_locator(loc: dict[str, Any]) -> bool:
+    """若章节路径或当前节标题为页眉/页脚类节点，则不在分析 prompt 中保留该 chunk。"""
+    titles: list[str] = []
+    hp = loc.get("heading_path")
+    if isinstance(hp, list):
+        for x in hp:
+            t = str(x).strip()
+            if t:
+                titles.append(t)
+    st = loc.get("section_title")
+    if isinstance(st, str):
+        t = st.strip()
+        if t:
+            titles.append(t)
+    for t in titles:
+        if t in _HEADER_FOOTER_TITLES_ZH:
+            return True
+        if t.lower() in _HEADER_FOOTER_TITLES_EN:
+            return True
+    return False
+
+
 def _format_section_from_locator(loc: dict[str, Any]) -> str:
     hp = loc.get("heading_path")
     if isinstance(hp, list) and hp:
@@ -109,10 +136,17 @@ def build_user_prompt_from_entries(
     """
     返回 (prompt 文本, 实际纳入 prompt 的 entries 子列表)，用于与文末索引表一致。
     """
+    filtered: list[dict[str, Any]] = []
+    for e in entries:
+        loc = e.get("locator") if isinstance(e.get("locator"), dict) else {}
+        if _is_header_footer_locator(loc):
+            continue
+        filtered.append(e)
+
     parts: list[str] = []
     total = 0
     used: list[dict[str, Any]] = []
-    for i, e in enumerate(entries):
+    for i, e in enumerate(filtered):
         loc = e.get("locator") if isinstance(e.get("locator"), dict) else {}
         path = str(e.get("doc_path") or "")
         section = _format_section_from_locator(loc)

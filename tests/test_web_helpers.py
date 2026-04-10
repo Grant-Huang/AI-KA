@@ -36,6 +36,30 @@ def test_prompt_builder_includes_dimensions() -> None:
     assert "hello" in u
 
 
+def test_prompt_from_entries_skips_header_footer_sections() -> None:
+    entries = [
+        {
+            "doc_path": "a.md",
+            "chunk_index": 0,
+            "text": "hf-body",
+            "locator": {"start_line": 1, "end_line": 2, "heading_path": ["页眉"]},
+        },
+        {
+            "doc_path": "a.md",
+            "chunk_index": 1,
+            "text": "keep-me",
+            "locator": {"start_line": 3, "end_line": 4, "heading_path": ["第一章", "概述"]},
+        },
+    ]
+    u, used = build_user_prompt_from_entries(entries)
+    assert "keep-me" in u
+    assert "hf-body" not in u
+    assert len(used) == 1
+    idx = format_chunk_index_markdown(used)
+    assert "概述" in idx
+    assert "页眉" not in idx
+
+
 def test_prompt_from_entries_includes_file_and_section() -> None:
     entries = [
         {

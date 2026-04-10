@@ -118,6 +118,46 @@ export async function postAnalyzeStream(
   await consumeSseFromResponse(r, onEvent, signal);
 }
 
+export async function postAnalyzeConversationStream(
+  projectId: number,
+  conversationId: number,
+  body: { chunk_limit: number; focus_points: string[] },
+  onEvent: (ev: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const r = await fetch(`${BASE}/api/v1/projects/${projectId}/conversations/${conversationId}/analyze/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!r.ok) {
+    const j = (await r.json().catch(() => ({}))) as ApiErr;
+    throw new Error(j.message || `HTTP ${r.status}`);
+  }
+  await consumeSseFromResponse(r, onEvent, signal);
+}
+
+export async function postFollowupConversationStream(
+  projectId: number,
+  conversationId: number,
+  body: { question: string },
+  onEvent: (ev: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const r = await fetch(`${BASE}/api/v1/projects/${projectId}/conversations/${conversationId}/followup/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!r.ok) {
+    const j = (await r.json().catch(() => ({}))) as ApiErr;
+    throw new Error(j.message || `HTTP ${r.status}`);
+  }
+  await consumeSseFromResponse(r, onEvent, signal);
+}
+
 export function waitConvertStream(
   projectId: number,
   onLogLine: (line: string) => void,

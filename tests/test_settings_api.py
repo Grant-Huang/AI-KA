@@ -152,6 +152,95 @@ def test_import_rules_md(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     assert "focus:reqx" in saved
 
 
+def test_settings_reads_focus_combo_tips_alt_heading_and_fullwidth_pipe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
+    (tmp_path / "rules.md").write_text(
+        (
+            "# r\n\n"
+            "### focus:req | 需求\n"
+            "p\n\n"
+            "## 组合建议\n\n"
+            "｜ 评审节点 ｜ 推荐组合的关注点 ｜\n"
+            "｜---｜---｜\n"
+            "｜ 蓝图评审 ｜ `focus:req` ｜\n"
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(app)
+    r = client.get("/api/v1/settings")
+    assert r.status_code == 200
+    tips = r.json()["data"]["focus_combo_tips"]
+    assert len(tips) == 1
+    assert tips[0]["stage"] == "蓝图评审"
+    presets = r.json()["data"]["focus_presets"]
+    assert len(presets) == 1
+    assert presets[0]["name"] == "蓝图评审"
+    assert "需求" in presets[0]["focus_points"]
+
+
+def test_focus_presets_parse_chinese_ids_three_column_combo_table(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """rule_new2 风格：中文 focus id + 三列表（说明列）。"""
+    monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
+    (tmp_path / "rules.md").write_text(
+        (
+            "# r\n\n"
+            "### focus:一审-文档结构 | 方案一审·文档结构\n"
+            "p1\n\n"
+            "### focus:一审-调研现状 | 方案一审·调研现状说明\n"
+            "p2\n\n"
+            "## 组合使用建议\n\n"
+            "| 评审节点 | 推荐组合的关注点 | 说明 |\n"
+            "| --- | --- | --- |\n"
+            "| **方案一审** | `focus:一审-文档结构` + `focus:一审-调研现状` | 说明文字 |\n"
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(app)
+    r = client.get("/api/v1/settings")
+    assert r.status_code == 200
+    presets = r.json()["data"]["focus_presets"]
+    assert len(presets) == 1
+    assert "**方案一审**" in presets[0]["name"] or "方案一审" in presets[0]["name"]
+    names = presets[0]["focus_points"]
+    assert "方案一审·文档结构" in names
+    assert "方案一审·调研现状说明" in names
+    assert names.index("方案一审·文档结构") < names.index("方案一审·调研现状说明")
+
+
+def test_settings_post_returns_focus_combo_tips_and_presets(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
+    client = TestClient(app)
+    payload = {
+        "focus_points": [
+            {"id": "fp1", "name": "关注A", "prompt": "请重点分析A"},
+            {"id": "fp2", "name": "关注B", "prompt": "请重点分析B"},
+        ],
+        "focus_presets": [
+            {"id": "preset_x", "name": "双关注方案", "focus_points": ["关注A", "关注B"]},
+        ],
+        "llm_settings": {
+            "text_provider": "openai_compatible",
+            "text_base_url": "",
+            "text_model": "qwen3",
+            "vl_model": "qwen3-vl-plus",
+            "vl_base_url": "",
+        },
+    }
+    s = client.post("/api/v1/settings", json=payload)
+    assert s.status_code == 200
+    data = s.json()["data"]
+    assert "focus_combo_tips" in data
+    assert len(data["focus_combo_tips"]) == 1
+    assert data["focus_combo_tips"][0]["stage"] == "双关注方案"
+    assert len(data.get("focus_presets", [])) == 1
+    assert data["focus_presets"][0]["name"] == "双关注方案"
+    assert set(data["focus_presets"][0]["focus_points"]) == {"关注A", "关注B"}
+
+
 def test_settings_reads_focus_combo_tips_from_rules_md(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
     (tmp_path / "rules.md").write_text(

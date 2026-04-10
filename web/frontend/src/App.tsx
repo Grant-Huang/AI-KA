@@ -9,29 +9,30 @@ import {
   InputNumber,
   Modal,
   Radio,
-  Popover,
   Select,
   Space,
   Spin,
-  Table,
   Tooltip,
   Typography,
   message,
 } from "antd";
 import {
   DownloadOutlined,
-  InfoCircleOutlined,
-  PlayCircleOutlined,
+  ArrowUpOutlined,
   QuestionCircleOutlined,
   SettingOutlined,
   StopOutlined,
+  PlusOutlined,
+  CommentOutlined,
+  UserOutlined,
 } from "@ant-design/icons";
-import { apiJson, openConvertStream, postAnalyzeStream } from "./api";
+import { apiJson, openConvertStream, postAnalyzeConversationStream, postAnalyzeStream, postFollowupConversationStream } from "./api";
 import SimpleMarkdown from "./SimpleMarkdown";
 
 const { Text } = Typography;
 
 type Project = { id: number; name: string; root_path: string };
+type Conversation = { id: number; analysis_type: string; title: string };
 type FocusPoint = { id: string; name: string; prompt: string };
 type LlmSettings = {
   text_provider: string;
@@ -42,7 +43,6 @@ type LlmSettings = {
   has_text_api_key?: boolean;
   has_vl_api_key?: boolean;
 };
-type FocusComboTip = { stage: string; recommended: string };
 type FocusPreset = { id: string; name: string; focus_points: string[] };
 type ChunkStrategy = "blank" | "structured";
 
@@ -53,7 +53,6 @@ type SettingsData = {
   chunk_strategy?: ChunkStrategy;
   disable_image_parse?: boolean;
   llm_settings: LlmSettings;
-  focus_combo_tips?: FocusComboTip[];
   rules_md_error?: string | null;
 };
 
@@ -75,6 +74,110 @@ type Milestone = {
   detailText: string;
 };
 
+type PipelineStep = "convert" | "index" | "analyze";
+
+function tailEllipsis(s: string, tail: number = 50): string {
+  const t = String(s || "");
+  if (!t) return "";
+  if (t.length <= tail + 3) return t;
+  return "..." + t.slice(-tail);
+}
+
+function formatLocalDateTime(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+const REDACTED_THINK_OPEN = /<(think|redacted_thinking)>/i;
+const REDACTED_THINK_CLOSE = /<\/(think|redacted_thinking)>/i;
+
+/** 与后端 _parse_focus_ids_from_recommended 一致：反引号块优先，支持中文 id */
+function parseFocusIdsFromRecommended(raw: string): string[] {
+  const t = String(raw || "");
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const pat = /`\s*focus:([^`]+?)\s*`|focus:([^\s+|`]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = pat.exec(t)) !== null) {
+    const id = String(m[1] ?? m[2] ?? "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+/** 拆分模型输出中的 thinking 围栏；闭合后 thinkComplete 为 true，用于自动折叠 */
+function splitRedactedThinkingBlock(md: string): {
+  before: string;
+  think: string;
+  after: string;
+  thinkComplete: boolean;
+} {
+  const t = String(md || "");
+  const openMatch = t.match(REDACTED_THINK_OPEN);
+  if (!openMatch || openMatch.index === undefined) {
+    return { before: t, think: "", after: "", thinkComplete: true };
+  }
+  const openIdx = openMatch.index;
+  const openLen = openMatch[0].length;
+  const afterOpen = t.slice(openIdx + openLen);
+  const closeMatch = afterOpen.match(REDACTED_THINK_CLOSE);
+  if (!closeMatch || closeMatch.index === undefined) {
+    return { before: t.slice(0, openIdx), think: afterOpen, after: "", thinkComplete: false };
+  }
+  const closeIdx = closeMatch.index;
+  const closeLen = closeMatch[0].length;
+  return {
+    before: t.slice(0, openIdx),
+    think: afterOpen.slice(0, closeIdx),
+    after: afterOpen.slice(closeIdx + closeLen),
+    thinkComplete: true,
+  };
+}
+
+/** 业务类里程碑正文：剥离 redacted_thinking，思考未结束时保持展开，闭合后默认折叠且可再展开 */
+function BusinessMilestoneMarkdown({ markdown }: { markdown: string }) {
+  const { before, think, after, thinkComplete } = useMemo(() => splitRedactedThinkingBlock(markdown), [markdown]);
+  const [thinkOpen, setThinkOpen] = useState(false);
+
+  useEffect(() => {
+    if (!think) return;
+    if (!thinkComplete) {
+      setThinkOpen(true);
+      return;
+    }
+    // 正文开始（或 think 块闭合）后默认折叠
+    setThinkOpen(false);
+  }, [think, thinkComplete, after]);
+
+  if (!think) {
+    return <SimpleMarkdown markdown={markdown || "（暂无内容）"} />;
+  }
+
+  const thinkExpanded = !thinkComplete || thinkOpen;
+
+  return (
+    <>
+      {before.trim() ? <SimpleMarkdown markdown={before} /> : null}
+      <details
+        className="think-stream-details"
+        open={thinkExpanded}
+        onToggle={(e) => {
+          if (!thinkComplete) return;
+          setThinkOpen(e.currentTarget.open);
+        }}
+      >
+        <summary className="think-stream-summary">
+          {thinkComplete ? "思考过程（已输出完毕，默认收起）" : "思考过程（输出中…）"}
+        </summary>
+        <pre className="stream-render-think think-stream-body">{think}</pre>
+      </details>
+      {after.trim() ? <SimpleMarkdown markdown={after} /> : null}
+    </>
+  );
+}
+
 export default function App() {
   const TEXT_MODEL_OPTIONS = ["qwen3", "MiniMax-M2.5"];
   const VL_MODEL_OPTIONS = ["qwen3-vl-plus"];
@@ -82,6 +185,11 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [pickedRootPath, setPickedRootPath] = useState<string>("");
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [selectedConversationId, setSelectedConversationId] = useState<number | null>(null);
+  const [newConversationOpen, setNewConversationOpen] = useState(false);
+  const [chatsOpen, setChatsOpen] = useState(false);
+  const [analysisTypeDraft, setAnalysisTypeDraft] = useState("KA");
 
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [finalMarkdown, setFinalMarkdown] = useState<string>("");
@@ -91,13 +199,17 @@ export default function App() {
   const [pickLoading, setPickLoading] = useState(false);
   const [manualRootInput, setManualRootInput] = useState("");
   const [manualLoadLoading, setManualLoadLoading] = useState(false);
+  const [manualPickOpen, setManualPickOpen] = useState(false);
   const [focusPoints, setFocusPoints] = useState<string[]>([]);
   const [focusDefs, setFocusDefs] = useState<FocusPoint[]>([]);
-  const [focusComboTips, setFocusComboTips] = useState<FocusComboTip[]>([]);
   const [focusPresets, setFocusPresets] = useState<FocusPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState<string>("");
   const [pipelineRunning, setPipelineRunning] = useState(false);
   const [pipelineTaskBrief, setPipelineTaskBrief] = useState("");
+  const [pipelineFailModal, setPipelineFailModal] = useState<{ step: PipelineStep; message: string } | null>(null);
+  const [followupText, setFollowupText] = useState("");
+  const [followupRunning, setFollowupRunning] = useState(false);
+  const followupAbortRef = useRef<AbortController | null>(null);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -136,6 +248,7 @@ export default function App() {
   const deltaAccRef = useRef<string>(""); // accumulated model-output text used for dedup
   const currentStageKeyRef = useRef<string>("");
   const lastMilestoneIdRef = useRef<string>("");
+  const pipelineStepRef = useRef<PipelineStep>("convert");
 
   const ensureMilestone = useCallback((id: string, name: string, detailKind: LogGroupKind) => {
     setMilestones((prev) => {
@@ -155,6 +268,10 @@ export default function App() {
 
   const setMilestoneStatus = useCallback((id: string, status: MilestoneStatus) => {
     setMilestones((prev) => prev.map((m) => (m.id === id ? { ...m, status } : m)));
+    // 进行中用户展开会在 overrides 里记下 true；打勾完成时需强制折叠该小节
+    if (status === "done" || status === "error") {
+      setMilestoneOpenOverrides((prev) => ({ ...prev, [id]: false }));
+    }
   }, []);
 
   const loadProjects = useCallback(async () => {
@@ -166,6 +283,24 @@ export default function App() {
     });
   }, []);
 
+  const loadConversations = useCallback(
+    async (projectId: number | null) => {
+      if (projectId == null) {
+        setConversations([]);
+        setSelectedConversationId(null);
+        return;
+      }
+      const data = await apiJson<{ conversations: Conversation[] }>(`/api/v1/projects/${projectId}/conversations?limit=50`);
+      const items = data.conversations || [];
+      setConversations(items);
+      setSelectedConversationId((prev) => {
+        if (prev != null && items.some((c) => c.id === prev)) return prev;
+        return items.length ? items[0].id : null;
+      });
+    },
+    [],
+  );
+
   const loadSettings = useCallback(async (opts?: { snapshot_chunk_strategy?: boolean }) => {
     const data = await apiJson<SettingsData>("/api/v1/settings");
     const cs: ChunkStrategy = data.chunk_strategy === "structured" ? "structured" : "blank";
@@ -175,7 +310,6 @@ export default function App() {
     }
     setChunkLimit(merged.chunk_limit);
     setFocusDefs(merged.focus_points);
-    setFocusComboTips(merged.focus_combo_tips || []);
     setFocusPresets(merged.focus_presets || []);
     setSettingsDraft(merged);
     setFocusSelectedIndex(0);
@@ -191,6 +325,10 @@ export default function App() {
     loadProjects().catch((e) => message.error(String((e as Error).message)));
     loadSettings().catch((e) => message.error(String((e as Error).message)));
   }, [loadProjects, loadSettings]);
+
+  useEffect(() => {
+    loadConversations(selectedId).catch((e) => message.error(String((e as Error).message)));
+  }, [selectedId, loadConversations]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -215,6 +353,23 @@ export default function App() {
 
   const selected = useMemo(() => projects.find((p) => p.id === selectedId) || null, [projects, selectedId]);
 
+  const createConversation = useCallback(
+    async (analysisType: string, title?: string) => {
+      if (selectedId == null) {
+        message.warning("请先选择或创建项目");
+        return null;
+      }
+      const data = await apiJson<{ id: number; analysis_type: string; title: string }>(`/api/v1/projects/${selectedId}/conversations`, {
+        method: "POST",
+        body: JSON.stringify({ analysis_type: analysisType, title: title || "" }),
+      });
+      await loadConversations(selectedId);
+      setSelectedConversationId(data.id);
+      return data.id;
+    },
+    [selectedId, loadConversations],
+  );
+
   const ensureProjectForPath = useCallback(
     async (path: string, nameHint?: string) => {
       const p = path.trim();
@@ -236,6 +391,14 @@ export default function App() {
     },
     [ensureProjectForPath],
   );
+
+  const openProjectPicker = async () => {
+    if (nativePickerAvailable) {
+      await onPickDirectory();
+      return;
+    }
+    setManualPickOpen(true);
+  };
 
   const onPickDirectory = async () => {
     setPickLoading(true);
@@ -283,7 +446,6 @@ export default function App() {
       });
       setChunkLimit(data.chunk_limit);
       setFocusDefs(data.focus_points);
-      setFocusComboTips(data.focus_combo_tips || []);
       setFocusPresets(data.focus_presets || []);
       setSettingsDraft(data);
       setPresetSelectedIndex(0);
@@ -321,6 +483,30 @@ export default function App() {
       return { ...s, focus_presets: next };
     });
     setPresetSelectedIndex((_) => (settingsDraft.focus_presets || []).length);
+  };
+
+  const confirmDeleteSelectedPreset = () => {
+    const arr = settingsDraft.focus_presets || [];
+    if (!arr.length) {
+      message.info("暂无可删除的预设");
+      return;
+    }
+    const cur = arr[presetSelectedIndex];
+    if (!cur) {
+      message.info("未选择可删除的预设");
+      return;
+    }
+    Modal.confirm({
+      title: "确认删除预设",
+      content: `将删除预设「${cur.name || cur.id}」，此操作不可撤销。`,
+      okText: "删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: () => {
+        deletePreset(presetSelectedIndex);
+        message.success("预设已删除");
+      },
+    });
   };
 
   const deletePreset = (idx: number) => {
@@ -401,38 +587,7 @@ export default function App() {
     [appendMilestoneDetail],
   );
 
-  const parseRecommendedFocus = (s: string): string[] => {
-    const raw = String(s || "").trim();
-    if (!raw) return [];
-    // 优先解析 rules.md 中稳定的 `focus:<id>` 格式
-    const ids = Array.from(raw.matchAll(/focus:([a-zA-Z0-9_\-]+)/g)).map((m) => String(m[1] || "").trim()).filter(Boolean);
-    const idToName = new Map(focusDefs.map((x) => [x.id, x.name]));
-    if (ids.length) {
-      const out: string[] = [];
-      const seen = new Set<string>();
-      for (const id of ids) {
-        const name = idToName.get(id);
-        if (!name) continue;
-        if (seen.has(name)) continue;
-        seen.add(name);
-        out.push(name);
-      }
-      return out;
-    }
-
-    // 兼容旧格式：直接按名称拆分
-    const parts = raw.split(/[,+、\s]+/g).map((x) => x.trim()).filter(Boolean);
-    const allow = new Set(focusDefs.map((x) => x.name));
-    const out: string[] = [];
-    const seen = new Set<string>();
-    for (const p of parts) {
-      if (!allow.has(p)) continue;
-      if (seen.has(p)) continue;
-      seen.add(p);
-      out.push(p);
-    }
-    return out;
-  };
+  // 已移除首页「组合建议」入口，保留该函数会导致误导与无用代码
 
   const renderMilestoneDetail = (m: Milestone) => {
     const t = m.detailText || "";
@@ -457,7 +612,7 @@ export default function App() {
         </pre>
       );
     }
-    return <SimpleMarkdown markdown={t || "（暂无内容）"} />;
+    return <BusinessMilestoneMarkdown markdown={t} />;
   };
 
   const stopPipeline = () => {
@@ -476,15 +631,245 @@ export default function App() {
     message.info("流程已终止");
   };
 
+  const sendFollowup = async () => {
+    if (selectedId == null) {
+      message.warning("请先选择或创建项目");
+      return;
+    }
+    const convId = selectedConversationId;
+    if (convId == null) {
+      message.warning("请先创建或选择对话");
+      return;
+    }
+    const q = followupText.trim();
+    if (!q) {
+      message.warning("请输入追问内容");
+      return;
+    }
+    setFollowupRunning(true);
+    const abort = new AbortController();
+    followupAbortRef.current = abort;
+    const mid = `followup:${Date.now().toString(36)}`;
+    ensureMilestone(mid, "追问", "business");
+    appendMilestoneDetail(mid, `用户：${q}\n\n`);
+    try {
+      await postFollowupConversationStream(
+        selectedId,
+        convId,
+        { question: q },
+        (ev) => {
+          if (ev.type === "delta" && typeof ev.text === "string") {
+            appendMilestoneDetail(mid, String(ev.text));
+          }
+          if (ev.type === "final" && typeof (ev as any).markdown === "string") {
+            setMilestoneStatus(mid, "done");
+          }
+        },
+        abort.signal,
+      );
+      setFollowupText("");
+    } catch (e) {
+      if ((e as Error)?.name === "AbortError") return;
+      appendMilestoneDetail(mid, `\n\n[error] ${String((e as Error).message)}\n`);
+      setMilestoneStatus(mid, "error");
+      message.error(String((e as Error).message));
+    } finally {
+      followupAbortRef.current = null;
+      setFollowupRunning(false);
+    }
+  };
+
+  const runConvertPhase = async () => {
+    if (selectedId == null) throw new Error("未选择项目");
+    ensureMilestone("sys:convert", "文档转换", "system");
+    setMilestones((prev) =>
+      prev.map((m) => (m.id === "sys:convert" ? { ...m, status: "running" as MilestoneStatus } : m)),
+    );
+    appendMilestoneDetail("sys:convert", "【docs2md】开始转换…\n");
+    await new Promise<void>((resolve, reject) => {
+      const stop = openConvertStream(
+        selectedId,
+        (ev) => {
+          if (ev.type === "log" && typeof ev.text === "string") {
+            appendMilestoneDetail("sys:convert", ev.text + "\n");
+          }
+          if (ev.type === "complete") {
+            stop();
+            stopConvertRef.current = null;
+            setMilestoneStatus("sys:convert", "done");
+            resolve();
+          }
+          if (ev.type === "error") {
+            stop();
+            stopConvertRef.current = null;
+            setMilestoneStatus("sys:convert", "error");
+            reject(new Error(String(ev.message)));
+          }
+        },
+        (e) => {
+          stop();
+          stopConvertRef.current = null;
+          setMilestoneStatus("sys:convert", "error");
+          reject(e);
+        },
+      );
+      stopConvertRef.current = () => {
+        stop();
+        stopConvertRef.current = null;
+        setMilestoneStatus("sys:convert", "done");
+        resolve();
+      };
+    });
+    if (terminatedRef.current) return;
+    appendMilestoneDetail("sys:convert", "【docs2md】转换完成。\n");
+    setMilestoneStatus("sys:convert", "done");
+  };
+
+  const runIndexPhase = async () => {
+    if (selectedId == null) throw new Error("未选择项目");
+    ensureMilestone("sys:index", "索引与分块", "system");
+    setMilestones((prev) =>
+      prev.map((m) => (m.id === "sys:index" ? { ...m, status: "running" as MilestoneStatus } : m)),
+    );
+    appendMilestoneDetail("sys:index", "【索引】正在将 Markdown 写入索引与分块…\n");
+    const idx = await apiJson<{ indexed_documents: number }>(`/api/v1/projects/${selectedId}/index-md`, { method: "POST" });
+    appendMilestoneDetail("sys:index", `【索引】完成，已索引 ${idx.indexed_documents} 个文档。\n`);
+    setMilestoneStatus("sys:index", "done");
+  };
+
+  const runAnalyzePhase = async (focus_points: string[]) => {
+    if (selectedId == null) throw new Error("未选择项目");
+    if (!focus_points.length) throw new Error("请先选择预设");
+    const convId = selectedConversationId ?? (await createConversation(analysisTypeDraft));
+    if (convId == null) throw new Error("创建会话失败");
+    currentStageKeyRef.current = "";
+    deltaAccRef.current = "";
+    const analyzeAbort = new AbortController();
+    analyzeAbortRef.current = analyzeAbort;
+    const fin = await new Promise<{ markdown: string }>((resolve, reject) => {
+      let settled = false;
+      const safeResolve = (v: { markdown: string }) => {
+        if (settled) return;
+        settled = true;
+        analyzeAbortRef.current = null;
+        resolve(v);
+      };
+      const safeReject = (e: Error) => {
+        if (settled) return;
+        settled = true;
+        analyzeAbortRef.current = null;
+        reject(e);
+      };
+      stopAnalyzeRef.current = () => {
+        analyzeAbort.abort();
+        safeResolve({ markdown: "" });
+      };
+      postAnalyzeConversationStream(
+        selectedId,
+        convId,
+        { chunk_limit: chunkLimit, focus_points },
+        (ev) => {
+          if (ev.type === "delta" && typeof ev.text === "string") {
+            appendAnalyzeDelta(ev.text);
+          }
+          if (ev.type === "stage" && typeof ev.name === "string" && typeof ev.state === "string") {
+            const name = String(ev.name);
+            const state = String(ev.state);
+            const key = `stage:${name}`;
+            const kind: LogGroupKind =
+              name.includes("错误") ? "error" : name.includes("分析") || name.includes("呈现") ? "business" : "system";
+            ensureMilestone(key, name, kind);
+            currentStageKeyRef.current = key;
+            if (state === "start") {
+              const detail = typeof (ev as any).detail === "string" ? String((ev as any).detail) : "";
+              if (detail) appendMilestoneDetail(key, `${detail}\n`);
+            } else if (state === "end") {
+              setMilestoneStatus(key, "done");
+            }
+          }
+          if (ev.type === "final") {
+            const md = typeof (ev as any).markdown === "string" ? String((ev as any).markdown) : "";
+            safeResolve({ markdown: md });
+          }
+          if (ev.type === "error") {
+            safeReject(new Error(String(ev.message)));
+          }
+        },
+        analyzeAbort.signal,
+      ).catch((e) => {
+        if (settled) return;
+        if ((e as Error)?.name === "AbortError") {
+          safeResolve({ markdown: "" });
+          return;
+        }
+        safeReject(e instanceof Error ? e : new Error(String(e)));
+      });
+    });
+    if (terminatedRef.current) return;
+    const md = fin.markdown || "";
+    ensureMilestone("sys:complete", "流程状态", "system");
+    appendMilestoneDetail("sys:complete", "已完成。\n");
+    setMilestoneStatus("sys:complete", "done");
+    setFinalMarkdown(md);
+  };
+
+  const runPipelineTryCatch = async (runBody: () => Promise<void>) => {
+    try {
+      await runBody();
+    } catch (e) {
+      if ((e as Error)?.name === "AbortError" || terminatedRef.current) return;
+      const msg = String((e as Error).message);
+      const stepFallback =
+        pipelineStepRef.current === "convert"
+          ? "sys:convert"
+          : pipelineStepRef.current === "index"
+            ? "sys:index"
+            : "";
+      const target = currentStageKeyRef.current || stepFallback || lastMilestoneIdRef.current || "sys:control";
+      const targetLabel =
+        target === "sys:convert"
+          ? "文档转换"
+          : target === "sys:index"
+            ? "索引与分块"
+            : target.startsWith("stage:")
+              ? target.slice(6)
+              : "系统调用";
+      ensureMilestone(target, targetLabel, "error");
+      appendMilestoneDetail(target, `[error] ${msg}\n`);
+      setMilestoneStatus(target, "error");
+      message.error(msg);
+      setPipelineFailModal({ step: pipelineStepRef.current, message: msg });
+    } finally {
+      setPipelineTaskBrief("");
+      setPipelineRunning(false);
+      analyzeAbortRef.current = null;
+      stopConvertRef.current = null;
+      stopAnalyzeRef.current = null;
+    }
+  };
+
   const runFullPipeline = async () => {
     if (selectedId == null) {
       message.warning("请先选择或创建项目");
       return;
     }
-    if (focusPoints.length === 0) {
-      message.warning("请至少选择一个关注点");
+    if (!selectedPresetId) {
+      message.warning("请先选择预设");
       return;
     }
+    const preset = focusPresets.find((p) => p.id === selectedPresetId);
+    const presetFocusPoints = preset?.focus_points || [];
+    if (!preset || presetFocusPoints.length === 0) {
+      message.warning("预设无可用关注点，请检查 rules.md 预设配置");
+      return;
+    }
+    setFocusPoints(presetFocusPoints);
+    if (selectedConversationId == null) {
+      const projName = selected?.name ? String(selected.name) : "当前项目";
+      const title = `KA - ${projName} - ${preset.name} - ${formatLocalDateTime(new Date())}`;
+      await createConversation("KA", title);
+    }
+    setPipelineFailModal(null);
     setPipelineRunning(true);
     terminatedRef.current = false;
     deltaAccRef.current = "";
@@ -493,144 +878,128 @@ export default function App() {
     setMilestoneOpenOverrides({});
     setFinalMarkdown("");
     const projName = selected?.name ? String(selected.name) : "当前项目";
-    const fpSample = focusPoints.slice(0, 3).join("、");
-    const fpRest = focusPoints.length > 3 ? "等" : "";
-    const taskBrief = `本次针对项目「${projName}」，将围绕${fpSample}${fpRest}共 ${focusPoints.length} 项关注点开展关联审查。流程将顺序执行：① 文档转换（docs2md 将源文档转为 Markdown）；② 索引与分块（按设置中的分块策略建立可检索片段）；③ 模型分析（结合关注点生成结构化审查结论）。请关注下方各步骤日志；若您刚在设置中修改过分块策略，请务必重新执行索引后再解读分析结果，以免结论仍基于旧分块边界。`;
+    const fpSample = presetFocusPoints.slice(0, 3).join("、");
+    const fpRest = presetFocusPoints.length > 3 ? "等" : "";
+    const taskBrief = `本次针对项目「${projName}」，将围绕${fpSample}${fpRest}共 ${presetFocusPoints.length} 项关注点开展关联审查。流程将顺序执行：① 文档转换（docs2md 将源文档转为 Markdown）；② 索引与分块（按设置中的分块策略建立可检索片段）；③ 模型分析（结合关注点生成结构化审查结论）。请关注下方各步骤日志；若您刚在设置中修改过分块策略，请务必重新执行索引后再解读分析结果，以免结论仍基于旧分块边界。`;
     setPipelineTaskBrief(taskBrief);
-    try {
-      ensureMilestone("sys:convert", "文档转换", "system");
-      appendMilestoneDetail("sys:convert", "【docs2md】开始转换…\n");
-      await new Promise<void>((resolve, reject) => {
-        const stop = openConvertStream(
-          selectedId,
-          (ev) => {
-            if (ev.type === "log" && typeof ev.text === "string") {
-              appendMilestoneDetail("sys:convert", ev.text + "\n");
-            }
-            if (ev.type === "complete") {
-              stop();
-              stopConvertRef.current = null;
-              setMilestoneStatus("sys:convert", "done");
-              resolve();
-            }
-            if (ev.type === "error") {
-              stop();
-              stopConvertRef.current = null;
-              setMilestoneStatus("sys:convert", "error");
-              reject(new Error(String(ev.message)));
-            }
-          },
-          (e) => {
-            stop();
-            stopConvertRef.current = null;
-            setMilestoneStatus("sys:convert", "error");
-            reject(e);
-          },
-        );
-        stopConvertRef.current = () => {
-          stop();
-          stopConvertRef.current = null;
-          setMilestoneStatus("sys:convert", "done");
-          resolve();
-        };
-      });
+    await runPipelineTryCatch(async () => {
+      pipelineStepRef.current = "convert";
+      await runConvertPhase();
       if (terminatedRef.current) return;
-      appendMilestoneDetail("sys:convert", "【docs2md】转换完成。\n");
-
-      ensureMilestone("sys:index", "索引与分块", "system");
-      appendMilestoneDetail("sys:index", "【索引】正在将 Markdown 写入索引与分块…\n");
-      const idx = await apiJson<{ indexed_documents: number }>(`/api/v1/projects/${selectedId}/index-md`, { method: "POST" });
-      appendMilestoneDetail("sys:index", `【索引】完成，已索引 ${idx.indexed_documents} 个文档。\n`);
-      setMilestoneStatus("sys:index", "done");
+      pipelineStepRef.current = "index";
+      await runIndexPhase();
       if (terminatedRef.current) return;
-
-      // 分析阶段由后端 stage 事件驱动，不预先创建未来里程碑
-      currentStageKeyRef.current = "";
-
-      const analyzeAbort = new AbortController();
-      analyzeAbortRef.current = analyzeAbort;
-      const fin = await new Promise<{ markdown: string }>((resolve, reject) => {
-        let settled = false;
-        const safeResolve = (v: { markdown: string }) => {
-          if (settled) return;
-          settled = true;
-          analyzeAbortRef.current = null;
-          resolve(v);
-        };
-        const safeReject = (e: Error) => {
-          if (settled) return;
-          settled = true;
-          analyzeAbortRef.current = null;
-          reject(e);
-        };
-        stopAnalyzeRef.current = () => {
-          analyzeAbort.abort();
-          safeResolve({ markdown: "" });
-        };
-        postAnalyzeStream(
-          selectedId,
-          { chunk_limit: chunkLimit, focus_points: focusPoints },
-          (ev) => {
-            if (ev.type === "delta" && typeof ev.text === "string") {
-              appendAnalyzeDelta(ev.text);
-            }
-            if (ev.type === "stage" && typeof ev.name === "string" && typeof ev.state === "string") {
-              const name = String(ev.name);
-              const state = String(ev.state);
-              const key = `stage:${name}`;
-              const kind: LogGroupKind =
-                name.includes("错误") ? "error" : name.includes("分析") || name.includes("呈现") ? "business" : "system";
-              ensureMilestone(key, name, kind);
-              currentStageKeyRef.current = key;
-              if (state === "start") {
-                // 不输出冗余“开始/完成”提示，仅创建里程碑
-                const detail = typeof (ev as any).detail === "string" ? String((ev as any).detail) : "";
-                if (detail) appendMilestoneDetail(key, `${detail}\n`);
-              } else if (state === "end") {
-                setMilestoneStatus(key, "done");
-              }
-            }
-            if (ev.type === "final") {
-              const md = typeof (ev as any).markdown === "string" ? String((ev as any).markdown) : "";
-              safeResolve({ markdown: md });
-            }
-            if (ev.type === "error") {
-              safeReject(new Error(String(ev.message)));
-            }
-          },
-          analyzeAbort.signal,
-        ).catch((e) => {
-          if (settled) return;
-          if ((e as Error)?.name === "AbortError") {
-            safeResolve({ markdown: "" });
-            return;
-          }
-          safeReject(e instanceof Error ? e : new Error(String(e)));
-        });
-      });
+      pipelineStepRef.current = "analyze";
+      await runAnalyzePhase(presetFocusPoints);
       if (terminatedRef.current) return;
-
-      const md = fin.markdown || "";
-      ensureMilestone("sys:complete", "流程状态", "system");
-      appendMilestoneDetail("sys:complete", "已完成。\n");
-      setMilestoneStatus("sys:complete", "done");
-      setFinalMarkdown(md);
       message.success("全流程完成");
-    } catch (e) {
-      if ((e as Error)?.name === "AbortError" || terminatedRef.current) return;
-      const msg = String((e as Error).message);
-      const target = currentStageKeyRef.current || lastMilestoneIdRef.current || "sys:control";
-      ensureMilestone(target, target.startsWith("stage:") ? target.slice(6) : "系统调用", "error");
-      appendMilestoneDetail(target, `[error] ${msg}\n`);
-      setMilestoneStatus(target, "error");
-      message.error(msg);
-    } finally {
-      setPipelineTaskBrief("");
-      setPipelineRunning(false);
-      analyzeAbortRef.current = null;
-      stopConvertRef.current = null;
-      stopAnalyzeRef.current = null;
+    });
+  };
+
+  const resumePipelineAfterFailure = async (mode: "convert_chain" | "index_chain" | "analyze_only" | "full") => {
+    if (selectedId == null) {
+      message.warning("请先选择或创建项目");
+      return;
     }
+    if (!selectedPresetId) {
+      message.warning("请先选择预设");
+      return;
+    }
+    const preset = focusPresets.find((p) => p.id === selectedPresetId);
+    const presetFocusPoints = preset?.focus_points || [];
+    if (!preset || presetFocusPoints.length === 0) {
+      message.warning("预设无可用关注点，请检查 rules.md 预设配置");
+      return;
+    }
+    setFocusPoints(presetFocusPoints);
+    setPipelineFailModal(null);
+    setPipelineRunning(true);
+    terminatedRef.current = false;
+    analyzeAbortRef.current?.abort();
+    stopConvertRef.current?.();
+    stopAnalyzeRef.current = null;
+    analyzeAbortRef.current = null;
+    stopConvertRef.current = null;
+    const projName = selected?.name ? String(selected.name) : "当前项目";
+    const fpSample = presetFocusPoints.slice(0, 3).join("、");
+    const fpRest = presetFocusPoints.length > 3 ? "等" : "";
+    const taskBrief = `本次针对项目「${projName}」，将围绕${fpSample}${fpRest}共 ${presetFocusPoints.length} 项关注点开展关联审查。流程将顺序执行：① 文档转换（docs2md 将源文档转为 Markdown）；② 索引与分块（按设置中的分块策略建立可检索片段）；③ 模型分析（结合关注点生成结构化审查结论）。请关注下方各步骤日志；若您刚在设置中修改过分块策略，请务必重新执行索引后再解读分析结果，以免结论仍基于旧分块边界。`;
+    setPipelineTaskBrief(taskBrief);
+
+    if (mode === "full") {
+      deltaAccRef.current = "";
+      currentStageKeyRef.current = "";
+      setMilestones([]);
+      setMilestoneOpenOverrides({});
+      setFinalMarkdown("");
+    } else if (mode === "convert_chain") {
+      setMilestones((prev) =>
+        prev
+          .filter((m) => m.id === "sys:convert")
+          .map((m) => ({
+            ...m,
+            status: "running" as MilestoneStatus,
+            detailText: `${m.detailText}\n\n--- 重试文档转换 ---\n`,
+          })),
+      );
+    } else if (mode === "index_chain") {
+      setMilestones((prev) => {
+        const c = prev.find((m) => m.id === "sys:convert" && m.status === "done");
+        if (!c) return prev;
+        return [
+          { ...c },
+          {
+            id: "sys:index",
+            name: "索引与分块",
+            status: "running" as MilestoneStatus,
+            detailKind: "system" as LogGroupKind,
+            detailText: "【索引】重试…\n",
+          },
+        ];
+      });
+    } else if (mode === "analyze_only") {
+      setFinalMarkdown("");
+      deltaAccRef.current = "";
+      currentStageKeyRef.current = "";
+      setMilestones((prev) =>
+        prev
+          .filter((m) => m.id === "sys:convert" || m.id === "sys:index")
+          .map((m) => ({ ...m, status: "done" as MilestoneStatus })),
+      );
+    }
+
+    await runPipelineTryCatch(async () => {
+      if (mode === "full") {
+        pipelineStepRef.current = "convert";
+        await runConvertPhase();
+        if (terminatedRef.current) return;
+        pipelineStepRef.current = "index";
+        await runIndexPhase();
+        if (terminatedRef.current) return;
+        pipelineStepRef.current = "analyze";
+        await runAnalyzePhase(presetFocusPoints);
+      } else if (mode === "convert_chain") {
+        pipelineStepRef.current = "convert";
+        await runConvertPhase();
+        if (terminatedRef.current) return;
+        pipelineStepRef.current = "index";
+        await runIndexPhase();
+        if (terminatedRef.current) return;
+        pipelineStepRef.current = "analyze";
+        await runAnalyzePhase(presetFocusPoints);
+      } else if (mode === "index_chain") {
+        pipelineStepRef.current = "index";
+        await runIndexPhase();
+        if (terminatedRef.current) return;
+        pipelineStepRef.current = "analyze";
+        await runAnalyzePhase(presetFocusPoints);
+      } else {
+        pipelineStepRef.current = "analyze";
+        await runAnalyzePhase(presetFocusPoints);
+      }
+      if (terminatedRef.current) return;
+      message.success("流程已继续完成");
+    });
   };
 
   const exportMarkdown = () => {
@@ -653,211 +1022,200 @@ export default function App() {
   };
 
   return (
-    <div className="app-shell">
-      <Space style={{ width: "100%", justifyContent: "space-between" }}>
-        <Typography.Title level={2} style={{ margin: 0 }}>
-          AI-KA 业务关联审查平台
-        </Typography.Title>
-        <Space>
-          <Button shape="circle" icon={<QuestionCircleOutlined />} onClick={() => setHelpOpen(true)} title="帮助" />
-          <Button shape="circle" icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)} title="设置" />
-        </Space>
-      </Space>
-      <Text type="secondary">选择项目目录与关注点，一键完成转换、索引与审查，并可导出 Markdown。</Text>
-      <Divider />
-
-      <Space direction="vertical" style={{ width: "100%" }} size={10}>
-        {rulesMdError ? (
-          <Alert
-            type="error"
-            showIcon
-            message={`rules.md 格式异常：${rulesMdError}`}
-            description="系统已自动回退到 default_rules.md。请修复 rules.md 后刷新页面，或在设置页保存一次。"
-          />
-        ) : null}
-        {!nativePickerAvailable ? (
-          <Alert
-            type="info"
-            showIcon
-            message="本机文件夹对话框不可用（常见于 Docker 或经网关访问）。请使用下方输入框填写后端可见的项目根路径并点击「加载路径」。"
-            description="若需分析宿主机目录，请在 docker-compose 中把该目录挂载进容器（例如 /projects），并填写容器内对应路径。"
-            style={{ marginBottom: 4 }}
-          />
-        ) : null}
-        <Space wrap align="center">
-          <Tooltip
-            title={
-              nativePickerAvailable
-                ? "调用本机原生目录选择（仅适用于后端跑在本机桌面环境）"
-                : "当前后端判定无法安全弹出本机选目录；请用手动路径。"
-            }
-          >
-            <Button type="primary" loading={pickLoading} disabled={!nativePickerAvailable} onClick={onPickDirectory}>
-              选择项目
-            </Button>
-          </Tooltip>
-          <Input
-            style={{ minWidth: 280, maxWidth: 480 }}
-            placeholder="或填写项目根路径（后端/容器内可见路径）"
-            value={manualRootInput}
-            onChange={(e) => setManualRootInput(e.target.value)}
-            onPressEnter={() => void onLoadManualPath()}
-          />
-          <Button type="default" loading={manualLoadLoading} onClick={() => void onLoadManualPath()}>
-            加载路径
-          </Button>
-          {pickedRootPath ? <Text code>{pickedRootPath}</Text> : <Text type="secondary">未选择项目路径</Text>}
-        </Space>
-        {selected ? <Text>{`已识别项目：${selected.name}`}</Text> : <Text type="secondary">选择项目目录</Text>}
-        <Space wrap align="center">
-          <Select
-            mode="multiple"
-            allowClear
-            style={{ minWidth: 520 }}
-            placeholder="选择分析关注点（可多选）"
-            value={focusPoints}
-            options={focusDefs.map((x) => ({ value: x.name, label: x.name }))}
-            onChange={(v) => setFocusPoints(v as string[])}
-          />
-          {focusPresets.length ? (
-            <Select
-              style={{ width: 200 }}
-              placeholder="选择预设"
-              value={selectedPresetId || undefined}
-              allowClear
-              options={focusPresets.map((p) => ({ value: p.id, label: p.name }))}
-              onChange={(v) => {
-                const id = String(v || "");
-                setSelectedPresetId(id);
-                const preset = focusPresets.find((p) => p.id === id);
-                if (preset) {
-                  setFocusPoints(preset.focus_points || []);
-                  message.success(`已套用预设：${preset.name}`);
-                }
-              }}
-            />
-          ) : null}
-          {focusComboTips.length > 0 ? (
-            <Popover
-              trigger="click"
-              placement="bottomLeft"
-              title="关注点组合建议（来自 rules.md）"
-              content={
-                <Table
-                  size="small"
-                  pagination={false}
-                  style={{ width: 640 }}
-                  rowKey={(r) => r.stage}
-                  dataSource={focusComboTips}
-                  columns={[
-                    { title: "评审节点", dataIndex: "stage", key: "stage", width: 160 },
-                    { title: "推荐组合的关注点", dataIndex: "recommended", key: "recommended" },
-                    {
-                      title: "操作",
-                      key: "op",
-                      width: 90,
-                      render: (_: unknown, r: FocusComboTip) => (
-                        <Button
-                          size="small"
-                          onClick={() => {
-                            const next = parseRecommendedFocus(r.recommended || "");
-                            if (!next.length) {
-                              message.warning("未解析到可用关注点（请确认 rules.md 推荐组合使用 focus:<id> 或名称能匹配关注点列表）");
-                              return;
-                            }
-                            setFocusPoints(next);
-                            message.success("已套用推荐组合");
-                          }}
-                        >
-                          套用
-                        </Button>
-                      ),
-                    },
-                  ]}
-                />
-              }
-            >
-              <Button size="small" icon={<InfoCircleOutlined />}>
-                组合建议
-              </Button>
-            </Popover>
-          ) : null}
-        </Space>
-        <Space wrap>
-          <Tooltip title={pipelineRunning ? "终止当前流程（会中断转换/分析）" : "执行：转换→索引→分析"}>
-            <Button
-              type="primary"
-              danger={pipelineRunning}
-              loading={pipelineRunning}
-              onClick={pipelineRunning ? stopPipeline : runFullPipeline}
-              disabled={selectedId == null}
-              icon={pipelineRunning ? <StopOutlined /> : <PlayCircleOutlined />}
-            >
-              {pipelineRunning ? "终止" : "执行"}
-            </Button>
-          </Tooltip>
-          <Button icon={<DownloadOutlined />} onClick={exportMarkdown} disabled={!finalMarkdown.trim()}>
-            导出 md
-          </Button>
-        </Space>
-      </Space>
-
-      <div style={{ marginTop: 12, marginBottom: 16 }}>
-        {pipelineRunning ? <Text type="secondary">分析进行中…（可滚动查看实时输出）</Text> : null}
-        {pipelineRunning && pipelineTaskBrief ? (
-          <Text style={{ display: "block", marginTop: 8, marginBottom: 10, fontSize: 12, color: "#374151", lineHeight: 1.65 }}>
-            {pipelineTaskBrief}
-          </Text>
-        ) : null}
-        <div className="raw-stream stream-log process-stream">
-          {milestones.length ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {milestones.map((m) => {
-                const showDetails = (m.detailText || "").trim().length > 0;
-                const done = m.status === "done";
-                const title = done ? `✓ ${m.name} >` : `${m.name} >`;
-                const titleColor = m.status === "error" ? "#cf1322" : "#374151";
-                const defaultOpen = m.status === "running";
-                const o = milestoneOpenOverrides[m.id];
-                const expanded = o !== undefined ? o : defaultOpen;
-                return (
-                  <div key={m.id} style={{ fontSize: 12 }}>
-                    {showDetails ? (
-                      <details
-                        style={{ marginTop: 0 }}
-                        open={expanded}
-                        onToggle={(ev) => {
-                          const el = ev.currentTarget;
-                          setMilestoneOpenOverrides((prev) => ({ ...prev, [m.id]: el.open }));
-                        }}
-                      >
-                        <summary style={{ cursor: "pointer", listStyle: "none", color: titleColor }}>{title}</summary>
-                        <div style={{ marginTop: 6, color: "#6b7280" }}>{renderMilestoneDetail(m)}</div>
-                      </details>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <Text type="secondary">（将按完成进度逐步显示里程碑；细节默认折叠）</Text>
-          )}
+    <div className="app-layout">
+      <div className="side-nav">
+        <Button
+          type="text"
+          className="side-nav-btn"
+          icon={<PlusOutlined />}
+          title="新对话"
+          onClick={() => setNewConversationOpen(true)}
+        />
+        <Button
+          type="text"
+          className="side-nav-btn"
+          icon={<CommentOutlined />}
+          title="Chats"
+          onClick={() => setChatsOpen(true)}
+          disabled={selectedId == null}
+        />
+        <div className="side-nav-spacer" />
+        <div className="side-nav-bottom">
+          <Button type="text" className="side-nav-btn" icon={<QuestionCircleOutlined />} title="帮助" onClick={() => setHelpOpen(true)} />
+          <Button type="text" className="side-nav-btn" icon={<SettingOutlined />} title="设置" onClick={() => setSettingsOpen(true)} />
+          <Button type="text" className="side-nav-btn" icon={<UserOutlined />} title="用户" onClick={() => message.info("用户中心：占位")} />
         </div>
       </div>
 
-      {finalMarkdown.trim() ? (
-        <div style={{ marginTop: 10 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-            <Text strong>结果</Text>
-            <Button icon={<DownloadOutlined />} onClick={exportMarkdown}>
-              导出 md
-            </Button>
-          </div>
-          <div style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12, background: "#fff" }}>
-            <SimpleMarkdown markdown={finalMarkdown} />
-          </div>
-        </div>
-      ) : null}
+      <div className="app-shell">
+        <div className="main-surface">
+          {rulesMdError ? (
+            <Alert
+              type="error"
+              showIcon
+              message={`rules.md 格式异常：${rulesMdError}`}
+              description="系统已自动回退到 default_rules.md。请修复 rules.md 后刷新页面，或在设置页保存一次。"
+              style={{ marginBottom: 10 }}
+            />
+          ) : null}
+
+          {chatsOpen ? (
+            <div style={{ maxWidth: 860, margin: "40px auto 0" }}>
+              <Typography.Title level={3} style={{ marginTop: 0 }}>
+                {`KA 业务关联审查 · 历史对话（${selected?.name || "未选择项目"}）`}
+              </Typography.Title>
+              <Text type="secondary">选择一条对话进入后，输入框将显示在底部。</Text>
+              <Divider />
+              {(conversations || []).length ? (
+                <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                  {conversations.map((c) => (
+                    <Button
+                      key={c.id}
+                      type={c.id === selectedConversationId ? "primary" : "default"}
+                      onClick={() => {
+                        setSelectedConversationId(c.id);
+                        setChatsOpen(false);
+                      }}
+                      style={{ textAlign: "left" }}
+                    >
+                      {c.title || `${c.analysis_type} #${c.id}`}
+                    </Button>
+                  ))}
+                </Space>
+              ) : (
+                <Text type="secondary">暂无历史对话</Text>
+              )}
+            </div>
+          ) : null}
+
+          {!chatsOpen ? (
+            <>
+              <div style={{ marginTop: 12, marginBottom: 16 }}>
+                {pipelineRunning ? <Text type="secondary">分析进行中…（可滚动查看实时输出）</Text> : null}
+                {pipelineRunning && pipelineTaskBrief ? (
+                  <Text style={{ display: "block", marginTop: 8, marginBottom: 10, fontSize: 12, color: "#374151", lineHeight: 1.65 }}>
+                    {pipelineTaskBrief}
+                  </Text>
+                ) : null}
+                <div className="raw-stream stream-log process-stream">
+                  {milestones.length ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {milestones.map((m) => {
+                        const showDetails = (m.detailText || "").trim().length > 0;
+                        const done = m.status === "done";
+                        const title = done ? `✓ ${m.name} >` : `${m.name} >`;
+                        const titleColor = m.status === "error" ? "#cf1322" : "#374151";
+                        const defaultOpen = m.status === "running";
+                        const o = milestoneOpenOverrides[m.id];
+                        const expanded = o !== undefined ? o : defaultOpen;
+                        return (
+                          <div key={m.id} style={{ fontSize: 12 }}>
+                            {showDetails ? (
+                              <details
+                                style={{ marginTop: 0 }}
+                                open={expanded}
+                                onToggle={(ev) => {
+                                  const el = ev.currentTarget;
+                                  setMilestoneOpenOverrides((prev) => ({ ...prev, [m.id]: el.open }));
+                                }}
+                              >
+                                <summary style={{ cursor: "pointer", listStyle: "none", color: titleColor }}>{title}</summary>
+                                <div style={{ marginTop: 6, color: "#6b7280" }}>{renderMilestoneDetail(m)}</div>
+                              </details>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <Text type="secondary">（暂无输出）</Text>
+                  )}
+                </div>
+              </div>
+
+              {finalMarkdown.trim() ? (
+                <div style={{ marginTop: 10 }}>
+                  <Space style={{ width: "100%", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <Text strong>结果</Text>
+                    <Button icon={<DownloadOutlined />} onClick={exportMarkdown}>
+                      导出 md
+                    </Button>
+                  </Space>
+                  <Space.Compact style={{ width: "100%" }}>
+                    <Input
+                      placeholder="结果已生成，可继续追问…"
+                      value={followupText}
+                      onChange={(e) => setFollowupText(e.target.value)}
+                      onPressEnter={() => void sendFollowup()}
+                      disabled={followupRunning || selectedConversationId == null}
+                    />
+                    <Button
+                      type="primary"
+                      loading={followupRunning}
+                      onClick={() => void sendFollowup()}
+                      disabled={selectedConversationId == null}
+                    >
+                      追问
+                    </Button>
+                  </Space.Compact>
+                  {selectedConversationId == null ? <Text type="secondary">（请先点击左侧「+」创建对话）</Text> : null}
+                </div>
+              ) : null}
+            </>
+          ) : null}
+
+      <Modal
+        title="流程中断"
+        open={pipelineFailModal != null}
+        onCancel={() => setPipelineFailModal(null)}
+        footer={null}
+        width={560}
+        destroyOnClose
+      >
+        {pipelineFailModal ? (
+          <Space direction="vertical" style={{ width: "100%" }} size={12}>
+            <Text strong>
+              失败阶段：
+              {pipelineFailModal.step === "convert"
+                ? "文档转换"
+                : pipelineFailModal.step === "index"
+                  ? "索引与分块"
+                  : "模型分析"}
+            </Text>
+            <Text type="danger" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+              {pipelineFailModal.message}
+            </Text>
+            <Text type="secondary">排除故障后，可选择从哪一步继续：</Text>
+            <Space wrap>
+              {pipelineFailModal.step === "convert" ? (
+                <>
+                  <Button type="primary" onClick={() => void resumePipelineAfterFailure("convert_chain")}>
+                    重试转换并继续（索引→分析）
+                  </Button>
+                  <Button onClick={() => void resumePipelineAfterFailure("full")}>全流程重来</Button>
+                </>
+              ) : null}
+              {pipelineFailModal.step === "index" ? (
+                <>
+                  <Button type="primary" onClick={() => void resumePipelineAfterFailure("index_chain")}>
+                    重试索引并继续分析
+                  </Button>
+                  <Button onClick={() => void resumePipelineAfterFailure("full")}>全流程重来</Button>
+                </>
+              ) : null}
+              {pipelineFailModal.step === "analyze" ? (
+                <>
+                  <Button type="primary" onClick={() => void resumePipelineAfterFailure("analyze_only")}>
+                    仅重试模型分析
+                  </Button>
+                  <Button onClick={() => void resumePipelineAfterFailure("index_chain")}>重试索引后再分析</Button>
+                  <Button onClick={() => void resumePipelineAfterFailure("full")}>全流程重来</Button>
+                </>
+              ) : null}
+            </Space>
+          </Space>
+        ) : null}
+      </Modal>
 
       <Modal title="设置" open={settingsOpen} onOk={saveSettings} onCancel={() => setSettingsOpen(false)} width={860} okText="保存">
         <Space direction="vertical" style={{ width: "100%", fontSize: 12 }} size={12}>
@@ -870,15 +1228,15 @@ export default function App() {
                 value={settingsDraft.chunk_limit}
                 onChange={(v) => setSettingsDraft((s) => ({ ...s, chunk_limit: Math.max(1, Math.min(500, Number(v) || 40)) }))}
               />
-              <Text strong>分块方式</Text>
+              <Text strong>分块模式</Text>
               <Radio.Group
                 value={settingsDraft.chunk_strategy === "structured" ? "structured" : "blank"}
                 onChange={(e) =>
                   setSettingsDraft((s) => ({ ...s, chunk_strategy: e.target.value as ChunkStrategy }))
                 }
               >
-                <Radio value="blank">空行分块（与升级前一致）</Radio>
-                <Radio value="structured">标题与结构感知（.md 按标题/代码围栏）</Radio>
+                <Radio value="blank">简单模式（空行分块）</Radio>
+                <Radio value="structured">标题与结构感知模式（按标题/代码围栏）</Radio>
               </Radio.Group>
               <Checkbox checked={!!settingsDraft.disable_image_parse} onChange={(e) => setSettingsDraft((s) => ({ ...s, disable_image_parse: e.target.checked }))}>
                 不解析文件中的图片
@@ -941,9 +1299,14 @@ export default function App() {
           <div>
             <Space style={{ width: "100%", justifyContent: "space-between" }}>
               <Text strong>组合预设</Text>
-              <Button size="small" onClick={addPreset}>
-                新增预设
-              </Button>
+              <Space>
+                <Button size="small" onClick={addPreset}>
+                  新增预设
+                </Button>
+                <Button size="small" danger onClick={confirmDeleteSelectedPreset} disabled={(settingsDraft.focus_presets || []).length === 0}>
+                  删除预设
+                </Button>
+              </Space>
             </Space>
             <div style={{ display: "flex", gap: 12, marginTop: 8, alignItems: "stretch" }}>
               <div
@@ -966,7 +1329,7 @@ export default function App() {
                       className={idx === presetSelectedIndex ? "focus-chip focus-chip-active" : "focus-chip"}
                       style={{
                         textAlign: "left",
-                        justifyContent: "space-between",
+                        justifyContent: "flex-start",
                         width: "100%",
                         borderRadius: 14,
                         border: idx === presetSelectedIndex ? "1px solid #4f7f67" : "1px solid #d9dfd7",
@@ -977,16 +1340,6 @@ export default function App() {
                       onClick={() => setPresetSelectedIndex(idx)}
                     >
                       <span>{p.name || p.id}</span>
-                      <Button
-                        size="small"
-                        danger
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deletePreset(idx);
-                        }}
-                      >
-                        删除
-                      </Button>
                     </Button>
                   ))}
                   {(settingsDraft.focus_presets || []).length === 0 ? <Text type="secondary">暂无预设</Text> : null}
@@ -1204,6 +1557,100 @@ export default function App() {
       <Modal title="帮助" open={helpOpen} onCancel={() => setHelpOpen(false)} footer={null} width={760} styles={{ body: { fontSize: 12 } }}>
         {helpLoading ? <Spin /> : <SimpleMarkdown markdown={helpMarkdown || "# 帮助\n\n暂无帮助内容。"} />}
       </Modal>
+      <Modal
+        title="新对话"
+        open={newConversationOpen}
+        onCancel={() => setNewConversationOpen(false)}
+        okText="进入"
+        onOk={() => {
+          const title = `KA - ${formatLocalDateTime(new Date())}`;
+          void createConversation(analysisTypeDraft, title).then(() => setNewConversationOpen(false));
+        }}
+        width={520}
+      >
+        <Space direction="vertical" style={{ width: "100%" }} size={10}>
+          <Text type="secondary">选择分析功能（目前仅 KA）。</Text>
+          <Select
+            style={{ width: "100%" }}
+            value={analysisTypeDraft}
+            options={[{ value: "KA", label: "KA 业务关联审查" }]}
+            onChange={(v) => setAnalysisTypeDraft(String(v || "KA"))}
+          />
+        </Space>
+      </Modal>
+
+      <Modal
+        title="加载项目目录"
+        open={manualPickOpen}
+        onCancel={() => setManualPickOpen(false)}
+        okText="加载"
+        onOk={() => void onLoadManualPath().then(() => setManualPickOpen(false))}
+        confirmLoading={manualLoadLoading}
+        width={620}
+      >
+        <Space direction="vertical" style={{ width: "100%" }} size={10}>
+          <Text type="secondary">请输入后端可见的项目根路径（容器内路径）。</Text>
+          <Input
+            value={manualRootInput}
+            onChange={(e) => setManualRootInput(e.target.value)}
+            onPressEnter={() => void onLoadManualPath().then(() => setManualPickOpen(false))}
+          />
+        </Space>
+      </Modal>
+        </div>
+      </div>
+
+      {!chatsOpen ? (
+        <div className={`composer-overlay ${selectedConversationId ? "composer-overlay-bottom" : "composer-overlay-center"}`}>
+          <div className="composer-overlay-inner">
+            <div className="composer">
+              <div className="composer-hint">
+                I-KA 业务关联审查：选择项目目录与关注点，一键完成转换、索引与审查，并可导出 Markdown。
+              </div>
+              <div className="composer-toolbar">
+                <div className="composer-left">
+                  <Button shape="circle" icon={<PlusOutlined />} loading={pickLoading} onClick={() => void openProjectPicker()} />
+                  {pickedRootPath ? (
+                    <span className="composer-path">{tailEllipsis(pickedRootPath, 50)}</span>
+                  ) : (
+                    <span className="composer-path">未加载项目目录</span>
+                  )}
+                </div>
+                <div className="composer-right">
+                  <Select
+                    className="composer-preset"
+                    placeholder="选择预设（必选）"
+                    value={selectedPresetId || undefined}
+                    allowClear
+                    options={focusPresets.map((p) => ({ value: p.id, label: p.name }))}
+                    onChange={(v) => {
+                      const id = String(v || "");
+                      setSelectedPresetId(id);
+                      const preset = focusPresets.find((p) => p.id === id);
+                      if (preset) {
+                        setFocusPoints(preset.focus_points || []);
+                      } else {
+                        setFocusPoints([]);
+                      }
+                    }}
+                  />
+                  <Tooltip title={pipelineRunning ? "终止" : "开始"}>
+                    <Button
+                      className="composer-run"
+                      shape="circle"
+                      danger={pipelineRunning}
+                      loading={pipelineRunning}
+                      onClick={pipelineRunning ? stopPipeline : runFullPipeline}
+                      disabled={selectedId == null || !selectedPresetId}
+                      icon={pipelineRunning ? <StopOutlined className="composer-run-icon" /> : <ArrowUpOutlined className="composer-run-icon" />}
+                    />
+                  </Tooltip>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

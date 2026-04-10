@@ -4,7 +4,7 @@
 
 ```json
 {
-  "chunk_limit": 40,
+  "chunk_limit": 300,
   "chunk_strategy": "blank",
   "disable_image_parse": true,
   "llm_settings": {
