@@ -190,6 +190,7 @@ export default function App() {
   const [newConversationOpen, setNewConversationOpen] = useState(false);
   const [chatsOpen, setChatsOpen] = useState(false);
   const [analysisTypeDraft, setAnalysisTypeDraft] = useState("KA");
+  const [draftText, setDraftText] = useState("");
 
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [finalMarkdown, setFinalMarkdown] = useState<string>("");
@@ -1021,6 +1022,14 @@ export default function App() {
     message.success("已导出 Markdown");
   };
 
+  const showMainOutput = useMemo(() => {
+    if (chatsOpen) return false;
+    if (pipelineRunning) return true;
+    if (finalMarkdown.trim()) return true;
+    if (milestones.length) return true;
+    return false;
+  }, [chatsOpen, pipelineRunning, finalMarkdown, milestones.length]);
+
   return (
     <div className="app-layout">
       <div className="side-nav">
@@ -1088,7 +1097,7 @@ export default function App() {
             </div>
           ) : null}
 
-          {!chatsOpen ? (
+          {!chatsOpen && showMainOutput ? (
             <>
               <div style={{ marginTop: 12, marginBottom: 16 }}>
                 {pipelineRunning ? <Text type="secondary">分析进行中…（可滚动查看实时输出）</Text> : null}
@@ -1127,9 +1136,7 @@ export default function App() {
                         );
                       })}
                     </div>
-                  ) : (
-                    <Text type="secondary">（暂无输出）</Text>
-                  )}
+                  ) : null}
                 </div>
               </div>
 
@@ -1603,20 +1610,22 @@ export default function App() {
       {!chatsOpen ? (
         <div className={`composer-overlay ${selectedConversationId ? "composer-overlay-bottom" : "composer-overlay-center"}`}>
           <div className="composer-overlay-inner">
-            <div className="composer">
-              <div className="composer-hint">
-                I-KA 业务关联审查：选择项目目录与关注点，一键完成转换、索引与审查，并可导出 Markdown。
+            {!selectedConversationId ? (
+              <div className="welcome">
+                <div className="welcome-title">Welcome</div>
+                <div className="welcome-subtitle">{selected?.name ? `，${selected.name}` : "，请先加载项目目录"}</div>
               </div>
+            ) : null}
+            <div className="composer">
+              <Input.TextArea
+                className="composer-textarea"
+                rows={4}
+                placeholder="I-KA 业务关联审查：选择项目目录与预设，一键完成转换、索引与审查，并可导出 Markdown。"
+                value={draftText}
+                onChange={(e) => setDraftText(e.target.value)}
+              />
               <div className="composer-toolbar">
                 <div className="composer-left">
-                  <Button shape="circle" icon={<PlusOutlined />} loading={pickLoading} onClick={() => void openProjectPicker()} />
-                  {pickedRootPath ? (
-                    <span className="composer-path">{tailEllipsis(pickedRootPath, 50)}</span>
-                  ) : (
-                    <span className="composer-path">未加载项目目录</span>
-                  )}
-                </div>
-                <div className="composer-right">
                   <Select
                     className="composer-preset"
                     placeholder="选择预设（必选）"
@@ -1634,6 +1643,14 @@ export default function App() {
                       }
                     }}
                   />
+                  <Button shape="circle" icon={<PlusOutlined />} loading={pickLoading} onClick={() => void openProjectPicker()} />
+                  {pickedRootPath ? (
+                    <span className="composer-path">{tailEllipsis(pickedRootPath, 50)}</span>
+                  ) : (
+                    <span className="composer-path">未加载项目目录</span>
+                  )}
+                </div>
+                <div className="composer-right">
                   <Tooltip title={pipelineRunning ? "终止" : "开始"}>
                     <Button
                       className="composer-run"

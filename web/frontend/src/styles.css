@@ -3,7 +3,7 @@ body {
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   background: #ecefe9;
   color: #2f3a32;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .app-layout {
@@ -64,6 +64,26 @@ body {
   pointer-events: auto;
 }
 
+.welcome {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: 14px;
+  color: rgba(47, 58, 50, 0.9);
+}
+
+.welcome-title {
+  font-size: 28px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+
+.welcome-subtitle {
+  font-size: 16px;
+  color: rgba(47, 58, 50, 0.75);
+}
+
 .composer-overlay-center {
   top: 50%;
   transform: translateY(-50%);
@@ -78,16 +98,20 @@ body {
   width: 100%;
   border: 1px solid #d9dfd7;
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.75);
+  background: #ecefe9;
   padding: 14px 14px 12px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+  box-shadow: none;
 }
 
-.composer-hint {
-  color: rgba(47, 58, 50, 0.72);
-  font-size: 12px;
-  line-height: 1.6;
-  margin-bottom: 10px;
+.composer-textarea {
+  margin-bottom: 12px;
+}
+
+.composer-textarea textarea {
+  border-radius: 14px !important;
+  background: transparent !important;
+  font-size: 15px !important;
+  line-height: 1.6 !important;
 }
 
 .composer-toolbar {
@@ -105,7 +129,7 @@ body {
 }
 
 .composer-path {
-  font-size: 12px;
+  font-size: 14px;
   color: rgba(47, 58, 50, 0.72);
   max-width: 420px;
   overflow: hidden;
@@ -171,7 +195,7 @@ body {
 }
 
 .simple-markdown {
-  font-size: 12px;
+  font-size: 15px;
   line-height: 1.7;
   color: #2f3a32;
 }
@@ -221,7 +245,7 @@ body {
 
 .stream-log {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
+  font-size: 13px;
   white-space: pre-wrap;
   max-height: 240px;
   overflow: auto;
@@ -263,7 +287,7 @@ body {
 .stream-render-think {
   white-space: pre-wrap;
   color: #b8c0b7;
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .think-stream-details {
@@ -278,7 +302,7 @@ body {
   cursor: pointer;
   list-style: none;
   color: #5a635c;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 500;
 }
 
