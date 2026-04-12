@@ -263,11 +263,11 @@ body {
   word-break: break-word;
 }
 
-/* 解析完成后：单独下载「每行一个片段」索引 md，与正文导出分离 */
+/* 片段与来源索引里程碑下方、「思考分析」之前的下载按钮 */
 .fragment-index-download-bar {
   max-width: var(--main-content-max-width);
-  margin: 10px auto 0;
-  padding: 0 6px 8px;
+  margin: 4px auto 0;
+  padding: 0 6px 4px;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -494,9 +494,26 @@ body {
   word-break: break-word;
 }
 
+/* 仅折叠「思考过程」围栏内文本；summary 与正文随整页滚动 */
+.milestone-thinking-details {
+  margin: 6px 0 0;
+}
+
+.milestone-thinking-summary {
+  cursor: pointer;
+  list-style: none;
+  color: #374151;
+  font-size: 12px;
+  user-select: none;
+}
+
+.milestone-thinking-summary::-webkit-details-marker {
+  display: none;
+}
+
 /* 分析思考：thinking 段与前后文同列，随整页滚动 */
 .milestone-analysis-think-stream {
-  margin: 0;
+  margin: 6px 0 0;
   padding: 0;
   max-height: none;
   overflow: visible;

@@ -350,7 +350,9 @@ function withDerivedFocusPresets(d: SettingsData): SettingsData {
   return { ...d, focus_presets: derived };
 }
 
-/** 拆分模型输出中的 thinking 围栏；闭合后 thinkComplete 为 true，用于自动折叠 */
+const STAGE_FRAGMENT_INDEX = "stage:片段与来源索引";
+
+/** 拆分模型输出中的 thinking 围栏；闭合后 thinkComplete 为 true，用于折叠态 */
 function splitRedactedThinkingBlock(md: string): {
   before: string;
   think: string;
@@ -400,7 +402,7 @@ function splitReportFromAnalysis(md: string): { analysisPart: string; reportPart
   return { analysisPart: "", reportPart: t };
 }
 
-/** 「思考分析」里程碑正文：有围栏则只显示围栏内；无围栏但已有下方报告时显示说明，避免该小节被误删 */
+/** 「思考分析」里程碑正文：有围栏则只显示围栏内；正文已在下方 final-report 时本小节不再重复提示 */
 function effectiveMilestoneBody(
   m: Milestone,
   reportSplit: { analysisPart: string; reportPart: string },
@@ -413,19 +415,23 @@ function effectiveMilestoneBody(
   }
   const ap = reportSplit.analysisPart.trim();
   if (ap) return ap;
-  return "（未检出 `<thinking>` / `<redacted_thinking>` 闭合围栏；审查报告见下方正文。）";
+  /* 无 thinking 围栏时全文作为报告在下方展示，此处留空即可 */
+  return "";
 }
 
-/** 业务类里程碑：&lt;thinking&gt; 内与前后文同列连续输出，不单独折叠 */
+/** 业务里程碑 Markdown：仅将围栏内 thinking 包在 details 中，前后文与正式段落不折叠 */
 function BusinessMilestoneMarkdown({ markdown }: { markdown: string }) {
-  const { before, think, after } = useMemo(() => splitRedactedThinkingBlock(markdown), [markdown]);
+  const { before, think, after, thinkComplete } = useMemo(() => splitRedactedThinkingBlock(markdown), [markdown]);
   if (!think) {
-    return <SimpleMarkdown markdown={markdown || "（暂无内容）"} />;
+    return <SimpleMarkdown markdown={markdown || ""} />;
   }
   return (
     <>
       {before.trim() ? <SimpleMarkdown markdown={before} /> : null}
-      <div className="stream-render-text milestone-analysis-think-stream">{think}</div>
+      <details className="milestone-thinking-details" open={!thinkComplete}>
+        <summary className="milestone-thinking-summary">思考过程</summary>
+        <div className="stream-render-text milestone-analysis-think-stream">{think}</div>
+      </details>
       {after.trim() ? <SimpleMarkdown markdown={after} /> : null}
     </>
   );
@@ -1210,7 +1216,7 @@ export default function App() {
     const po = (preset?.output_requirements ?? "").trim();
     if (po) analyzeBody.output_requirements = po;
     setFragmentIndexMd("");
-    setMilestones((prev) => prev.filter((m) => m.id !== "stage:片段与来源索引"));
+    setMilestones((prev) => prev.filter((m) => m.id !== STAGE_FRAGMENT_INDEX));
 
     const fin = await new Promise<{ markdown: string }>((resolve, reject) => {
       let settled = false;
@@ -1241,7 +1247,7 @@ export default function App() {
           if (ev.type === "chunk_index" && typeof (ev as { markdown?: string }).markdown === "string") {
             const md = String((ev as { markdown: string }).markdown);
             setFragmentIndexMd(md);
-            const key = "stage:片段与来源索引";
+            const key = STAGE_FRAGMENT_INDEX;
             ensureMilestone(key, "片段与来源索引", "business");
             setMilestones((prev) =>
               prev.map((m) => (m.id === key ? { ...m, detailText: md } : m)),
@@ -1300,7 +1306,7 @@ export default function App() {
     const analyzeAbort = new AbortController();
     analyzeAbortRef.current = analyzeAbort;
     setFragmentIndexMd("");
-    setMilestones((prev) => prev.filter((m) => m.id !== "stage:片段与来源索引"));
+    setMilestones((prev) => prev.filter((m) => m.id !== STAGE_FRAGMENT_INDEX));
 
     const fin = await new Promise<{ markdown: string }>((resolve, reject) => {
       let settled = false;
@@ -1331,7 +1337,7 @@ export default function App() {
           if (ev.type === "chunk_index" && typeof (ev as { markdown?: string }).markdown === "string") {
             const md = String((ev as { markdown: string }).markdown);
             setFragmentIndexMd(md);
-            const key = "stage:片段与来源索引";
+            const key = STAGE_FRAGMENT_INDEX;
             ensureMilestone(key, "片段与来源索引", "business");
             setMilestones((prev) =>
               prev.map((m) => (m.id === key ? { ...m, detailText: md } : m)),
@@ -1673,7 +1679,7 @@ export default function App() {
       return;
     }
     const name = displayProjectSubject(selected).replace(/[^\w\u4e00-\u9fa5\-_.]+/g, "_") || "fragments";
-    const filename = `${name}-片段与来源索引.md`;
+    const filename = `${name}-片段索引.md`;
     const blob = new Blob([t], { type: "text/markdown;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -1683,7 +1689,7 @@ export default function App() {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
-    message.success("已下载片段索引文件");
+    message.success("已下载片段索引");
   }, [fragmentIndexMd, selected]);
 
   const copyFinalMarkdown = async () => {
@@ -1860,49 +1866,63 @@ export default function App() {
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                       {milestones
                         .filter((m) => m.id !== "sys:complete")
-                        .map((m) => {
-                        const effectiveText = effectiveMilestoneBody(m, reportSplit);
-                        const showDetails = effectiveText.trim().length > 0;
-                        const done = m.status === "done";
-                        const running = m.status === "running";
-                        const lead = done ? "✓ " : running ? "→ " : "　";
-                        const displayName = m.id === "stage:分析内容" ? "思考分析" : m.name;
-                        const title = `${lead}${displayName} >`;
-                        const titleColor = m.status === "error" ? "#cf1322" : "#374151";
-                        const defaultOpen = m.status === "running";
-                        const o = milestoneOpenOverrides[m.id];
-                        const expanded = o !== undefined ? o : defaultOpen;
-                        return (
-                          <div key={m.id} style={{ fontSize: 12 }}>
-                            {showDetails ? (
-                              <details
-                                style={{ marginTop: 0 }}
-                                open={expanded}
-                                onToggle={(ev) => {
-                                  const el = ev.currentTarget;
-                                  setMilestoneOpenOverrides((prev) => ({ ...prev, [m.id]: el.open }));
-                                }}
-                              >
-                                <summary style={{ cursor: "pointer", listStyle: "none", color: titleColor }}>{title}</summary>
-                                <div style={{ marginTop: 6, color: "#6b7280" }}>{renderMilestoneDetail(m)}</div>
-                              </details>
-                            ) : null}
-                          </div>
-                        );
-                      })}
+                        .flatMap((m) => {
+                          const isAnalysisMilestone =
+                            m.id === "stage:思考分析" ||
+                            m.id === "stage:分析思考" ||
+                            m.id === "stage:分析内容";
+                          const effectiveText = effectiveMilestoneBody(m, reportSplit);
+                          const showDetails = effectiveText.trim().length > 0;
+                          const done = m.status === "done";
+                          const running = m.status === "running";
+                          const lead = done ? "✓ " : running ? "→ " : "　";
+                          const displayName = m.id === "stage:分析内容" ? "思考分析" : m.name;
+                          const title = `${lead}${displayName} >`;
+                          const titleColor = m.status === "error" ? "#cf1322" : "#374151";
+                          const defaultOpen = m.status === "running";
+                          const o = milestoneOpenOverrides[m.id];
+                          const expanded = o !== undefined ? o : defaultOpen;
+
+                          const milestoneBlock = (
+                            <div key={m.id} style={{ fontSize: 12 }}>
+                              {isAnalysisMilestone ? (
+                                showDetails ? (
+                                  <>
+                                    <div style={{ color: titleColor, fontWeight: 550, marginBottom: 4 }}>{title}</div>
+                                    <div style={{ marginTop: 0, color: "#6b7280" }}>{renderMilestoneDetail(m)}</div>
+                                  </>
+                                ) : null
+                              ) : showDetails ? (
+                                <details
+                                  style={{ marginTop: 0 }}
+                                  open={expanded}
+                                  onToggle={(ev) => {
+                                    const el = ev.currentTarget;
+                                    setMilestoneOpenOverrides((prev) => ({ ...prev, [m.id]: el.open }));
+                                  }}
+                                >
+                                  <summary style={{ cursor: "pointer", listStyle: "none", color: titleColor }}>{title}</summary>
+                                  <div style={{ marginTop: 6, color: "#6b7280" }}>{renderMilestoneDetail(m)}</div>
+                                </details>
+                              ) : null}
+                            </div>
+                          );
+
+                          if (m.id === STAGE_FRAGMENT_INDEX && fragmentIndexMd.trim()) {
+                            return [
+                              milestoneBlock,
+                              <div key={`${m.id}-frag-md-btn`} className="fragment-index-download-bar">
+                                <Button type="default" size="small" icon={<DownloadOutlined />} onClick={downloadFragmentIndexMd}>
+                                  片段索引.md
+                                </Button>
+                              </div>,
+                            ];
+                          }
+                          return [milestoneBlock];
+                        })}
                     </div>
                   ) : null}
                 </div>
-                {fragmentIndexMd.trim() ? (
-                  <div className="fragment-index-download-bar">
-                    <Button type="default" size="small" icon={<DownloadOutlined />} onClick={downloadFragmentIndexMd}>
-                      下载片段与来源索引
-                    </Button>
-                    <Text type="secondary" style={{ fontSize: 12, marginLeft: 10 }}>
-                      每行一个片段；与下方「导出 md」审查结论相互独立
-                    </Text>
-                  </div>
-                ) : null}
                 {!pipelineRunning && reportSplit.reportPart.trim() ? (
                   <div className="pipeline-final-report">
                     <SimpleMarkdown markdown={reportSplit.reportPart} />
