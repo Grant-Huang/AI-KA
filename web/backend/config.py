@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -32,7 +33,8 @@ def get_settings() -> Settings:
     origins = [o.strip() for o in origins_raw.split(",") if o.strip()]
     return Settings(
         docs2md_root=os.environ.get("DOCS2MD_ROOT"),
-        docs2md_python=os.environ.get("DOCS2MD_PYTHON", "python"),
+        # 与 AI-KA 后端同解释器，避免 `python` 指向其它版本导致 docs2md 与依赖不一致、环境变量行为不同。
+        docs2md_python=os.environ.get("DOCS2MD_PYTHON") or sys.executable,
         projects_allow_prefix=os.environ.get("AIKA_PROJECTS_ALLOW_PREFIX"),
         enable_native_folder_picker=_env_bool("AIKA_ENABLE_NATIVE_FOLDER_PICKER", True),
         fs_picker_localhost_only=_env_bool("AIKA_FS_PICKER_LOCALHOST_ONLY", True),

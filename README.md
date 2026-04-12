@@ -41,6 +41,14 @@ aika doc list --project "demo"
 python -m pip install -e . --no-build-isolation
 ```
 
+**升级 docs2md（Git 源，非 PyPI 固定版）**：依赖在 `pyproject.toml` 中指向 `git+https://github.com/Grant-Huang/docs2md.git`。若需拉取上游最新提交（例如图片解析、格式支持更新），在已激活的虚拟环境中执行：
+
+```bash
+python -m pip install -U "docs2md @ git+https://github.com/Grant-Huang/docs2md.git"
+```
+
+然后重新安装本仓库（`python -m pip install -e .`）或重启后端，使运行中的进程使用新包。
+
 前端（开发态你自己跑；发布时由 CI 负责 `npm run build` 并将 `dist` 打进 wheel）：
 
 ```bash
@@ -54,7 +62,7 @@ npm run dev
 | 变量 | 说明 |
 |------|------|
 | `DOCS2MD_ROOT` | 可选：本地克隆的 [docs2md](https://github.com/Grant-Huang/docs2md) 仓库根目录（用于覆盖默认安装的 docs2md；需含 `all2md.py`） |
-| `DOCS2MD_PYTHON` | 可选，默认 `python` |
+| `DOCS2MD_PYTHON` | 可选，默认与启动后端的 Python 解释器相同（`sys.executable`），避免与系统 `python` 混用导致 docs2md 版本/环境变量不一致 |
 | `AIKA_PROJECTS_ALLOW_PREFIX` | 可选，限制用户只能注册该前缀下的目录 |
 | `AIKA_ENABLE_NATIVE_FOLDER_PICKER` | 可选，默认开启：由本机后端弹出系统文件夹对话框并返回绝对路径（`/api/v1/fs/pick-directory`） |
 | `AIKA_FS_PICKER_LOCALHOST_ONLY` | 可选，默认开启：仅当从本机访问 API 时允许目录选择（防止远端触发服务器弹窗） |
@@ -64,6 +72,7 @@ npm run dev
 | `AIKA_LLM_MODEL` | 模型名 |
 | `AIKA_WEB_HOST` / `AIKA_WEB_PORT` | 后端监听，默认 `127.0.0.1:8765` |
 | `AIKA_REPO_ROOT` | 可选，显式指定本仓库根（用于 `.tmp` 与 SQLite 路径） |
+| `AIKA_RULES_FILENAME` | 可选，默认 `rules.md`。指定仓库根下**唯一**加载的规则文件名（如 `rules_new2.md`）；各规则文件彼此独立，同时只读其一，需重启后端生效。 |
 | `AIKA_CHUNK_STRATEGY` | 可选，`blank` 或 `structured`：仅当**无** Web 保存的 `app_settings.md` 时作为 CLI/自动化默认；**Web 端以设置页为准**。 |
 
 ### 3.3 启动后端
@@ -82,7 +91,7 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8765
 
 ### 3.4 使用流程（一键分析）
 
-1. **分析配置**：设定 chunk 上限、**分块方式**（空行分块 / 标题与结构感知）、选择关注点。若 `rules.md` 含有“组合使用建议”表格，首页关注点下拉框后会显示 `Tips` 入口用于快速参考。**修改分块方式后须重新执行索引**，否则分析仍基于旧分块。
+1. **分析配置**：设定 chunk 上限、**分块方式**（空行分块 / 标题与结构感知）、选择关注点。若 `rules.md` 含有「组合使用建议」**五列表**（评审节点、推荐组合的关注点、审查角色、审查目标与原则、输出要求），首页关注点下拉框后会显示 `Tips` 入口用于快速参考；表格与单元格转义约定见根目录 `helpme.md`。**修改分块方式后须重新执行索引**，否则分析仍基于旧分块。
 2. **选择项目**：点击「选择项目」由本机后端回填**绝对路径**（后端进程必须可读）。当前按单项目目录处理：一次选择一个目录并分析一个项目。
 3. 点击 **「开始分析」**：自动顺序执行——**docs2md 转换**（SSE 日志写入「后台日志」弹窗）→ **索引 Markdown**（将 `md_out` 下 Markdown 扫描入库并分块）→ **大模型流式审查**（`POST /api/v1/projects/{id}/analyze/stream`，请求体含 `chunk_limit` 与本次勾选的 `focus_points`，系统按 `rules.md`/设置中的关注点 name+prompt 生成审查提示；「过程流式输出」区域展示）。
 4. **导出 docx**：分析完成后可导出；依赖 `epic-doc`；若缺少 LibreOffice/pandoc/graphviz 等系统依赖，启动或导出时会提示安装方式。
@@ -93,7 +102,7 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8765
 - 终端用户说明见 [docs/User_Manual_zh.md](docs/User_Manual_zh.md)；部署与运维见 [docs/System_Admin_Manual_zh.md](docs/System_Admin_Manual_zh.md)。
 - `Model` 支持分别配置文本链路与 VL 链路（Provider/Base URL/Model + 独立 API Key）。
 - 关注点支持从 `rules.md` 整体导入（先校验后确认保存）。
-- 帮助页内容来自仓库根目录 `helpme.md`（若不存在会回退读取 `docs/helpme.md`）。
+- 帮助页内容来自仓库根目录 `helpme.md`（若不存在会回退读取 `docs/helpme.md`）。文件中需包含二级标题 **功能简介、操作流程、规则说明、设置指南、常见问题**，前端将据此拆成多个 Tab 展示；否则整页渲染原文。
 
 排障时可在「高级：分步执行」中单独运行 docs2md、索引或仅大模型分析。
 

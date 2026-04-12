@@ -7,7 +7,7 @@ import unicodedata
 from typing import Any, Iterator
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -29,40 +29,11 @@ from backend.path_validate import PathValidationError, validate_path_under_dir, 
 from backend.prompt_builder import (
     build_system_prompt,
     build_user_prompt_from_entries,
-    format_chunk_index_markdown,
+    format_chunk_index_lines_markdown,
     merge_rules,
 )
 from backend.repo_paths import project_export_dir, project_md_out_dir, repository_root
 from backend.response import err, ok
-
-
-# #region agent log
-def _agent_debug_log(
-    *,
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict[str, Any] | None = None,
-) -> None:
-    """NDJSON debug log for Cursor debug mode (session d510dd)."""
-    try:
-        log_path = repository_root() / ".cursor" / "debug-d510dd.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        rec: dict[str, Any] = {
-            "sessionId": "d510dd",
-            "timestamp": int(datetime.now().timestamp() * 1000),
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data or {},
-        }
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-
-
-# #endregion
 
 
 def _conn():
@@ -70,6 +41,21 @@ def _conn():
     conn = dbm.connect(db_path(root))
     dbm.ensure_schema(conn)
     return conn
+
+
+_MULTITURN_MESSAGE_MAX_CHARS = 8000
+_MULTITURN_RECENT_LIMIT = 24
+
+
+def _truncate_message_for_context(text: str, max_chars: int = _MULTITURN_MESSAGE_MAX_CHARS) -> str:
+    t = str(text or "")
+    if len(t) <= max_chars:
+        return t
+    return t[:max_chars] + "\n\n（已截断）\n"
+
+
+def _message_rows_to_prior_tuples(rows: list[Any]) -> list[tuple[str, str]]:
+    return [(str(r.role), _truncate_message_for_context(r.content)) for r in rows]
 
 
 app = FastAPI(title="AI-KA Web", version="0.1.0")
@@ -226,12 +212,23 @@ def _normalize_chunk_strategy(raw: Any) -> str:
     return DEFAULT_CHUNK_STRATEGY
 
 
+MD_INDEX_MODE_INCREMENTAL = "incremental"
+MD_INDEX_MODE_FULL = "full"
+
+
+def _normalize_md_index_mode(v: Any) -> str:
+    if isinstance(v, str) and v.strip().lower() == MD_INDEX_MODE_FULL:
+        return MD_INDEX_MODE_FULL
+    return MD_INDEX_MODE_INCREMENTAL
+
+
 def _write_app_settings_md(payload: dict[str, Any]) -> None:
     p = _app_settings_md_path()
     obj = {
         "chunk_limit": int(payload.get("chunk_limit") or DEFAULT_CHUNK_LIMIT),
         "chunk_strategy": _normalize_chunk_strategy(payload.get("chunk_strategy")),
         "disable_image_parse": bool(payload.get("disable_image_parse", True)),
+        "md_index_mode": _normalize_md_index_mode(payload.get("md_index_mode")),
         "llm_settings": payload.get("llm_settings") if isinstance(payload.get("llm_settings"), dict) else {},
         "llm_text_api_key": str(payload.get("llm_text_api_key") or ""),
         "llm_vl_api_key": str(payload.get("llm_vl_api_key") or ""),
@@ -248,18 +245,23 @@ def _helpme_md_path() -> Path:
 
 
 def _build_settings_payload(conn: Any) -> dict[str, Any]:
+    derived = _get_focus_presets()
+    overlay = _read_focus_preset_review_overlay()
+    merged_presets = _merge_preset_review_into_derived(derived, overlay) if overlay else derived
     return {
         "focus_points": _get_focus_points(),
-        "focus_presets": _get_focus_presets(),
+        "focus_presets": merged_presets,
         "chunk_limit": _get_chunk_limit(),
         "chunk_strategy": _get_chunk_strategy(),
         "disable_image_parse": _get_disable_image_parse(),
+        "md_index_mode": _get_md_index_mode(),
         "llm_settings": _get_llm_settings(),
         # 便于前端排查「预设不显示」：实际读取的仓库根与 rules 路径、原始组合表行
         "repo_root": str(repository_root()),
         "rules_filename": _active_rules_filename(),
         "rules_md_path": str(_rules_md_path()),
         "focus_combo_tips": _read_focus_combo_tips_from_rules_md(),
+        "rules_composer_hint": _read_rules_composer_hint_from_rules_md(),
     }
 
 
@@ -284,17 +286,76 @@ def _normalize_md_line_for_heading(line: str) -> str:
     return unicodedata.normalize("NFKC", (line or "").strip())
 
 
+# 二级节：仅允许「关注点块」节与含「组合使用建议」的组合节。
+_RULES_H2_FOCUS_BLOCK_MARKER = "关注点块"
+_RULES_H2_COMBO_MARKER = "组合使用建议"
+
+# 三级节：仅允许 ### focus:<id> | <名称>
+_RULES_FOCUS_HEADING_LINE_RE = re.compile(
+    r"^###\s+focus:\s*([^\s|]+)\s*\|\s*(.+)$"
+)
+
+
+def _is_allowed_rules_h2_line(line: str) -> bool:
+    s = _normalize_md_line_for_heading(line)
+    m = re.match(r"^##(?!#)\s+(.+)$", s)
+    if not m:
+        return False
+    title = m.group(1).strip()
+    if _RULES_H2_FOCUS_BLOCK_MARKER in title:
+        return True
+    if _RULES_H2_COMBO_MARKER in title:
+        return True
+    return False
+
+
+def _is_focus_block_h2_line(line: str) -> bool:
+    s = _normalize_md_line_for_heading(line)
+    m = re.match(r"^##(?!#)\s+(.+)$", s)
+    if not m:
+        return False
+    return _RULES_H2_FOCUS_BLOCK_MARKER in m.group(1).strip()
+
+
+def _rules_strict_schema_error(text: str) -> str | None:
+    """
+    强校验：二级标题（##）仅允许含「关注点块」的节或含「组合使用建议」的组合节；
+    三级标题（###）仅允许「### focus:<id> | <名称>」；
+    首个「### focus:」之前须已出现含「关注点块」的二级标题（如 ## 关注点块）。
+    """
+    seen_focus_block_h2 = False
+    for line in text.splitlines():
+        s = _normalize_md_line_for_heading(line)
+        if re.match(r"^##(?!#)", s):
+            if not _is_allowed_rules_h2_line(line):
+                return (
+                    "规则文件格式无效：二级标题（##）仅允许「关注点块」节（如 ## 关注点块）"
+                    "或含「组合使用建议」的组合节标题（如 ## 组合使用建议）。"
+                )
+            if _is_focus_block_h2_line(line):
+                seen_focus_block_h2 = True
+            continue
+        if re.match(r"^###\s+", s) and not re.match(r"^####", s):
+            if not _RULES_FOCUS_HEADING_LINE_RE.match(s):
+                return (
+                    "规则文件格式无效：三级标题（###）仅允许「### focus:<id> | <名称>」格式，"
+                    "例如 ### focus:handover | 运维交接与知识转移。"
+                )
+            if not seen_focus_block_h2:
+                return (
+                    "规则文件格式无效：在首个「### focus:…」之前必须有含「关注点块」的二级标题（如 ## 关注点块）。"
+                )
+    return None
+
+
 def _is_combo_suggestions_heading(line: str) -> bool:
-    """识别「组合使用建议」类二级标题（允许空格差异、括号说明等）。"""
+    """识别「组合使用建议」二级标题（标题中须含专用词「组合使用建议」）。"""
     s = unicodedata.normalize("NFKC", (line or "").strip())
     m = re.match(r"^##\s+(.+)$", s)
     if not m:
         return False
     title = m.group(1).strip()
-    if "组合" not in title:
-        return False
-    # 与「组合」相关且像「建议/预设」节，避免误匹配正文里的「字符组合」等
-    return any(x in title for x in ("建议", "预设", "搭配", "使用"))
+    return _RULES_H2_COMBO_MARKER in title
 
 
 def _is_combo_like_h3_heading(line: str) -> bool:
@@ -328,8 +389,8 @@ def _is_md_table_separator_row(cells: list[str]) -> bool:
 
 
 def _extract_focus_combo_tips_from_rules_text(text: str) -> list[dict[str, str]]:
+    """解析固定五列表：评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求"""
     lines = text.splitlines()
-    # 取最后一处「组合使用建议」类标题，避免正文/关注点 prompt 里较早出现的 ## 行误抢先
     start = -1
     for i, raw in enumerate(lines):
         if _is_combo_suggestions_heading(raw) or _is_combo_like_h3_heading(raw):
@@ -355,8 +416,7 @@ def _extract_focus_combo_tips_from_rules_text(text: str) -> list[dict[str, str]]
         if _is_md_table_separator_row(cells):
             in_table = True
             continue
-        # 表头：首列含「评审」或「阶段」等
-        c0, c1 = cells[0], cells[1]
+        c0, c1 = cells[0], cells[1] if len(cells) > 1 else ""
         if not in_table and ("评审" in c0 or "阶段" in c0 or "节点" in c0) and ("推荐" in c1 or "关注点" in c1):
             in_table = True
             continue
@@ -367,10 +427,23 @@ def _extract_focus_combo_tips_from_rules_text(text: str) -> list[dict[str, str]]
             in_table = True
             continue
         in_table = True
+        if len(cells) < 5:
+            continue
         stage = c0
         recommended = c1
+        review_role = _combo_cell_decode(cells[2])
+        review_goals_principles = _combo_cell_decode(cells[3])
+        output_requirements = _combo_cell_decode(cells[4])
         if stage and recommended:
-            rows.append({"stage": stage, "recommended": recommended})
+            rows.append(
+                {
+                    "stage": stage,
+                    "recommended": recommended,
+                    "review_role": review_role,
+                    "review_goals_principles": review_goals_principles,
+                    "output_requirements": output_requirements,
+                }
+            )
     return rows
 
 
@@ -399,6 +472,22 @@ def _slugify_id(text: str) -> str:
     s = re.sub(r"[^\w\-]+", "_", s, flags=re.UNICODE)
     s = re.sub(r"_+", "_", s).strip("_")
     return s.lower() or "preset"
+
+
+def _combo_cell_encode(text: str) -> str:
+    """表格单元格写回：竖线转义、换行转为 <br>。"""
+    s = str(text or "")
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    s = s.replace("|", "&#124;")
+    return s.replace("\n", "<br>")
+
+
+def _combo_cell_decode(text: str) -> str:
+    """解析表格单元格：还原 <br> 与竖线。"""
+    s = str(text or "").strip()
+    s = s.replace("<br>", "\n").replace("<BR>", "\n")
+    s = s.replace("&#124;", "|")
+    return s
 
 
 def _parse_focus_ids_from_recommended(text: str) -> list[str]:
@@ -462,7 +551,40 @@ def _derive_focus_presets_from_combo_tips(
         if pid in seen:
             continue
         seen.add(pid)
-        out.append({"id": pid, "name": stage, "focus_points": focus_points})
+        row_obj: dict[str, Any] = {"id": pid, "name": stage, "focus_points": focus_points}
+        for key in ("review_role", "review_goals_principles", "output_requirements"):
+            v = str(row.get(key) or "").strip()
+            if v:
+                row_obj[key] = v
+        out.append(row_obj)
+    return out
+
+
+def _read_focus_preset_review_overlay() -> list[dict[str, Any]]:
+    """从 app_settings.md 读取预设的审查角色/目标/输出要求（组合表可能不含这些列）。"""
+    app_cfg, _ = _read_app_settings_md()
+    raw = app_cfg.get("focus_preset_review_overlay")
+    if not isinstance(raw, list):
+        return []
+    return [x for x in raw if isinstance(x, dict) and x.get("id")]
+
+
+def _merge_preset_review_into_derived(
+    derived: list[dict[str, Any]], overlay: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """将本次保存请求中的审查角色/目标/输出要求合并回从组合表推导的预设（按 id 对齐）。"""
+    by_id = {str(x.get("id")): x for x in overlay if isinstance(x, dict) and x.get("id")}
+    out: list[dict[str, Any]] = []
+    for p in derived:
+        pid = str(p.get("id") or "")
+        o = by_id.get(pid)
+        merged = dict(p)
+        if o:
+            for k in ("review_role", "review_goals_principles", "output_requirements"):
+                v = o.get(k)
+                if isinstance(v, str) and v.strip():
+                    merged[k] = v.strip()
+        out.append(merged)
     return out
 
 
@@ -486,31 +608,58 @@ def _trim_accidental_combo_section_in_prompt(prompt: str) -> str:
     return "\n".join(out).strip()
 
 
-def _read_settings_from_rules_text(text: str) -> tuple[dict[str, Any] | None, str | None]:
+def _extract_rules_intro_preamble(text: str) -> str | None:
+    """
+    提取「# 分析规则配置」标题行之后、首个二级标题（## …）之前的正文（可含多行），
+    用于写回时保留「该文件由…」「目的：」等完整前言，避免保存时误删。
+    """
     lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        st = _normalize_md_line_for_heading(lines[i]).strip()
+        if st.startswith("# ") and not st.startswith("##") and "分析规则配置" in st:
+            i += 1
+            parts: list[str] = []
+            while i < len(lines):
+                st2 = _normalize_md_line_for_heading(lines[i]).strip()
+                if re.match(r"^##(?!#)", st2):
+                    break
+                parts.append(lines[i])
+                i += 1
+            out = "\n".join(parts).strip()
+            return out or None
+        i += 1
+    return None
 
-    # #region agent log
-    last_focus_line = -1
-    combo_heading_lines: list[int] = []
-    for _ln, raw in enumerate(lines):
-        if _normalize_md_line_for_heading(raw).startswith("### focus:"):
-            last_focus_line = _ln
-        if _is_combo_suggestions_heading(raw):
-            combo_heading_lines.append(_ln)
-    _agent_debug_log(
-        hypothesis_id="H4",
-        location="main.py:_read_settings_from_rules_text",
-        message="rules_structure",
-        data={
-            "line_count": len(lines),
-            "last_focus_header_line": last_focus_line,
-            "combo_heading_lines": combo_heading_lines,
-            "combo_after_last_focus": bool(
-                combo_heading_lines and last_focus_line >= 0 and max(combo_heading_lines) > last_focus_line
-            ),
-        },
-    )
-    # #endregion
+
+def _read_rules_composer_hint_from_text(text: str) -> str | None:
+    """
+    从 # 分析规则配置 与首个 ## 之间的前言中解析「目的：」后的说明（可在行首或行内，如「…。目的：xxx」）。
+    """
+    preamble = _extract_rules_intro_preamble(text)
+    if not preamble:
+        return None
+    m = re.search(r"目的\s*[:：]\s*([^\n\r]+)", preamble)
+    if not m:
+        return None
+    hint = m.group(1).strip()
+    return hint or None
+
+
+def _read_rules_composer_hint_from_rules_md() -> str | None:
+    p = _rules_md_path()
+    if not p.is_file():
+        return None
+    text = p.read_text(encoding="utf-8", errors="replace")
+    return _read_rules_composer_hint_from_text(text)
+
+
+def _read_settings_from_rules_text(text: str) -> tuple[dict[str, Any] | None, str | None]:
+    strict_err = _rules_strict_schema_error(text)
+    if strict_err:
+        return None, strict_err
+
+    lines = text.splitlines()
 
     focus_points: list[dict[str, str]] = []
     i = 0
@@ -525,9 +674,6 @@ def _read_settings_from_rules_text(text: str) -> tuple[dict[str, Any] | None, st
                 name = rest
             j = i + 1
             buf: list[str] = []
-            # #region agent log
-            logged_non_focus_h3 = False
-            # #endregion
             while j < len(lines):
                 nxt = lines[j]
                 st = _normalize_md_line_for_heading(nxt)
@@ -538,22 +684,6 @@ def _read_settings_from_rules_text(text: str) -> tuple[dict[str, Any] | None, st
                     break
                 if _is_combo_like_h3_heading(nxt):
                     break
-                # #region agent log
-                if (not logged_non_focus_h3) and st.startswith("###") and (not st.startswith("### focus:")):
-                    logged_non_focus_h3 = True
-                    _agent_debug_log(
-                        hypothesis_id="H1",
-                        location="main.py:_read_settings_from_rules_text",
-                        message="non_focus_h3_absorbed",
-                        data={
-                            "focus_id": pid,
-                            "line_no": j,
-                            "preview": st[:200],
-                            "startswith_two_hash": st.startswith("##"),
-                            "startswith_three_hash": st.startswith("###"),
-                        },
-                    )
-                # #endregion
                 buf.append(nxt)
                 j += 1
             prompt = _trim_accidental_combo_section_in_prompt("\n".join(buf).strip())
@@ -565,26 +695,6 @@ def _read_settings_from_rules_text(text: str) -> tuple[dict[str, Any] | None, st
 
     if not focus_points:
         return None, "rules.md 格式无效：未找到“关注点块”（格式：### focus:<id> | <name>）"
-
-    # #region agent log
-    scan: list[dict[str, Any]] = []
-    for fp in focus_points:
-        pr = str(fp.get("prompt") or "")
-        scan.append(
-            {
-                "id": fp.get("id"),
-                "prompt_len": len(pr),
-                "has_combo_heading_text": ("组合使用建议" in pr) or ("组合建议" in pr),
-                "has_combo_table_header": ("| 评审节点" in pr) or ("｜ 评审节点" in pr),
-            }
-        )
-    _agent_debug_log(
-        hypothesis_id="H5",
-        location="main.py:_read_settings_from_rules_text",
-        message="focus_prompt_contamination_scan",
-        data={"items": scan},
-    )
-    # #endregion
 
     out: dict[str, Any] = {"focus_points": focus_points}
     return out, None
@@ -616,8 +726,14 @@ def _write_settings_to_rules_md(payload: dict[str, Any]) -> None:
 
     # Preserve any custom tail content after combo section (best-effort).
     existing_suffix = ""
+    intro_block = "该文件由 AI-KA 自动维护，用于保存关注点及其 Prompt。\n\n"
     if p.is_file():
-        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        old_text = p.read_text(encoding="utf-8", errors="replace")
+        preserved_intro = _extract_rules_intro_preamble(old_text)
+        if preserved_intro:
+            # 保留「该文件由…」「目的：」等完整前言，勿仅写回「目的：」一行以免误删其它说明
+            intro_block = preserved_intro.rstrip() + "\n\n"
+        lines = old_text.splitlines()
         start = -1
         for i, raw in enumerate(lines):
             if _is_combo_suggestions_heading(raw):
@@ -641,8 +757,8 @@ def _write_settings_to_rules_md(payload: dict[str, Any]) -> None:
     combo_lines: list[str] = []
     if focus_presets:
         combo_lines.append("## 组合使用建议\n")
-        combo_lines.append("| 评审节点 | 推荐组合的关注点 |")
-        combo_lines.append("|---|---|")
+        combo_lines.append("| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |")
+        combo_lines.append("| --- | --- | --- | --- | --- |")
         for it in focus_presets:
             if not isinstance(it, dict):
                 continue
@@ -650,27 +766,33 @@ def _write_settings_to_rules_md(payload: dict[str, Any]) -> None:
             fps = it.get("focus_points")
             if not name or not isinstance(fps, list):
                 continue
-            # 保存为 focus:id 的形式，便于人读与稳定
-            # 这里假设 focus_points 存的是 name，先反查 id
             by_name = {str(d.get("name") or ""): str(d.get("id") or "") for d in focus_points if isinstance(d, dict)}
             ids = [by_name.get(str(x), "") for x in fps]
             ids = [x for x in ids if x]
             if not ids:
                 continue
             rec = " + ".join(f"`focus:{x}`" for x in ids)
-            combo_lines.append(f"| {name} | {rec} |")
+            rr = _combo_cell_encode(str(it.get("review_role") or ""))
+            rg = _combo_cell_encode(str(it.get("review_goals_principles") or ""))
+            ro = _combo_cell_encode(str(it.get("output_requirements") or ""))
+            n_enc = _combo_cell_encode(name)
+            rec_enc = _combo_cell_encode(rec)
+            combo_lines.append(f"| {n_enc} | {rec_enc} | {rr} | {rg} | {ro} |")
         combo_lines.append("")
 
     md = (
         "# 分析规则配置\n\n"
-        "该文件由 AI-KA 自动维护，用于保存关注点及其 Prompt。\n\n"
-        "## 关注点块\n\n"
+        + intro_block
+        + "## 关注点块\n\n"
         + "\n".join(blocks)
     )
     if combo_lines:
         md = md.rstrip() + "\n\n---\n\n" + "\n".join(combo_lines).rstrip() + "\n"
     if existing_suffix:
         md = md.rstrip() + "\n\n" + existing_suffix.strip() + "\n"
+    strict_err = _rules_strict_schema_error(md)
+    if strict_err:
+        raise ValueError(strict_err)
     p.write_text(md, encoding="utf-8")
 
 
@@ -726,6 +848,12 @@ def _get_disable_image_parse() -> bool:
     if isinstance(v, bool):
         return v
     return True
+
+
+def _get_md_index_mode() -> str:
+    app_cfg, _ = _read_app_settings_md()
+    v = app_cfg.get("md_index_mode") if isinstance(app_cfg, dict) else None
+    return _normalize_md_index_mode(v)
 
 
 def _get_text_llm_api_key_effective() -> str | None:
@@ -898,6 +1026,7 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
     conn = _conn()
     current = _build_settings_payload(conn)
     app_cfg, _ = _read_app_settings_md()
+    presets_style_overlay: list[dict[str, Any]] | None = None
     if "chunk_limit" in payload:
         raw = payload.get("chunk_limit")
         try:
@@ -920,6 +1049,13 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
     if "disable_image_parse" in payload:
         current["disable_image_parse"] = bool(payload.get("disable_image_parse"))
         app_cfg["disable_image_parse"] = current["disable_image_parse"]
+    if "md_index_mode" in payload:
+        raw_m = payload.get("md_index_mode")
+        if raw_m is not None and not isinstance(raw_m, str):
+            return JSONResponse(err("md_index_mode must be a string"), status_code=400)
+        mode = _normalize_md_index_mode(raw_m if isinstance(raw_m, str) else MD_INDEX_MODE_INCREMENTAL)
+        current["md_index_mode"] = mode
+        app_cfg["md_index_mode"] = mode
     if "focus_points" in payload:
         raw_fp = payload.get("focus_points")
         if not isinstance(raw_fp, list):
@@ -963,9 +1099,15 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
                 focus_points = [str(x).strip() for x in fps if str(x).strip()]
                 if not focus_points:
                     continue
-                cleaned.append({"id": pid, "name": name, "focus_points": focus_points})
+                row: dict[str, Any] = {"id": pid, "name": name, "focus_points": focus_points}
+                for k in ("review_role", "review_goals_principles", "output_requirements"):
+                    v = it.get(k)
+                    if isinstance(v, str) and v.strip():
+                        row[k] = v.strip()
+                cleaned.append(row)
                 seen.add(pid)
             current["focus_presets"] = cleaned
+            presets_style_overlay = cleaned
     if "llm_settings" in payload:
         raw_llm = payload.get("llm_settings")
         if not isinstance(raw_llm, dict):
@@ -1014,12 +1156,36 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
         if vl_key is not None:
             current["llm_settings"]["has_vl_api_key"] = bool(vl_key)
 
-    _write_settings_to_rules_md(current)
+    if presets_style_overlay is not None:
+        slim: list[dict[str, Any]] = []
+        for x in presets_style_overlay:
+            if not isinstance(x, dict):
+                continue
+            pid = str(x.get("id") or "").strip()
+            if not pid:
+                continue
+            row: dict[str, Any] = {"id": pid}
+            for k in ("review_role", "review_goals_principles", "output_requirements"):
+                v = x.get(k)
+                if isinstance(v, str) and v.strip():
+                    row[k] = v.strip()
+            if len(row) > 1:
+                slim.append(row)
+        app_cfg["focus_preset_review_overlay"] = slim
+
+    try:
+        _write_settings_to_rules_md(current)
+    except ValueError as e:
+        return JSONResponse(err(str(e)), status_code=400)
     _write_app_settings_md(app_cfg)
     current["rules_md_error"] = None
     # 与 GET /settings 对齐：保存后从 rules.md 再读一遍，避免前端拿不到 Tips/预设
     current["focus_combo_tips"] = _read_focus_combo_tips_from_rules_md()
-    current["focus_presets"] = _get_focus_presets()
+    derived_presets = _get_focus_presets()
+    if presets_style_overlay is not None:
+        current["focus_presets"] = _merge_preset_review_into_derived(derived_presets, presets_style_overlay)
+    else:
+        current["focus_presets"] = derived_presets
     return JSONResponse(ok(current))
 
 
@@ -1189,6 +1355,7 @@ def get_project(project_id: int) -> JSONResponse:
 class CreateConversationBody(BaseModel):
     analysis_type: str = Field(min_length=1)
     title: str | None = None
+    preset_id: str | None = None
 
 
 @app.get("/api/v1/projects/{project_id}/conversations")
@@ -1202,9 +1369,85 @@ def list_conversations(project_id: int, limit: int = 50) -> JSONResponse:
         ok(
             {
                 "conversations": [
-                    {"id": c.id, "analysis_type": c.analysis_type, "title": c.title}
+                    {
+                        "id": c.id,
+                        "analysis_type": c.analysis_type,
+                        "title": c.title,
+                        "created_at": c.created_at,
+                        "updated_at": c.updated_at,
+                        "preset_id": c.preset_id,
+                    }
                     for c in items
                 ]
+            }
+        )
+    )
+
+
+@app.get("/api/v1/projects/{project_id}/conversations/preset-history")
+def get_preset_history(project_id: int, preset_id: str = Query(..., min_length=1)) -> JSONResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    latest = dbm.find_latest_conversation_with_analysis_for_preset(
+        conn, project_id=project_id, preset_id=preset_id
+    )
+    if latest is None:
+        return JSONResponse(
+            ok(
+                {
+                    "has_reviewed_history": False,
+                    "latest_conversation": None,
+                }
+            )
+        )
+    return JSONResponse(
+        ok(
+            {
+                "has_reviewed_history": True,
+                "latest_conversation": {
+                    "id": latest.id,
+                    "title": latest.title,
+                    "updated_at": latest.updated_at,
+                },
+            }
+        )
+    )
+
+
+@app.get("/api/v1/projects/{project_id}/conversations/{conversation_id}")
+def get_conversation_detail(project_id: int, conversation_id: int) -> JSONResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    conv = dbm.get_conversation(conn, conversation_id)
+    if conv is None or conv.project_id != project_id:
+        return JSONResponse(err("conversation not found"), status_code=404)
+    last_run = dbm.get_latest_analysis_run(conn, conversation_id=conversation_id)
+    has_analysis_run = last_run is not None
+    last_focus: list[str] | None = None
+    if last_run is not None:
+        try:
+            raw = json.loads(last_run.focus_points_json or "[]")
+        except json.JSONDecodeError:
+            raw = []
+        if isinstance(raw, list):
+            last_focus = [str(x).strip() for x in raw if str(x).strip()]
+        else:
+            last_focus = []
+    return JSONResponse(
+        ok(
+            {
+                "id": conv.id,
+                "analysis_type": conv.analysis_type,
+                "title": conv.title,
+                "created_at": conv.created_at,
+                "updated_at": conv.updated_at,
+                "preset_id": conv.preset_id,
+                "has_analysis_run": has_analysis_run,
+                "last_analysis_focus_points": last_focus,
             }
         )
     )
@@ -1221,8 +1464,23 @@ def create_conversation(project_id: int, payload: CreateConversationBody) -> JSO
     if not title:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         title = f"{at} - {ts}"
-    c = dbm.create_conversation(conn, project_id=project_id, analysis_type=at, title=title)
-    return JSONResponse(ok({"id": c.id, "analysis_type": c.analysis_type, "title": c.title}))
+    pid = str(payload.preset_id).strip() if payload.preset_id is not None else None
+    preset_kw: dict[str, str | None] = {}
+    if pid:
+        preset_kw["preset_id"] = pid
+    c = dbm.create_conversation(conn, project_id=project_id, analysis_type=at, title=title, **preset_kw)
+    return JSONResponse(
+        ok(
+            {
+                "id": c.id,
+                "analysis_type": c.analysis_type,
+                "title": c.title,
+                "created_at": c.created_at,
+                "updated_at": c.updated_at,
+                "preset_id": c.preset_id,
+            }
+        )
+    )
 
 
 @app.get("/api/v1/projects/{project_id}/rules")
@@ -1294,6 +1552,10 @@ def _extract_first_json_object_text(raw: str) -> str | None:
 class AnalyzeStreamBody(BaseModel):
     chunk_limit: int = Field(default=40, ge=1, le=500)
     focus_points: list[str] = Field(min_length=1)
+    incremental_user_notes: str | None = Field(default=None)
+    review_role: str | None = Field(default=None)
+    review_goals_principles: str | None = Field(default=None)
+    output_requirements: str | None = Field(default=None)
 
 
 class FollowupStreamBody(BaseModel):
@@ -1540,6 +1802,7 @@ def index_md(project_id: int) -> JSONResponse:
         project=prj,
         md_root=md_root,
         chunk_strategy=_get_chunk_strategy(),
+        full_resync=_get_md_index_mode() == MD_INDEX_MODE_FULL,
     )
     return JSONResponse(ok({"indexed_documents": n}))
 
@@ -1560,8 +1823,21 @@ def analyze_stream_post(project_id: int, payload: AnalyzeStreamBody) -> Streamin
         raise HTTPException(status_code=400, detail="no chunks; run index-md after convert-md")
 
     cfg = _build_text_llm_config(conn, timeout_s=300.0)
-    system = build_system_prompt(None, focus_definitions=resolved)
+    system = build_system_prompt(
+        None,
+        focus_definitions=resolved,
+        review_role=payload.review_role,
+        review_goals_principles=payload.review_goals_principles,
+        output_requirements=payload.output_requirements,
+    )
     user, used_entries = build_user_prompt_from_entries(entries)
+    idx_lines_md = format_chunk_index_lines_markdown(used_entries)
+    exp_dir = project_export_dir(project_id)
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    ts_idx = datetime.now().strftime("%Y%m%d-%H%M%S")
+    index_only_path = exp_dir / f"fragments-index-{ts_idx}.md"
+    if idx_lines_md.strip():
+        index_only_path.write_text(idx_lines_md, encoding="utf-8")
 
     def gen():
         provider = get_provider(cfg.provider)
@@ -1569,15 +1845,25 @@ def analyze_stream_post(project_id: int, payload: AnalyzeStreamBody) -> Streamin
         try:
             yield _sse_stage("解析文档", "start", detail=f"chunks={len(used_entries)}")
             yield _sse_stage("解析文档", "end")
-            yield _sse_stage("分析内容", "start", detail=f"model={cfg.model}")
+            if idx_lines_md.strip():
+                yield _sse_stage("片段与来源索引", "start")
+                yield _sse_line(
+                    {
+                        "type": "chunk_index",
+                        "markdown": idx_lines_md,
+                        "index_file_path": str(index_only_path),
+                    }
+                )
+                yield _sse_stage("片段与来源索引", "end")
+            yield _sse_stage("思考分析", "start", detail=f"model={cfg.model}")
             for piece in provider.chat_stream(system=system, user=user, config=cfg):
                 acc.append(piece)
                 yield _sse_line({"type": "delta", "text": piece})
-            yield _sse_stage("分析内容", "end")
+            yield _sse_stage("思考分析", "end")
             full = "".join(acc)
             yield _sse_stage("呈现结果", "start")
-            markdown = _coerce_model_output_to_markdown(full) + format_chunk_index_markdown(used_entries)
-            yield _sse_line({"type": "final", "markdown": markdown})
+            body = _coerce_model_output_to_markdown(full)
+            yield _sse_line({"type": "final", "markdown": body})
             yield _sse_stage("呈现结果", "end")
         except LLMError as e:
             yield _sse_line(
@@ -1616,8 +1902,24 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
         raise HTTPException(status_code=400, detail="no chunks; run index-md after convert-md")
 
     cfg = _build_text_llm_config(conn, timeout_s=300.0)
-    system = build_system_prompt(None, focus_definitions=resolved)
+    system = build_system_prompt(
+        None,
+        focus_definitions=resolved,
+        review_role=payload.review_role,
+        review_goals_principles=payload.review_goals_principles,
+        output_requirements=payload.output_requirements,
+    )
     user, used_entries = build_user_prompt_from_entries(entries)
+    idx_lines_md = format_chunk_index_lines_markdown(used_entries)
+    notes = (payload.incremental_user_notes or "").strip()
+    if notes:
+        user = "【用户补充说明（含重新审查时的增量信息）】\n" + notes + "\n\n" + user
+
+    prior_rows = dbm.list_recent_messages(
+        conn, conversation_id=conversation_id, limit=_MULTITURN_RECENT_LIMIT
+    )
+    prior_tuples = _message_rows_to_prior_tuples(prior_rows)
+
     # 记录“本次运行”的用户侧请求（便于历史追溯）
     dbm.insert_message(
         conn,
@@ -1631,6 +1933,9 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     base = _safe_slug(conv.title)
     out_path = exp_dir / f"{base}-{ts}.md"
+    fragments_index_path = exp_dir / f"{base}-{ts}-fragments-index.md"
+    if idx_lines_md.strip():
+        fragments_index_path.write_text(idx_lines_md, encoding="utf-8")
 
     def gen():
         provider = get_provider(cfg.provider)
@@ -1638,15 +1943,27 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
         try:
             yield _sse_stage("解析文档", "start", detail=f"chunks={len(used_entries)}")
             yield _sse_stage("解析文档", "end")
-            yield _sse_stage("分析内容", "start", detail=f"model={cfg.model}")
-            for piece in provider.chat_stream(system=system, user=user, config=cfg):
+            if idx_lines_md.strip():
+                yield _sse_stage("片段与来源索引", "start")
+                yield _sse_line(
+                    {
+                        "type": "chunk_index",
+                        "markdown": idx_lines_md,
+                        "index_file_path": str(fragments_index_path),
+                    }
+                )
+                yield _sse_stage("片段与来源索引", "end")
+            yield _sse_stage("思考分析", "start", detail=f"model={cfg.model}")
+            for piece in provider.chat_stream(
+                system=system, user=user, config=cfg, prior_messages=prior_tuples or None
+            ):
                 acc.append(piece)
                 yield _sse_line({"type": "delta", "text": piece})
-            yield _sse_stage("分析内容", "end")
+            yield _sse_stage("思考分析", "end")
             full = "".join(acc)
             yield _sse_stage("呈现结果", "start")
-            markdown = _coerce_model_output_to_markdown(full) + format_chunk_index_markdown(used_entries)
-            out_path.write_text(markdown, encoding="utf-8")
+            body = _coerce_model_output_to_markdown(full)
+            out_path.write_text(body, encoding="utf-8")
             dbm.insert_analysis_run(
                 conn,
                 conversation_id=conversation_id,
@@ -1657,8 +1974,15 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
                 used_entries=list(used_entries),
                 output_markdown_path=str(out_path),
             )
-            dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=markdown)
-            yield _sse_line({"type": "final", "markdown": markdown, "output_markdown_path": str(out_path)})
+            dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=body)
+            yield _sse_line(
+                {
+                    "type": "final",
+                    "markdown": body,
+                    "output_markdown_path": str(out_path),
+                    "output_fragments_index_path": str(fragments_index_path) if idx_lines_md.strip() else None,
+                }
+            )
             yield _sse_stage("呈现结果", "end")
         except LLMError as e:
             yield _sse_line(
@@ -1715,6 +2039,13 @@ def followup_conversation_stream(project_id: int, conversation_id: int, payload:
     )
 
     chunks_prompt, used_for_prompt = build_user_prompt_from_entries(used_entries)
+    idx_followup_lines = format_chunk_index_lines_markdown(used_for_prompt)
+    exp_fu = project_export_dir(project_id)
+    exp_fu.mkdir(parents=True, exist_ok=True)
+    ts_fu = datetime.now().strftime("%Y%m%d-%H%M%S")
+    followup_index_path = exp_fu / f"{_safe_slug(conv.title)}-{ts_fu}-followup-fragments-index.md"
+    if idx_followup_lines.strip():
+        followup_index_path.write_text(idx_followup_lines, encoding="utf-8")
     user = (
         "以下是上一轮分析结果（可能已截断）：\n\n"
         + prev_excerpt
@@ -1727,21 +2058,39 @@ def followup_conversation_stream(project_id: int, conversation_id: int, payload:
 
     dbm.insert_message(conn, conversation_id=conversation_id, role="user", content=q)
 
+    recent_after = dbm.list_recent_messages(
+        conn, conversation_id=conversation_id, limit=_MULTITURN_RECENT_LIMIT
+    )
+    prior_rows = recent_after[:-1] if recent_after else []
+    prior_tuples = _message_rows_to_prior_tuples(prior_rows)
+
     cfg = _build_text_llm_config(conn, timeout_s=300.0)
 
     def gen():
         provider = get_provider(cfg.provider)
         acc: list[str] = []
         try:
+            if idx_followup_lines.strip():
+                yield _sse_stage("片段与来源索引", "start")
+                yield _sse_line(
+                    {
+                        "type": "chunk_index",
+                        "markdown": idx_followup_lines,
+                        "index_file_path": str(followup_index_path),
+                    }
+                )
+                yield _sse_stage("片段与来源索引", "end")
             yield _sse_stage("追问", "start", detail=f"model={cfg.model}")
-            for piece in provider.chat_stream(system=system, user=user, config=cfg):
+            for piece in provider.chat_stream(
+                system=system, user=user, config=cfg, prior_messages=prior_tuples or None
+            ):
                 acc.append(piece)
                 yield _sse_line({"type": "delta", "text": piece})
             yield _sse_stage("追问", "end")
             full = "".join(acc)
-            markdown = _coerce_model_output_to_markdown(full) + format_chunk_index_markdown(used_for_prompt)
-            dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=markdown)
-            yield _sse_line({"type": "final", "markdown": markdown})
+            body = _coerce_model_output_to_markdown(full)
+            dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=body)
+            yield _sse_line({"type": "final", "markdown": body})
         except LLMError as e:
             yield _sse_line(
                 {

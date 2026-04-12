@@ -9,6 +9,8 @@ services:
       AIKA_REPO_ROOT: /app
       # 浏览器从宿主机访问时的来源（按需增删）
       AIKA_CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8765,http://127.0.0.1:8765"
+      # 可选：唯一规则文件（默认 rules.md）；与 rules_new2.md 等互斥，勿多文件混读
+      # AIKA_RULES_FILENAME: "rules.md"
       # 可选：LLM（也可在容器外通过 app_settings.md 配置，需挂载卷）
       # AIKA_LLM_BASE_URL: ""
       # AIKA_LLM_API_KEY: ""

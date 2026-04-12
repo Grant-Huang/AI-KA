@@ -29,11 +29,36 @@ export async function apiJson<T>(
       ...(init?.headers || {}),
     },
   });
-  const j = (await r.json()) as ApiOk<T> | ApiErr;
-  if ((j as ApiErr).status === "error") {
-    throw new Error((j as ApiErr).message || "request failed");
+  const text = await r.text();
+  let j: unknown;
+  try {
+    j = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(`非 JSON 响应 HTTP ${r.status}：${text.slice(0, 160)}`);
   }
-  return (j as ApiOk<T>).data;
+  if (!j || typeof j !== "object") {
+    throw new Error(`空响应 HTTP ${r.status}`);
+  }
+  const body = j as Record<string, unknown>;
+  // 后端 err() 或业务错误
+  if (body.status === "error") {
+    throw new Error(String(body.message || "request failed"));
+  }
+  // FastAPI HTTPException / 未注册路由 等
+  if (!r.ok) {
+    const detail = body.detail;
+    const msg =
+      typeof detail === "string"
+        ? detail
+        : Array.isArray(detail)
+          ? detail.map((d) => (typeof d === "object" && d && "msg" in d ? String((d as { msg: string }).msg) : String(d))).join("; ")
+          : `HTTP ${r.status}`;
+    throw new Error(msg);
+  }
+  if (body.status === "success" && "data" in body) {
+    return body.data as T;
+  }
+  throw new Error(`Unexpected API shape HTTP ${r.status}`);
 }
 
 export function openConvertStream(
@@ -99,9 +124,15 @@ async function consumeSseFromResponse(
   }
 }
 
+export type AnalyzeStreamPresetFields = {
+  review_role?: string | null;
+  review_goals_principles?: string | null;
+  output_requirements?: string | null;
+};
+
 export async function postAnalyzeStream(
   projectId: number,
-  body: { chunk_limit: number; focus_points: string[] },
+  body: { chunk_limit: number; focus_points: string[] } & AnalyzeStreamPresetFields,
   onEvent: (ev: Record<string, unknown>) => void,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -118,10 +149,39 @@ export async function postAnalyzeStream(
   await consumeSseFromResponse(r, onEvent, signal);
 }
 
+export async function getConversationDetail(
+  projectId: number,
+  conversationId: number,
+): Promise<{
+  id: number;
+  analysis_type: string;
+  title: string;
+  created_at?: string;
+  updated_at?: string;
+  /** 与 rules 中 focus_presets[].id 对应；旧会话可能为空 */
+  preset_id?: string | null;
+  has_analysis_run: boolean;
+  /** 最近一次 analyze 写入的关注点名称列表；与当前预设比对可判断是否需重新全文审查 */
+  last_analysis_focus_points?: string[] | null;
+}> {
+  return apiJson(`/api/v1/projects/${projectId}/conversations/${conversationId}`);
+}
+
+export async function getPresetHistory(
+  projectId: number,
+  presetId: string,
+): Promise<{
+  has_reviewed_history: boolean;
+  latest_conversation: { id: number; title: string; updated_at?: string } | null;
+}> {
+  const q = encodeURIComponent(presetId);
+  return apiJson(`/api/v1/projects/${projectId}/conversations/preset-history?preset_id=${q}`);
+}
+
 export async function postAnalyzeConversationStream(
   projectId: number,
   conversationId: number,
-  body: { chunk_limit: number; focus_points: string[] },
+  body: { chunk_limit: number; focus_points: string[]; incremental_user_notes?: string | null } & AnalyzeStreamPresetFields,
   onEvent: (ev: Record<string, unknown>) => void,
   signal?: AbortSignal,
 ): Promise<void> {

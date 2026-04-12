@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
+import queue
 import re
 import subprocess
-import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -129,13 +130,14 @@ def run_convert_directory(
     cmd: list[str]
     cwd: str | None = None
     # Use installed CLI (python -m docs2md.cli) if no local docs2md_root is configured
+    py = st.docs2md_python
     if st.docs2md_root and Path(st.docs2md_root).is_dir():
         script = all2md_script_path()
-        py = st.docs2md_python
         cmd = [py, str(script), str(input_dir), "-o", str(output_dir), "-f", format_]
         cwd = str(script.parent)
     else:
-        cmd = [sys.executable, "-m", "docs2md.cli", str(input_dir), "-o", str(output_dir), "--format", format_]
+        # 与 all2md 分支一致使用 docs2md_python，便于 DOCS2MD_PYTHON 指向含最新 docs2md 的 venv
+        cmd = [py, "-m", "docs2md.cli", str(input_dir), "-o", str(output_dir), "--format", format_]
 
     child_env = dict(os.environ)
     if (vl_api_key or "").strip():
@@ -176,6 +178,7 @@ def run_convert_directory(
     # Throttle noisy per-page logs to avoid UI spam.
     last_progress_emit = 0.0
     progress_seen = 0
+    image_parse_mismatch_warned = False
     page_re = re.compile(r"(?i)(page\\s*\\d+|第\\s*\\d+\\s*页|\\bpages?\\b)")
     progress_re = re.compile(r"(?i)(\\b\\d+%\\b|\\b\\d+/\\d+\\b)")
 
@@ -190,25 +193,57 @@ def run_convert_directory(
         env=child_env,
     )
     assert proc.stdout is not None
-    for line in proc.stdout:
-        # Reduce per-page/progress spam: emit aggregated summary at most every ~2s.
-        if page_re.search(line) or progress_re.search(line):
-            progress_seen += 1
-            now = time.time()
-            if now - last_progress_emit >= 2.0:
-                last_progress_emit = now
-                yield f"[progress] 转换进行中…（已收到 {progress_seen} 条进度输出）\n"
-            continue
-        yield line
-        if disable_image_parse and "解析图片（" in line:
-            yield (
-                "[warn] 已启用“不解析图片”，但 docs2md 仍在解析图片。"
-                "这通常表示运行的 docs2md 版本未支持该开关，或子进程未收到环境变量。"
-                "请检查是否使用了最新 docs2md，以及 AI-KA 的 DOCS2MD_ROOT 是否指向最新仓库根目录（含 all2md.py），然后重启后端。\n"
-            )
-        lo = line.lower()
-        if "missingdependencyexception" in lo and "xlsx" in lo:
-            yield "[hint] 检测到缺少 xlsx 依赖：请在运行环境安装 markitdown[xlsx] 或 markitdown[all]，再重试。\n"
-    proc.wait()
-    if proc.returncode != 0:
-        raise Docs2MdError(f"docs2md exited with code {proc.returncode}")
+    # 用线程读 stdout，主生成器只在 yield 处暂停，便于客户端断开 SSE 时尽快 close 生成器并在 finally 中 kill 子进程
+    line_queue: queue.Queue[str | None] = queue.Queue(maxsize=512)
+
+    def _drain_stdout() -> None:
+        try:
+            for raw in proc.stdout:
+                line_queue.put(raw)
+        except Exception:
+            pass
+        finally:
+            line_queue.put(None)
+
+    threading.Thread(target=_drain_stdout, daemon=True).start()
+
+    try:
+        while True:
+            line = line_queue.get()
+            if line is None:
+                break
+            # Reduce per-page/progress spam: emit aggregated summary at most every ~2s.
+            if page_re.search(line) or progress_re.search(line):
+                progress_seen += 1
+                now = time.time()
+                if now - last_progress_emit >= 2.0:
+                    last_progress_emit = now
+                    yield f"[progress] 转换进行中…（已收到 {progress_seen} 条进度输出）\n"
+                continue
+            yield line
+            if (
+                disable_image_parse
+                and (not image_parse_mismatch_warned)
+                and "解析图片（" in line
+            ):
+                image_parse_mismatch_warned = True
+                yield (
+                    "[warn] 已启用“不解析图片”，但 docs2md 仍在尝试 VL 解析图片。"
+                    "常见原因：① DOCS2MD_PYTHON 曾默认为系统 `python`，与后端解释器不一致（已改为默认使用后端同解释器，可显式设置 DOCS2MD_PYTHON）；"
+                    "② DOCS2MD_ROOT 指向的 docs2md 源码较旧，docx 转换未在禁用时跳过 VL 调用——请拉取最新 docs2md 仓库后重启后端。\n"
+                )
+            lo = line.lower()
+            if "missingdependencyexception" in lo and "xlsx" in lo:
+                yield "[hint] 检测到缺少 xlsx 依赖：请在运行环境安装 markitdown[xlsx] 或 markitdown[all]，再重试。\n"
+        proc.wait()
+        if proc.returncode != 0:
+            raise Docs2MdError(f"docs2md exited with code {proc.returncode}")
+    finally:
+        # 前端关闭 SSE 时会关闭生成器；此处终止子进程，避免「终止」后 docs2md 仍在后台跑
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=12)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()

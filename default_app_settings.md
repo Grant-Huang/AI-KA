@@ -7,6 +7,7 @@
   "chunk_limit": 300,
   "chunk_strategy": "blank",
   "disable_image_parse": true,
+  "md_index_mode": "incremental",
   "llm_settings": {
     "text_provider": "openai_compatible",
     "text_base_url": "https://api.minimaxi.com/v1",

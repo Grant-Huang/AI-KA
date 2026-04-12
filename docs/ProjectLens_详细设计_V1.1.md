@@ -3,7 +3,7 @@
 
 详细设计文档（Detailed Design）
 
-V1.2  |  2026-04-10
+V1.3  |  2026-04-12
 
 ---
 
@@ -11,6 +11,7 @@ V1.2  |  2026-04-10
 
 | 版本 | 日期 | 修改内容 | 作者 |
 | :-- | :-- | :-- | :-- |
+| V1.3 | 2026-04-12 | 活动规则文件「组合使用建议」固定 **五列表** 解析/写回；`focus_combo_tips` / `focus_presets` 含 `review_role`、`review_goals_principles`、`output_requirements`；`build_system_prompt` 用预设三字段覆盖默认角色/原则/输出段落；`POST …/analyze/stream`（及会话流）请求体可选传入上述三字段；环境变量 `AIKA_RULES_FILENAME` 切换规则文件 | AI 协作 |
 | V1.2 | 2026-04-10 | 索引器双策略、`locator_json` 扩展字段；`list_chunk_entries`；`build_user_prompt_from_entries` 块头；`analyze/stream` 追加索引表；`GET/POST /api/v1/settings` 的 `chunk_strategy`；`index-md` 传入策略 | AI 协作 |
 | V1.1 | 2026-03-25 | 基于《需求与设计文档 V1.0》补齐详细设计：模块边界、数据模型、接口契约、时序、异常与审计 | AI 协作 |
 
@@ -147,6 +148,18 @@ V1.2  |  2026-04-10
 - **提示词**（`web/backend/prompt_builder.py`）：`build_user_prompt_from_entries` 生成带「片段 n | 文件 | 章节 | 行」的块头；`format_chunk_index_markdown` 生成文末 GFM 索引表。
 - **分析 API**（`web/backend/main.py`）：流式结束后将模型输出规范化 Markdown，再**拼接**上述索引表（仅包含实际送入模型的片段）。
 
+#### 3.1.3.2 规则文件、`focus_presets` 与审查系统提示（当前 Web）
+
+- **活动规则文件路径**：`$AIKA_REPO_ROOT` 下文件名由环境变量 `AIKA_RULES_FILENAME` 指定，默认 `rules.md`。
+- **关注点**：行级解析 `### focus:<id> | <名称>`，正文为 Prompt；强校验二级标题结构，禁止误用 `### 组合使用建议`（须用 `## 组合使用建议`）。
+- **「组合使用建议」表格**：仅解析 **固定五列** 数据行（表头/列序：`评审节点` | `推荐组合的关注点` | `审查角色` | `审查目标与原则` | `输出要求`）。单元格编码：换行 ↔ `<br>`，`|` ↔ `&#124;`（实现见 `web/backend/main.py` 中 `_combo_cell_encode` / `_combo_cell_decode`）。
+- **派生对象**：
+  - `focus_combo_tips[]`：每行对应 `stage`、`recommended`、`review_role`、`review_goals_principles`、`output_requirements`。
+  - `focus_presets[]`：由表格与关注点名称映射生成，含 `id`、`name`、`focus_points` 及上述三字符串字段（可空）。
+- **设置持久化**：`POST /api/v1/settings` 可保存 `focus_points`、`focus_presets`；写回规则文件时组合节重写为五列表。
+- **分析请求体**（非会话与会话流式 analyze）：除 `focus_points`、`chunk_limit` 等外，可选 `review_role`、`review_goals_principles`、`output_requirements`。非空时传入 `build_system_prompt`（`web/backend/prompt_builder.py`），用于**覆盖**默认「审查角色 / 审查目标与原则 / 输出要求」段落（含与 `MARKDOWN_OUTPUT_HINT` 相关的输出结构约定）。
+- **前端**：设置页「规则」分为子 Tab「关注点」「预设组合」；首页选预设后随请求带上三字段（与 `focus_presets` 对齐）。
+
 #### 3.1.4 annotations
 
 | 字段 | 类型 | 约束 | 说明 |
@@ -257,6 +270,10 @@ V1.2  |  2026-04-10
 - `POST /reports/{id}/export`
   - 入参：`format: docx|pdf|md`，可选 `version_id`
   - 出参：下载信息（或 bytes 流）
+- `GET/POST /api/v1/settings`
+  - 出参/入参（摘要）：含 `focus_points`、`focus_combo_tips`、`focus_presets`（预设含 `review_role`、`review_goals_principles`、`output_requirements`）、`chunk_strategy`、`llm_settings`、`rules_md_error`、`rules_filename` 等（以 OpenAPI/代码为准）。
+- `POST /api/v1/projects/{id}/analyze/stream`（及会话维度同类流式 analyze）
+  - 请求体可选：`review_role`、`review_goals_principles`、`output_requirements`（与所选预设一致时由前端填充）。
 
 ---
 

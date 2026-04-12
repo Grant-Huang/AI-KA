@@ -19,6 +19,7 @@
 |------|------|
 | `AIKA_CORS_ORIGINS` | 允许的前端来源，逗号分隔。 |
 | `AIKA_REPO_ROOT` | 仓库根路径。 |
+| `AIKA_RULES_FILENAME` | （可选）活动规则文件名，相对于 `AIKA_REPO_ROOT`，默认 `rules.md`。设为例如 `rules_new2.md` 时，后端只加载该文件作为关注点与「组合使用建议」来源，不自动合并其他规则文件。 |
 | `AIKA_CHUNK_STRATEGY` | `blank` 或 `structured`：**仅**在缺少 Web 写入的 `app_settings.md` 时作为 CLI/脚本的默认分块策略；**Web 用户以设置页保存的 `chunk_strategy` 为准**。 |
 | `AIKA_LLM_*` / `OPENAI_*` | 模型与 Key 的后备（可选；用户可在设置中覆盖）。 |
 | `AIKA_ENABLE_NATIVE_FOLDER_PICKER` / `AIKA_FS_PICKER_LOCALHOST_ONLY` | 本机目录选择行为与安全限制。 |
@@ -31,10 +32,14 @@
 - 项目转换输出：`md_out` 等在 `.tmp` 下按项目隔离。  
 - 不要将含密钥的 `app_settings.md` 提交到 Git；生产建议挂载只读或首次由模板复制。
 
-## 5. `app_settings.md` 与 `rules.md`
+## 5. `app_settings.md` 与规则文件
 
-- **`rules.md`**：关注点与组合建议等；可挂载 `./rules.md:/app/rules.md`。  
-- **`app_settings.md`**：JSON 围栏内存放 `chunk_limit`、`chunk_strategy`、`llm_settings`、Key 等；缺失或解析失败时可回退 `default_app_settings.md`。  
+- **活动规则文件**：默认文件名为 `rules.md`（位于 `AIKA_REPO_ROOT`）；可通过 `AIKA_RULES_FILENAME` 切换为同目录下其他文件（如 `rules_new2.md`）。可挂载卷，例如 `./rules.md:/app/rules.md`。
+- **文件内容要求（摘要）**：
+  - **关注点块**：`### focus:<id> | <名称>`，id 在全文唯一；正文为审查 Prompt。
+  - **组合使用建议**：二级标题须含「组合使用建议」，且紧跟 **固定五列表**：`评审节点` | `推荐组合的关注点` | `审查角色` | `审查目标与原则` | `输出要求`。数据行须五列齐备；推荐列使用 `` `focus:id` `` 与关注点 id 对齐。单元格内换行、竖线转义约定见根目录 `helpme.md`。
+  - 仓库内 `default_rules.md` 可作为模板；首次部署可复制为活动规则文件或调用恢复模板接口（以当前产品行为为准）。
+- **`app_settings.md`**：JSON 围栏内存放 `chunk_limit`、`chunk_strategy`、`llm_settings`、Key 等；缺失或解析失败时可回退 `default_app_settings.md`。
 - 确保运行用户对上述文件有读权限，对需持久化的路径有写权限。
 
 ## 6. 升级与重建索引

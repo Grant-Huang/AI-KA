@@ -122,14 +122,15 @@ def test_focus_prompt_stops_before_combo_section_heading(monkeypatch: pytest.Mon
     """最后一个 ### focus: 之后若接 ## 组合使用建议 等二级标题，prompt 不得吞入表格。"""
     text = (
         "# x\n\n"
+        "## 关注点块\n\n"
         "### focus:a | A\n"
         "line for a\n\n"
         "### focus:b | B\n"
         "line for b\n\n"
         "## 组合使用建议\n\n"
-        "| 评审节点 | 推荐组合的关注点 |\n"
-        "|---|---|\n"
-        "| 阶段1 | `focus:a` |\n"
+        "| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| 阶段1 | `focus:a` | | | |\n"
     )
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
     (tmp_path / "rules.md").write_text(text, encoding="utf-8")
@@ -145,31 +146,51 @@ def test_focus_prompt_stops_before_combo_section_heading(monkeypatch: pytest.Mon
     assert tips[0]["stage"] == "阶段1"
 
 
-def test_focus_prompt_stops_before_combo_h3_heading(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """组合节若写成 ### 组合使用建议（三级标题），也不得吞入最后一个关注点 prompt（Python startswith 陷阱）。"""
+def test_rules_md_rejects_h3_combo_suggestions_heading(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """「组合使用建议」须用 ##；禁止 ### 组合使用建议（强校验仅允许 ### focus:）。"""
     text = (
         "# x\n\n"
+        "## 关注点块\n\n"
         "### focus:a | A\n"
         "line for a\n\n"
         "### focus:b | B\n"
         "line for b\n\n"
         "### 组合使用建议\n\n"
-        "| 评审节点 | 推荐组合的关注点 |\n"
-        "|---|---|\n"
-        "| 阶段1 | `focus:a` |\n"
+        "| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| 阶段1 | `focus:a` | | | |\n"
     )
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
     (tmp_path / "rules.md").write_text(text, encoding="utf-8")
     client = TestClient(app)
     r = client.get("/api/v1/settings")
     assert r.status_code == 200
-    fps = r.json()["data"]["focus_points"]
-    assert len(fps) == 2
-    assert "组合使用建议" not in fps[1]["prompt"]
-    assert "评审节点" not in fps[1]["prompt"]
-    tips = r.json()["data"]["focus_combo_tips"]
-    assert len(tips) == 1
-    assert tips[0]["stage"] == "阶段1"
+    err = r.json()["data"]["rules_md_error"]
+    assert isinstance(err, str)
+    assert "focus:" in err
+    assert "###" in err or "三级" in err
+    assert r.json()["data"]["focus_combo_tips"] == []
+    assert len(r.json()["data"]["focus_points"]) == 0
+
+
+def test_validate_and_import_reject_h3_combo_suggestions_heading(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
+    client = TestClient(app)
+    text = (
+        "# x\n\n## 关注点块\n\n### focus:a | A\np\n\n### 组合使用建议\n\n"
+        "| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| n | `focus:a` | | | |\n"
+    )
+    v = client.post("/api/v1/settings/rules-md/validate", json={"text": text})
+    assert v.status_code == 400
+    assert "focus:" in v.json()["message"]
+
+    i = client.post("/api/v1/settings/rules-md/import", json={"text": text})
+    assert i.status_code == 400
+    assert "focus:" in i.json()["message"]
 
 
 def test_settings_clear_llm_api_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -204,6 +225,7 @@ def test_import_rules_md(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     client = TestClient(app)
     text = (
         "# custom\n\n"
+        "## 关注点块\n\n"
         "### focus:reqx | 需求扩展\n"
         "这是扩展需求关注点。\n\n"
         "### focus:riskx | 风险扩展\n"
@@ -229,12 +251,13 @@ def test_settings_reads_focus_combo_tips_alt_heading_and_fullwidth_pipe(
     (tmp_path / "rules.md").write_text(
         (
             "# r\n\n"
+            "## 关注点块\n\n"
             "### focus:req | 需求\n"
             "p\n\n"
-            "## 组合建议\n\n"
-            "｜ 评审节点 ｜ 推荐组合的关注点 ｜\n"
-            "｜---｜---｜\n"
-            "｜ 蓝图评审 ｜ `focus:req` ｜\n"
+            "## 组合使用建议\n\n"
+            "｜ 评审节点 ｜ 推荐组合的关注点 ｜ 审查角色 ｜ 审查目标与原则 ｜ 输出要求 ｜\n"
+            "｜---｜---｜---｜---｜---｜\n"
+            "｜ 蓝图评审 ｜ `focus:req` ｜ ｜ ｜ ｜\n"
         ),
         encoding="utf-8",
     )
@@ -250,22 +273,23 @@ def test_settings_reads_focus_combo_tips_alt_heading_and_fullwidth_pipe(
     assert "需求" in presets[0]["focus_points"]
 
 
-def test_focus_presets_parse_chinese_ids_three_column_combo_table(
+def test_focus_presets_parse_chinese_ids_five_column_combo_table(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """rule_new2 风格：中文 focus id + 三列表（说明列）。"""
+    """中文 focus id + 五列表（说明类内容放在审查目标与原则列）。"""
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
     (tmp_path / "rules.md").write_text(
         (
             "# r\n\n"
+            "## 关注点块\n\n"
             "### focus:一审-文档结构 | 方案一审·文档结构\n"
             "p1\n\n"
             "### focus:一审-调研现状 | 方案一审·调研现状说明\n"
             "p2\n\n"
             "## 组合使用建议\n\n"
-            "| 评审节点 | 推荐组合的关注点 | 说明 |\n"
-            "| --- | --- | --- |\n"
-            "| **方案一审** | `focus:一审-文档结构` + `focus:一审-调研现状` | 说明文字 |\n"
+            "| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            "| **方案一审** | `focus:一审-文档结构` + `focus:一审-调研现状` | | 说明文字 | |\n"
         ),
         encoding="utf-8",
     )
@@ -275,6 +299,7 @@ def test_focus_presets_parse_chinese_ids_three_column_combo_table(
     presets = r.json()["data"]["focus_presets"]
     assert len(presets) == 1
     assert "**方案一审**" in presets[0]["name"] or "方案一审" in presets[0]["name"]
+    assert presets[0].get("review_goals_principles") == "说明文字"
     names = presets[0]["focus_points"]
     assert "方案一审·文档结构" in names
     assert "方案一审·调研现状说明" in names
@@ -316,13 +341,14 @@ def test_settings_reads_focus_combo_tips_from_rules_md(monkeypatch: pytest.Monke
     (tmp_path / "rules.md").write_text(
         (
             "# r\n\n"
+            "## 关注点块\n\n"
             "### focus:req | 需求\n"
             "需求提示\n\n"
             "## 组合使用建议\n\n"
-            "| 评审节点 | 推荐组合的关注点 |\n"
-            "|---|---|\n"
-            "| 蓝图评审 | `focus:req` + `focus:integration` |\n"
-            "| 验收评审 | `focus:acceptance` + `focus:data` |\n"
+            "| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            "| 蓝图评审 | `focus:req` + `focus:integration` | | | |\n"
+            "| 验收评审 | `focus:acceptance` + `focus:data` | | | |\n"
         ),
         encoding="utf-8",
     )
@@ -341,18 +367,19 @@ def test_no_auto_fallback_to_default_rules_when_rules_md_invalid(
     """损坏的 rules.md 不会触发读取 default_rules.md；应报错且关注点/组合表为空。"""
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
     (tmp_path / "rules.md").write_text(
-        "# broken\n\n## 组合使用建议\n| 评审节点 | 推荐组合的关注点 |\n|---|---|\n| 假行 | `focus:ghost` |\n",
+        "# broken\n\n## 组合使用建议\n| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |\n| --- | --- | --- | --- | --- |\n| 假行 | `focus:ghost` | | | |\n",
         encoding="utf-8",
     )
     (tmp_path / "default_rules.md").write_text(
         (
             "# d\n\n"
+            "## 关注点块\n\n"
             "### focus:req | 需求\n"
             "p\n\n"
             "## 组合使用建议\n"
-            "| 评审节点 | 推荐组合的关注点 |\n"
-            "|---|---|\n"
-            "| 蓝图 | `focus:req` |\n"
+            "| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            "| 蓝图 | `focus:req` | | | |\n"
         ),
         encoding="utf-8",
     )
@@ -374,12 +401,13 @@ def test_restore_default_rules_template_endpoint(
     (tmp_path / "default_rules.md").write_text(
         (
             "# d\n\n"
+            "## 关注点块\n\n"
             "### focus:req | 需求\n"
             "p\n\n"
             "## 组合使用建议\n"
-            "| 评审节点 | 推荐组合的关注点 |\n"
-            "|---|---|\n"
-            "| 蓝图 | `focus:req` |\n"
+            "| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            "| 蓝图 | `focus:req` | | | |\n"
         ),
         encoding="utf-8",
     )
@@ -399,18 +427,19 @@ def test_combo_tips_respects_ai_ka_rules_filename_only(
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
     monkeypatch.setenv("AIKA_RULES_FILENAME", "rules_new2.md")
     (tmp_path / "rules.md").write_text(
-        "# r\n\n### focus:x | X\n旧表\n## 组合使用建议\n| 评审节点 | 推荐组合的关注点 |\n|---|---|\n| 错 | `focus:x` |\n",
+        "# r\n\n### focus:x | X\n旧表\n## 组合使用建议\n| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |\n| --- | --- | --- | --- | --- |\n| 错 | `focus:x` | | | |\n",
         encoding="utf-8",
     )
     (tmp_path / "rules_new2.md").write_text(
         (
             "# r\n\n"
+            "## 关注点块\n\n"
             "### focus:req | 需求\n"
             "p\n\n"
             "## 组合使用建议\n"
-            "| 评审节点 | 推荐组合的关注点 |\n"
-            "|---|---|\n"
-            "| 节点A | `focus:req` |\n"
+            "| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            "| 节点A | `focus:req` | | | |\n"
         ),
         encoding="utf-8",
     )
@@ -432,13 +461,14 @@ def test_combo_tips_uses_last_combo_heading_when_two_exist(
     (tmp_path / "rules.md").write_text(
         (
             "# r\n\n"
+            "## 关注点块\n\n"
             "### focus:req | 需求\n"
-            "## 组合与使用说明\n"
+            "## 组合使用建议（导读）\n"
             "正文无表格\n\n"
             "## 组合使用建议\n"
-            "| 评审节点 | 推荐组合的关注点 |\n"
-            "|---|---|\n"
-            "| 末段评审 | `focus:req` |\n"
+            "| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |\n"
+            "| --- | --- | --- | --- | --- |\n"
+            "| 末段评审 | `focus:req` | | | |\n"
         ),
         encoding="utf-8",
     )

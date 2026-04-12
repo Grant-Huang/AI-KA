@@ -23,6 +23,16 @@ MARKDOWN_OUTPUT_HINT = """
 - 不要输出任何“我将如何分析/Let me analyze...”之类的过程性文字。
 """
 
+DEFAULT_REVIEW_ROLE = (
+    "你是资深 IT 实施与项目评审顾问。基于用户提供的文档片段，按「关注点审查清单」逐项审查并输出结构化结论。"
+)
+
+DEFAULT_REVIEW_GOALS_AND_PRINCIPLES = """输出语言要求：除专有名词、英文缩写、代码/协议字段外，其余文本必须使用简体中文。
+审查要求：
+- 对下列每个关注点分别给出：发现、结论、建议（如适用）；
+- 结论需引用片段证据（片段编号或原文要点摘录）；
+- 若某关注点无证据，明确说明未在片段中发现相关内容。"""
+
 
 def merge_rules(user_rules: dict[str, Any] | None) -> dict[str, Any]:
     base = dict(DEFAULT_RULES)
@@ -35,33 +45,37 @@ def build_system_prompt(
     rules: dict[str, Any] | None = None,
     *,
     focus_definitions: list[dict[str, str]] | None = None,
+    review_role: str | None = None,
+    review_goals_principles: str | None = None,
+    output_requirements: str | None = None,
 ) -> str:
     """
     主流程：传入 focus_definitions（来自 rules.md/设置中的 name+prompt，并按本次勾选子集过滤），
-    驱动文档审查；不再依赖 LLM 预生成的 goal/dimensions JSON。
-    兼容：未传关注点定义时，仍使用 merge_rules(rules) 的旧维度字段。
+    驱动文档审查。
+
+    review_role / review_goals_principles / output_requirements 来自「预设组合」；
+    任一项非空则替换下方对应的默认段落，实现完整替代写死的角色、原则与输出格式说明。
+    关注点清单始终来自 focus_definitions，不由预设整段替换。
     """
     if focus_definitions:
+        role = (review_role or "").strip() or DEFAULT_REVIEW_ROLE
+        goals = (review_goals_principles or "").strip() or DEFAULT_REVIEW_GOALS_AND_PRINCIPLES
+        output = (output_requirements or "").strip() or MARKDOWN_OUTPUT_HINT
         lines: list[str] = [
-            "你是资深 IT 实施与项目评审顾问。基于用户提供的文档片段，按「关注点审查清单」逐项审查并输出结构化结论。\n",
-            "输出语言要求：除专有名词、英文缩写、代码/协议字段外，其余文本必须使用简体中文。\n",
-            "审查要求：\n",
-            "- 对下列每个关注点分别给出：发现、结论、建议（如适用）；\n",
-            "- 结论需引用片段证据（片段编号或原文要点摘录）；\n",
-            "- 若某关注点无证据，明确说明未在片段中发现相关内容。\n",
-            "\n关注点审查清单（名称与审查要点来自 rules.md / 应用设置）：\n",
+            "【审查角色】\n",
+            role + "\n\n",
+            "【审查目标与原则】\n",
+            goals + "\n\n",
+            "关注点审查清单（名称与审查要点来自 rules.md / 应用设置）：\n",
         ]
         for i, fd in enumerate(focus_definitions, 1):
             name = str(fd.get("name") or "").strip()
             pid = str(fd.get("id") or name).strip()
             prm = str(fd.get("prompt") or "").strip()
             lines.append(f"{i}. 【{name}】（id={pid}）\n   审查要点：{prm}\n")
-        lines.append(
-            "\n输出风格偏好："
-            + json.dumps(DEFAULT_RULES.get("style", {}), ensure_ascii=False)
-            + "\n"
-        )
-        return "".join(lines) + MARKDOWN_OUTPUT_HINT
+        lines.append("\n【输出要求】\n")
+        lines.append(output)
+        return "".join(lines)
 
     r = merge_rules(rules)
     return (
@@ -181,3 +195,26 @@ def format_chunk_index_markdown(entries: list[dict[str, Any]]) -> str:
         rows.append(f"| {i} | {path} | {section} | {lines_rng} |")
     rows.append("")
     return "\n".join(rows)
+
+
+def format_chunk_index_lines_markdown(entries: list[dict[str, Any]]) -> str:
+    """
+    可单独下载的完整「片段与来源索引」Markdown：每个纳入模型的片段占一行（非表格），
+    与送入模型的分块集合一致；用于解析完成后下载，不包含在审查结论正文中。
+    """
+    if not entries:
+        return ""
+    lines: list[str] = [
+        "# 片段与来源索引",
+        "",
+        "以下为本次分析纳入模型的分块；每行一个片段。",
+        "",
+    ]
+    for i, e in enumerate(entries, start=1):
+        loc = e.get("locator") if isinstance(e.get("locator"), dict) else {}
+        path = str(e.get("doc_path") or "").replace("|", "\\|")
+        section = _format_section_from_locator(loc).replace("|", "\\|")
+        lines_rng = _format_lines_from_locator(loc)
+        lines.append(f"片段 {i} | 文件: {path} | 章节: {section} | 行: {lines_rng}")
+    lines.append("")
+    return "\n".join(lines)

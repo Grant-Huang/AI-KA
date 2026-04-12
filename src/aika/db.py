@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   project_id INTEGER NOT NULL,
   analysis_type TEXT NOT NULL,
   title TEXT NOT NULL,
+  preset_id TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -191,6 +192,9 @@ class ConversationRow:
     project_id: int
     analysis_type: str
     title: str
+    created_at: str
+    updated_at: str
+    preset_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -224,13 +228,46 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
     conn.commit()
     _migrate_projects_web_columns(conn)
+    _migrate_conversations_preset_id(conn)
+
+
+def _table_column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    """PRAGMA table_info：用列名 `name` 取值，避免依赖结果列顺序。"""
+    rows = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+    out: set[str] = set()
+    for r in rows:
+        try:
+            out.add(str(r["name"]))
+        except (KeyError, IndexError, TypeError):
+            out.add(str(r[1]))
+    return out
 
 
 def _migrate_projects_web_columns(conn: sqlite3.Connection) -> None:
-    cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(projects)").fetchall()}
+    cols = _table_column_names(conn, "projects")
     if "rules_json" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN rules_json TEXT")
         conn.commit()
+
+
+def _migrate_conversations_preset_id(conn: sqlite3.Connection) -> None:
+    cols = _table_column_names(conn, "conversations")
+    if "preset_id" not in cols:
+        try:
+            conn.execute("ALTER TABLE conversations ADD COLUMN preset_id TEXT")
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            # 列已存在（检测与库状态不一致时仍可能触发）
+            if "duplicate column" not in msg and "already exists" not in msg:
+                raise
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversations_project_preset ON conversations(project_id, preset_id)"
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
 
 
 def now_touch_project(conn: sqlite3.Connection, project_id: int) -> None:
@@ -593,23 +630,46 @@ def create_conversation(
     project_id: int,
     analysis_type: str,
     title: str,
+    preset_id: str | None = None,
 ) -> ConversationRow:
+    pid = str(preset_id).strip() if preset_id is not None else None
     cur = conn.execute(
         """
-        INSERT INTO conversations(project_id, analysis_type, title)
-        VALUES (?, ?, ?)
+        INSERT INTO conversations(project_id, analysis_type, title, preset_id)
+        VALUES (?, ?, ?, ?)
         """,
-        (project_id, str(analysis_type), str(title)),
+        (project_id, str(analysis_type), str(title), pid),
     )
     conn.commit()
     cid = int(cur.lastrowid)
-    return ConversationRow(id=cid, project_id=project_id, analysis_type=str(analysis_type), title=str(title))
+    r = conn.execute(
+        "SELECT id, project_id, analysis_type, title, created_at, updated_at, preset_id FROM conversations WHERE id=?",
+        (cid,),
+    ).fetchone()
+    assert r is not None
+    return _row_to_conversation(r)
+
+
+def _row_to_conversation(r: sqlite3.Row) -> ConversationRow:
+    pj = r["preset_id"] if "preset_id" in r.keys() else None
+    preset_out: str | None = None
+    if pj is not None and str(pj).strip():
+        preset_out = str(pj).strip()
+    return ConversationRow(
+        id=int(r["id"]),
+        project_id=int(r["project_id"]),
+        analysis_type=str(r["analysis_type"]),
+        title=str(r["title"]),
+        created_at=str(r["created_at"]),
+        updated_at=str(r["updated_at"]),
+        preset_id=preset_out,
+    )
 
 
 def list_conversations(conn: sqlite3.Connection, *, project_id: int, limit: int = 50) -> list[ConversationRow]:
     rows = conn.execute(
         """
-        SELECT id, project_id, analysis_type, title
+        SELECT id, project_id, analysis_type, title, created_at, updated_at, preset_id
         FROM conversations
         WHERE project_id=?
         ORDER BY updated_at DESC, id DESC
@@ -617,21 +677,13 @@ def list_conversations(conn: sqlite3.Connection, *, project_id: int, limit: int 
         """,
         (project_id, int(limit)),
     ).fetchall()
-    return [
-        ConversationRow(
-            id=int(r["id"]),
-            project_id=int(r["project_id"]),
-            analysis_type=str(r["analysis_type"]),
-            title=str(r["title"]),
-        )
-        for r in rows
-    ]
+    return [_row_to_conversation(r) for r in rows]
 
 
 def get_conversation(conn: sqlite3.Connection, conversation_id: int) -> ConversationRow | None:
     r = conn.execute(
         """
-        SELECT id, project_id, analysis_type, title
+        SELECT id, project_id, analysis_type, title, created_at, updated_at, preset_id
         FROM conversations
         WHERE id=?
         """,
@@ -639,12 +691,33 @@ def get_conversation(conn: sqlite3.Connection, conversation_id: int) -> Conversa
     ).fetchone()
     if r is None:
         return None
-    return ConversationRow(
-        id=int(r["id"]),
-        project_id=int(r["project_id"]),
-        analysis_type=str(r["analysis_type"]),
-        title=str(r["title"]),
-    )
+    return _row_to_conversation(r)
+
+
+def find_latest_conversation_with_analysis_for_preset(
+    conn: sqlite3.Connection,
+    *,
+    project_id: int,
+    preset_id: str,
+) -> ConversationRow | None:
+    """同项目且 preset_id 一致、且至少有一条 analysis_runs 的会话中，按 updated_at 最近的一条。"""
+    pid = str(preset_id).strip()
+    if not pid:
+        return None
+    r = conn.execute(
+        """
+        SELECT c.id, c.project_id, c.analysis_type, c.title, c.created_at, c.updated_at, c.preset_id
+        FROM conversations c
+        WHERE c.project_id = ? AND c.preset_id = ?
+        AND EXISTS (SELECT 1 FROM analysis_runs ar WHERE ar.conversation_id = c.id)
+        ORDER BY c.updated_at DESC, c.id DESC
+        LIMIT 1
+        """,
+        (int(project_id), pid),
+    ).fetchone()
+    if r is None:
+        return None
+    return _row_to_conversation(r)
 
 
 def insert_message(
@@ -687,6 +760,33 @@ def list_messages(conn: sqlite3.Connection, *, conversation_id: int, limit: int 
             content=str(r["content"]),
         )
         for r in rows
+    ]
+
+
+def list_recent_messages(
+    conn: sqlite3.Connection, *, conversation_id: int, limit: int = 24
+) -> list[MessageRow]:
+    """最近 N 条 user/assistant 消息（按 id 时间正序）。用于多轮对话上下文。"""
+    lim = max(1, int(limit))
+    rows = conn.execute(
+        """
+        SELECT id, conversation_id, role, content
+        FROM messages
+        WHERE conversation_id=? AND role IN ('user', 'assistant')
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (conversation_id, lim),
+    ).fetchall()
+    ordered = list(reversed(rows))
+    return [
+        MessageRow(
+            id=int(r["id"]),
+            conversation_id=int(r["conversation_id"]),
+            role=str(r["role"]),
+            content=str(r["content"]),
+        )
+        for r in ordered
     ]
 
 

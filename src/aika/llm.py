@@ -31,7 +31,14 @@ class LLMProvider:
     def chat(self, *, system: str, user: str, config: LLMConfig) -> LLMResult:  # pragma: no cover
         raise NotImplementedError
 
-    def chat_stream(self, *, system: str, user: str, config: LLMConfig) -> Iterator[str]:  # pragma: no cover
+    def chat_stream(
+        self,
+        *,
+        system: str,
+        user: str,
+        config: LLMConfig,
+        prior_messages: list[tuple[str, str]] | None = None,
+    ) -> Iterator[str]:  # pragma: no cover
         raise NotImplementedError
 
 
@@ -61,8 +68,21 @@ class MockProvider(LLMProvider):
             )
         return LLMResult(text=json.dumps({"annotations": annotations}, ensure_ascii=False))
 
-    def chat_stream(self, *, system: str, user: str, config: LLMConfig) -> Iterator[str]:
-        text = self.chat(system=system, user=user, config=config).text
+    def chat_stream(
+        self,
+        *,
+        system: str,
+        user: str,
+        config: LLMConfig,
+        prior_messages: list[tuple[str, str]] | None = None,
+    ) -> Iterator[str]:
+        parts: list[str] = []
+        if prior_messages:
+            for role, content in prior_messages:
+                parts.append(f"[{role}]\n{content}")
+        parts.append(user)
+        combined = "\n\n".join(parts)
+        text = self.chat(system=system, user=combined, config=config).text
         yield text
 
 
@@ -71,6 +91,20 @@ class OpenAICompatibleProvider(LLMProvider):
     兼容 OpenAI Chat Completions 形状的接口（用于企业自建/代理/第三方兼容服务）。
     仅使用标准库 urllib，避免强依赖。
     """
+
+    @staticmethod
+    def _chat_messages(
+        system: str, user: str, prior_messages: list[tuple[str, str]] | None
+    ) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+        if prior_messages:
+            for role, content in prior_messages:
+                r = (role or "user").strip().lower()
+                if r not in ("user", "assistant", "system"):
+                    r = "user"
+                messages.append({"role": r, "content": content})
+        messages.append({"role": "user", "content": user})
+        return messages
 
     @staticmethod
     def _chat_completions_url(base_url: str) -> str:
@@ -103,10 +137,7 @@ class OpenAICompatibleProvider(LLMProvider):
         url = self._chat_completions_url(base)
         payload = {
             "model": model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            "messages": self._chat_messages(system, user, None),
             "temperature": 0.2,
         }
         data = json.dumps(payload).encode("utf-8")
@@ -131,7 +162,14 @@ class OpenAICompatibleProvider(LLMProvider):
 
         return LLMResult(text=str(text), raw=raw)
 
-    def chat_stream(self, *, system: str, user: str, config: LLMConfig) -> Iterator[str]:
+    def chat_stream(
+        self,
+        *,
+        system: str,
+        user: str,
+        config: LLMConfig,
+        prior_messages: list[tuple[str, str]] | None = None,
+    ) -> Iterator[str]:
         base = (config.base_url or "").rstrip("/")
         if not base:
             raise LLMError("base_url is required for openai_compatible provider")
@@ -148,10 +186,7 @@ class OpenAICompatibleProvider(LLMProvider):
         url = self._chat_completions_url(base)
         payload = {
             "model": model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            "messages": self._chat_messages(system, user, prior_messages),
             "temperature": 0.2,
             "stream": True,
         }

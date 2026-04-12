@@ -334,6 +334,35 @@ def build_chunks_for_file(abs_path: Path, ext: str, chunk_strategy: str, *, max_
     return chunks
 
 
+def _index_one_scanfile(
+    conn,
+    *,
+    project: dbm.ProjectRow,
+    sf: ScanFile,
+    strat: str,
+) -> None:
+    doc_id = dbm.upsert_document(
+        conn,
+        project_id=project.id,
+        stage=sf.stage,
+        rel_path=sf.rel_path,
+        ext=sf.ext,
+        sha256=sf.sha256,
+        mtime=sf.mtime,
+        status="indexed",
+        parse_error=None,
+    )
+
+    chunks = build_chunks_for_file(sf.abs_path, sf.ext, strat)
+    for i, ch in enumerate(chunks):
+        ch["chunk_index"] = i
+    dbm.insert_chunks(conn, doc_id, chunks)
+    conn.execute(
+        "UPDATE documents SET status=? WHERE id=?",
+        ("chunked", doc_id),
+    )
+
+
 def _sync_scanned_into_project(
     conn,
     *,
@@ -344,26 +373,7 @@ def _sync_scanned_into_project(
     updated = 0
     strat = chunk_strategy if chunk_strategy in (CHUNK_STRATEGY_BLANK, CHUNK_STRATEGY_STRUCTURED) else CHUNK_STRATEGY_BLANK
     for sf in scanned:
-        doc_id = dbm.upsert_document(
-            conn,
-            project_id=project.id,
-            stage=sf.stage,
-            rel_path=sf.rel_path,
-            ext=sf.ext,
-            sha256=sf.sha256,
-            mtime=sf.mtime,
-            status="indexed",
-            parse_error=None,
-        )
-
-        chunks = build_chunks_for_file(sf.abs_path, sf.ext, strat)
-        for i, ch in enumerate(chunks):
-            ch["chunk_index"] = i
-        dbm.insert_chunks(conn, doc_id, chunks)
-        conn.execute(
-            "UPDATE documents SET status=? WHERE id=?",
-            ("chunked", doc_id),
-        )
+        _index_one_scanfile(conn, project=project, sf=sf, strat=strat)
         updated += 1
 
     dbm.now_touch_project(conn, project.id)
@@ -389,12 +399,16 @@ def sync_project_md_root(
     project: dbm.ProjectRow,
     md_root: Path,
     chunk_strategy: str | None = None,
+    full_resync: bool = False,
 ) -> int:
     """
-    Replace indexed documents/chunks for project with scan of md_root (e.g. docs2md output).
+    Index markdown under md_root (e.g. docs2md output).
+
+    - full_resync=True: 清空本项目已有文档索引后，对目录内全部文件重新分块入库。
+    - full_resync=False: 增量模式——仅对新增或内容变化（sha256 变）的文件建索引；磁盘上已删除的文件从索引移除；
+      未变化的文件跳过以节省时间。
     chunk_strategy: blank | structured; None => env AIKA_CHUNK_STRATEGY (CLI) or caller must pass (Web).
     """
-    dbm.delete_project_documents(conn, project.id)
     root = md_root.resolve()
     if not root.is_dir():
         dbm.now_touch_project(conn, project.id)
@@ -402,4 +416,27 @@ def sync_project_md_root(
         return 0
     scanned = scan_project_root(root)
     strat = chunk_strategy if chunk_strategy is not None else resolve_chunk_strategy_from_env()
-    return _sync_scanned_into_project(conn, project=project, scanned=scanned, chunk_strategy=strat)
+    strat = strat if strat in (CHUNK_STRATEGY_BLANK, CHUNK_STRATEGY_STRUCTURED) else CHUNK_STRATEGY_BLANK
+
+    if full_resync:
+        dbm.delete_project_documents(conn, project.id)
+        return _sync_scanned_into_project(conn, project=project, scanned=scanned, chunk_strategy=strat)
+
+    paths_on_disk = {sf.rel_path for sf in scanned}
+    existing = dbm.list_documents(conn, project.id)
+    for doc in existing:
+        if doc.path not in paths_on_disk:
+            conn.execute("DELETE FROM documents WHERE id=?", (doc.id,))
+
+    ex_by_path = {d.path: d for d in dbm.list_documents(conn, project.id)}
+    updated = 0
+    for sf in scanned:
+        prev = ex_by_path.get(sf.rel_path)
+        if prev is not None and (prev.sha256 or "") == sf.sha256:
+            continue
+        _index_one_scanfile(conn, project=project, sf=sf, strat=strat)
+        updated += 1
+
+    dbm.now_touch_project(conn, project.id)
+    dbm.commit(conn)
+    return updated

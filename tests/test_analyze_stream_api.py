@@ -17,11 +17,12 @@ def _reset_settings_cache() -> None:
 
 
 class _FakeAnalyzeProvider:
-    def chat_stream(self, *, system: str, user: str, config: object):  # type: ignore[no-untyped-def]
+    def chat_stream(self, *, system: str, user: str, config: object, prior_messages=None):  # type: ignore[no-untyped-def]
         assert "关注点审查清单" in system
         assert "需求" in system
         assert "片段" in user and ("hello" in user or "文件" in user)
         del config
+        assert prior_messages is None
         yield '{"title":"T","blocks":[]}'
 
 
@@ -48,6 +49,10 @@ def test_analyze_stream_post_rejects_unknown_focus(monkeypatch: pytest.MonkeyPat
 
 def test_analyze_stream_post_streams_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
+    (tmp_path / "rules.md").write_text(
+        "# r\n\n## 关注点块\n\n### focus:req | 需求\n关注点提示\n",
+        encoding="utf-8",
+    )
     import backend.main as main_mod
 
     monkeypatch.setattr(main_mod, "get_provider", lambda _p: _FakeAnalyzeProvider())
