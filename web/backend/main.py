@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import unicodedata
 from typing import Any, Iterator
 from pathlib import Path
 
@@ -32,6 +34,35 @@ from backend.prompt_builder import (
 )
 from backend.repo_paths import project_export_dir, project_md_out_dir, repository_root
 from backend.response import err, ok
+
+
+# #region agent log
+def _agent_debug_log(
+    *,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, Any] | None = None,
+) -> None:
+    """NDJSON debug log for Cursor debug mode (session d510dd)."""
+    try:
+        log_path = repository_root() / ".cursor" / "debug-d510dd.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        rec: dict[str, Any] = {
+            "sessionId": "d510dd",
+            "timestamp": int(datetime.now().timestamp() * 1000),
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data or {},
+        }
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+# #endregion
 
 
 def _conn():
@@ -77,8 +108,24 @@ def health() -> dict[str, Any]:
     return ok({"ok": True})
 
 
+def _active_rules_filename() -> str:
+    """
+    当前唯一使用的规则文件 basename（位于 AIKA_REPO_ROOT 下）。
+    环境变量 AIKA_RULES_FILENAME，默认 rules.md。可改为 rules_new2.md 等；各文件彼此独立，同时只加载其中一个。
+    仅允许 [A-Za-z0-9._-]+.md，禁止路径片段。
+    """
+    raw = (os.environ.get("AIKA_RULES_FILENAME") or "rules.md").strip()
+    if not raw:
+        return "rules.md"
+    if os.path.basename(raw) != raw or ".." in raw:
+        return "rules.md"
+    if not re.fullmatch(r"[A-Za-z0-9._-]+\.md", raw):
+        return "rules.md"
+    return raw
+
+
 def _rules_md_path() -> Path:
-    return repository_root() / "rules.md"
+    return repository_root() / _active_rules_filename()
 
 
 def _default_rules_md_path() -> Path:
@@ -208,40 +255,38 @@ def _build_settings_payload(conn: Any) -> dict[str, Any]:
         "chunk_strategy": _get_chunk_strategy(),
         "disable_image_parse": _get_disable_image_parse(),
         "llm_settings": _get_llm_settings(),
+        # 便于前端排查「预设不显示」：实际读取的仓库根与 rules 路径、原始组合表行
+        "repo_root": str(repository_root()),
+        "rules_filename": _active_rules_filename(),
+        "rules_md_path": str(_rules_md_path()),
+        "focus_combo_tips": _read_focus_combo_tips_from_rules_md(),
     }
 
 
 def _read_settings_from_rules_md() -> tuple[dict[str, Any] | None, str | None]:
     """
-    Read settings from rules.md. If missing/invalid, fallback to default_rules.md.
+    仅从当前规则文件（AIKA_RULES_FILENAME）读取；不自动读取 default_rules.md。
+    default_rules.md 仅作人工/「恢复默认模板」复制源，见 restore_default_rules_template。
     """
+    fn = _active_rules_filename()
     p = _rules_md_path()
-    if p.is_file():
-        text = p.read_text(encoding="utf-8", errors="replace")
-        parsed, err = _read_settings_from_rules_text(text)
-        if parsed and not err:
-            return parsed, None
-        # fallback
-        fallback = _default_rules_md_path()
-        if fallback.is_file():
-            ft = fallback.read_text(encoding="utf-8", errors="replace")
-            parsed2, err2 = _read_settings_from_rules_text(ft)
-            if parsed2 and not err2:
-                return parsed2, f"rules.md 解析失败，已回退 default_rules.md：{err}"
-        return None, err
-    fallback = _default_rules_md_path()
-    if fallback.is_file():
-        ft = fallback.read_text(encoding="utf-8", errors="replace")
-        parsed2, err2 = _read_settings_from_rules_text(ft)
-        if parsed2 and not err2:
-            return parsed2, "rules.md 不存在，已回退 default_rules.md"
-        return None, err2
-    return None, "rules.md 与 default_rules.md 均不存在"
+    if not p.is_file():
+        return None, f"{fn} 不存在：{p}。可将仓库内 default_rules.md 复制为该文件后编辑，或使用恢复接口。"
+    text = p.read_text(encoding="utf-8", errors="replace")
+    parsed, err = _read_settings_from_rules_text(text)
+    if parsed and not err:
+        return parsed, None
+    return None, f"{fn} 解析失败：{err}"
+
+
+def _normalize_md_line_for_heading(line: str) -> str:
+    """全角 # 等与 Markdown 标题比对时做 NFKC，避免行首 `＃＃` 无法识别为 ##。"""
+    return unicodedata.normalize("NFKC", (line or "").strip())
 
 
 def _is_combo_suggestions_heading(line: str) -> bool:
     """识别「组合使用建议」类二级标题（允许空格差异、括号说明等）。"""
-    s = line.strip()
+    s = unicodedata.normalize("NFKC", (line or "").strip())
     m = re.match(r"^##\s+(.+)$", s)
     if not m:
         return False
@@ -249,6 +294,21 @@ def _is_combo_suggestions_heading(line: str) -> bool:
     if "组合" not in title:
         return False
     # 与「组合」相关且像「建议/预设」节，避免误匹配正文里的「字符组合」等
+    return any(x in title for x in ("建议", "预设", "搭配", "使用"))
+
+
+def _is_combo_like_h3_heading(line: str) -> bool:
+    """
+    识别「组合使用建议」类三级标题（### …）。
+    说明：不能用 `"###".startswith("##")` 这类判断混到二级标题逻辑里；否则 `### 组合…` 会被当作普通正文吞进最后一个关注点。
+    """
+    s = unicodedata.normalize("NFKC", (line or "").strip())
+    m = re.match(r"^###\s+(.+)$", s)
+    if not m:
+        return False
+    title = m.group(1).strip()
+    if "组合" not in title:
+        return False
     return any(x in title for x in ("建议", "预设", "搭配", "使用"))
 
 
@@ -269,11 +329,11 @@ def _is_md_table_separator_row(cells: list[str]) -> bool:
 
 def _extract_focus_combo_tips_from_rules_text(text: str) -> list[dict[str, str]]:
     lines = text.splitlines()
+    # 取最后一处「组合使用建议」类标题，避免正文/关注点 prompt 里较早出现的 ## 行误抢先
     start = -1
     for i, raw in enumerate(lines):
-        if _is_combo_suggestions_heading(raw):
+        if _is_combo_suggestions_heading(raw) or _is_combo_like_h3_heading(raw):
             start = i
-            break
     if start < 0:
         return []
 
@@ -314,14 +374,24 @@ def _extract_focus_combo_tips_from_rules_text(text: str) -> list[dict[str, str]]
     return rows
 
 
-def _read_focus_combo_tips_from_rules_md() -> list[dict[str, str]]:
+def _rules_text_aligned_with_focus_parse() -> str | None:
+    """与关注点同源：仅当当前规则文件能成功解析关注点时，才用其全文抽组合表。"""
     p = _rules_md_path()
     if not p.is_file():
-        p = _default_rules_md_path()
-        if not p.is_file():
-            return []
+        return None
     text = p.read_text(encoding="utf-8", errors="replace")
-    return _extract_focus_combo_tips_from_rules_text(text)
+    parsed, err = _read_settings_from_rules_text(text)
+    if parsed and not err:
+        return text
+    return None
+
+
+def _read_focus_combo_tips_from_rules_md() -> list[dict[str, str]]:
+    """从与关注点同源的全文解析「组合使用建议」表格（见 _rules_text_aligned_with_focus_parse）。"""
+    raw = _rules_text_aligned_with_focus_parse()
+    if not raw:
+        return []
+    return _extract_focus_combo_tips_from_rules_text(raw)
 
 
 def _slugify_id(text: str) -> str:
@@ -352,6 +422,11 @@ def _parse_focus_ids_from_recommended(text: str) -> list[str]:
     return out
 
 
+def _norm_focus_id(s: str) -> str:
+    """统一空白与兼容字符（如全角/半角连字符），便于表格内 focus:id 与 ### focus: 行一致匹配。"""
+    return unicodedata.normalize("NFKC", (s or "").strip())
+
+
 def _derive_focus_presets_from_combo_tips(
     combo_tips: list[dict[str, str]], focus_defs: list[dict[str, str]]
 ) -> list[dict[str, Any]]:
@@ -359,18 +434,27 @@ def _derive_focus_presets_from_combo_tips(
     将 rules.md 的“组合使用建议”转换为可保存/可选用的 focus_presets。
     主页与后端 analyze 接口使用的是关注点 name，因此这里把 focus:id 映射为 name。
     """
-    id_to_name = {str(d.get("id") or "").strip(): str(d.get("name") or "").strip() for d in focus_defs if isinstance(d, dict)}
+    id_to_name: dict[str, str] = {}
+    for d in focus_defs:
+        if not isinstance(d, dict):
+            continue
+        pid = _norm_focus_id(str(d.get("id") or ""))
+        name = str(d.get("name") or "").strip()
+        if pid and name:
+            id_to_name[pid] = name
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in combo_tips:
         if not isinstance(row, dict):
             continue
         stage = str(row.get("stage") or "").strip()
+        # 表格单元格内常见 **加粗**，与关注点 name 展示对齐
+        stage = re.sub(r"\*+", "", stage).strip()
         recommended = str(row.get("recommended") or "").strip()
         if not stage or not recommended:
             continue
         fid_list = _parse_focus_ids_from_recommended(recommended)
-        names = [id_to_name.get(fid) for fid in fid_list]
+        names = [id_to_name.get(_norm_focus_id(fid)) for fid in fid_list]
         focus_points = [n for n in names if n]
         if not focus_points:
             continue
@@ -382,8 +466,51 @@ def _derive_focus_presets_from_combo_tips(
     return out
 
 
+def _trim_accidental_combo_section_in_prompt(prompt: str) -> str:
+    """
+    防御：旧版解析或历史保存会把「## 组合使用建议」及表格留在 prompt 内；
+    按行截断到首个「组合*建议」类二级标题。
+    """
+    if not prompt:
+        return prompt
+    lines = prompt.splitlines()
+    out: list[str] = []
+    for line in lines:
+        st = _normalize_md_line_for_heading(line)
+        # 注意：在 Python 中 `"### x".startswith("##")` 为 True，必须用 `^##(?!#)` 区分真正的二级标题
+        if re.match(r"^##(?!#)", st) and _is_combo_suggestions_heading(st):
+            break
+        if _is_combo_like_h3_heading(line):
+            break
+        out.append(line)
+    return "\n".join(out).strip()
+
+
 def _read_settings_from_rules_text(text: str) -> tuple[dict[str, Any] | None, str | None]:
     lines = text.splitlines()
+
+    # #region agent log
+    last_focus_line = -1
+    combo_heading_lines: list[int] = []
+    for _ln, raw in enumerate(lines):
+        if _normalize_md_line_for_heading(raw).startswith("### focus:"):
+            last_focus_line = _ln
+        if _is_combo_suggestions_heading(raw):
+            combo_heading_lines.append(_ln)
+    _agent_debug_log(
+        hypothesis_id="H4",
+        location="main.py:_read_settings_from_rules_text",
+        message="rules_structure",
+        data={
+            "line_count": len(lines),
+            "last_focus_header_line": last_focus_line,
+            "combo_heading_lines": combo_heading_lines,
+            "combo_after_last_focus": bool(
+                combo_heading_lines and last_focus_line >= 0 and max(combo_heading_lines) > last_focus_line
+            ),
+        },
+    )
+    # #endregion
 
     focus_points: list[dict[str, str]] = []
     i = 0
@@ -398,13 +525,38 @@ def _read_settings_from_rules_text(text: str) -> tuple[dict[str, Any] | None, st
                 name = rest
             j = i + 1
             buf: list[str] = []
+            # #region agent log
+            logged_non_focus_h3 = False
+            # #endregion
             while j < len(lines):
                 nxt = lines[j]
-                if nxt.strip().startswith("### focus:"):
+                st = _normalize_md_line_for_heading(nxt)
+                if st.startswith("### focus:"):
                     break
+                # 二级标题：必须用 ^##(?!#)，避免 "### x".startswith("##") 的 Python 陷阱把三级标题当成正文
+                if re.match(r"^##(?!#)", st):
+                    break
+                if _is_combo_like_h3_heading(nxt):
+                    break
+                # #region agent log
+                if (not logged_non_focus_h3) and st.startswith("###") and (not st.startswith("### focus:")):
+                    logged_non_focus_h3 = True
+                    _agent_debug_log(
+                        hypothesis_id="H1",
+                        location="main.py:_read_settings_from_rules_text",
+                        message="non_focus_h3_absorbed",
+                        data={
+                            "focus_id": pid,
+                            "line_no": j,
+                            "preview": st[:200],
+                            "startswith_two_hash": st.startswith("##"),
+                            "startswith_three_hash": st.startswith("###"),
+                        },
+                    )
+                # #endregion
                 buf.append(nxt)
                 j += 1
-            prompt = "\n".join(buf).strip()
+            prompt = _trim_accidental_combo_section_in_prompt("\n".join(buf).strip())
             if pid and name:
                 focus_points.append({"id": pid, "name": name, "prompt": prompt})
             i = j
@@ -413,6 +565,27 @@ def _read_settings_from_rules_text(text: str) -> tuple[dict[str, Any] | None, st
 
     if not focus_points:
         return None, "rules.md 格式无效：未找到“关注点块”（格式：### focus:<id> | <name>）"
+
+    # #region agent log
+    scan: list[dict[str, Any]] = []
+    for fp in focus_points:
+        pr = str(fp.get("prompt") or "")
+        scan.append(
+            {
+                "id": fp.get("id"),
+                "prompt_len": len(pr),
+                "has_combo_heading_text": ("组合使用建议" in pr) or ("组合建议" in pr),
+                "has_combo_table_header": ("| 评审节点" in pr) or ("｜ 评审节点" in pr),
+            }
+        )
+    _agent_debug_log(
+        hypothesis_id="H5",
+        location="main.py:_read_settings_from_rules_text",
+        message="focus_prompt_contamination_scan",
+        data={"items": scan},
+    )
+    # #endregion
+
     out: dict[str, Any] = {"focus_points": focus_points}
     return out, None
 
@@ -421,6 +594,9 @@ def _write_settings_to_rules_md(payload: dict[str, Any]) -> None:
     p = _rules_md_path()
     focus_points = payload.get("focus_points")
     if not isinstance(focus_points, list):
+        focus_points = DEFAULT_FOCUS_POINTS
+    elif len(focus_points) == 0:
+        # 写入时避免生成空关注点文件；不读取 default_rules.md，仅用内置占位（与「恢复模板」无关）
         focus_points = DEFAULT_FOCUS_POINTS
 
     focus_presets = payload.get("focus_presets")
@@ -433,7 +609,7 @@ def _write_settings_to_rules_md(payload: dict[str, Any]) -> None:
             continue
         fid = str(item.get("id") or "").strip()
         name = str(item.get("name") or "").strip()
-        prm = str(item.get("prompt") or "").strip()
+        prm = _trim_accidental_combo_section_in_prompt(str(item.get("prompt") or "").strip())
         if not fid or not name:
             continue
         blocks.append(f"### focus:{fid} | {name}\n{prm}\n")
@@ -518,7 +694,7 @@ def _get_focus_points() -> list[dict[str, str]]:
             )
         if out:
             return out
-    return DEFAULT_FOCUS_POINTS
+    return []
 
 
 def _get_focus_presets() -> list[dict[str, Any]]:
@@ -699,15 +875,12 @@ def pick_directory(request: Request) -> JSONResponse:
 @app.get("/api/v1/settings")
 def get_app_settings() -> JSONResponse:
     conn = _conn()
-    file_data, parse_error = _read_settings_from_rules_md()
-    combo_tips = _read_focus_combo_tips_from_rules_md()
+    _, parse_error = _read_settings_from_rules_md()
     payload = _build_settings_payload(conn)
-    payload["focus_combo_tips"] = combo_tips
     payload["rules_md_error"] = parse_error
     app_cfg, app_err, app_src = _read_app_settings_md_debug()
     payload["app_settings_error"] = app_err
     payload["app_settings_source"] = app_src
-    payload["repo_root"] = str(repository_root())
     return JSONResponse(ok(payload))
 
 
@@ -874,6 +1047,24 @@ def import_rules_md_payload(payload: dict[str, Any]) -> JSONResponse:
     _rules_md_path().write_text(text, encoding="utf-8")
     current = _build_settings_payload(conn)
     current["rules_md_error"] = None
+    return JSONResponse(ok(current))
+
+
+@app.post("/api/v1/settings/rules-md/restore-default-template")
+def restore_default_rules_template() -> JSONResponse:
+    """将 default_rules.md 复制为当前活动规则文件；仅用于手动重置/恢复，不会在读取失败时自动执行。"""
+    src = _default_rules_md_path()
+    if not src.is_file():
+        return JSONResponse(err("仓库内不存在 default_rules.md，无法从模板恢复"), status_code=404)
+    dst = _rules_md_path()
+    try:
+        dst.write_text(src.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    except OSError as e:
+        return JSONResponse(err(f"写入规则文件失败：{e}"), status_code=500)
+    conn = _conn()
+    current = _build_settings_payload(conn)
+    _, parse_error = _read_settings_from_rules_md()
+    current["rules_md_error"] = parse_error
     return JSONResponse(ok(current))
 
 

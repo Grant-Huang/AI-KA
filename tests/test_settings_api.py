@@ -102,6 +102,76 @@ def test_settings_reports_rules_md_parse_error(monkeypatch: pytest.MonkeyPatch, 
     assert "关注点块" in body["rules_md_error"]
 
 
+def test_trim_accidental_combo_section_in_prompt_unit() -> None:
+    from backend.main import _trim_accidental_combo_section_in_prompt
+
+    p = "正文\n\n## 组合使用建议\n\n| 评审节点 | x |\n|---|---|"
+    assert "组合使用建议" not in _trim_accidental_combo_section_in_prompt(p)
+    assert _trim_accidental_combo_section_in_prompt(p).strip() == "正文"
+
+
+def test_trim_accidental_combo_section_h3_heading_unit() -> None:
+    from backend.main import _trim_accidental_combo_section_in_prompt
+
+    p = "正文\n\n### 组合使用建议\n\n| 评审节点 | x |\n|---|---|"
+    assert "组合使用建议" not in _trim_accidental_combo_section_in_prompt(p)
+    assert _trim_accidental_combo_section_in_prompt(p).strip() == "正文"
+
+
+def test_focus_prompt_stops_before_combo_section_heading(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """最后一个 ### focus: 之后若接 ## 组合使用建议 等二级标题，prompt 不得吞入表格。"""
+    text = (
+        "# x\n\n"
+        "### focus:a | A\n"
+        "line for a\n\n"
+        "### focus:b | B\n"
+        "line for b\n\n"
+        "## 组合使用建议\n\n"
+        "| 评审节点 | 推荐组合的关注点 |\n"
+        "|---|---|\n"
+        "| 阶段1 | `focus:a` |\n"
+    )
+    monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
+    (tmp_path / "rules.md").write_text(text, encoding="utf-8")
+    client = TestClient(app)
+    r = client.get("/api/v1/settings")
+    assert r.status_code == 200
+    fps = r.json()["data"]["focus_points"]
+    assert len(fps) == 2
+    assert "组合使用建议" not in fps[1]["prompt"]
+    assert "评审节点" not in fps[1]["prompt"]
+    tips = r.json()["data"]["focus_combo_tips"]
+    assert len(tips) == 1
+    assert tips[0]["stage"] == "阶段1"
+
+
+def test_focus_prompt_stops_before_combo_h3_heading(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """组合节若写成 ### 组合使用建议（三级标题），也不得吞入最后一个关注点 prompt（Python startswith 陷阱）。"""
+    text = (
+        "# x\n\n"
+        "### focus:a | A\n"
+        "line for a\n\n"
+        "### focus:b | B\n"
+        "line for b\n\n"
+        "### 组合使用建议\n\n"
+        "| 评审节点 | 推荐组合的关注点 |\n"
+        "|---|---|\n"
+        "| 阶段1 | `focus:a` |\n"
+    )
+    monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
+    (tmp_path / "rules.md").write_text(text, encoding="utf-8")
+    client = TestClient(app)
+    r = client.get("/api/v1/settings")
+    assert r.status_code == 200
+    fps = r.json()["data"]["focus_points"]
+    assert len(fps) == 2
+    assert "组合使用建议" not in fps[1]["prompt"]
+    assert "评审节点" not in fps[1]["prompt"]
+    tips = r.json()["data"]["focus_combo_tips"]
+    assert len(tips) == 1
+    assert tips[0]["stage"] == "阶段1"
+
+
 def test_settings_clear_llm_api_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
     client = TestClient(app)
@@ -263,3 +333,118 @@ def test_settings_reads_focus_combo_tips_from_rules_md(monkeypatch: pytest.Monke
     assert len(tips) == 2
     assert tips[0]["stage"] == "蓝图评审"
     assert "focus:req" in tips[0]["recommended"]
+
+
+def test_no_auto_fallback_to_default_rules_when_rules_md_invalid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """损坏的 rules.md 不会触发读取 default_rules.md；应报错且关注点/组合表为空。"""
+    monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
+    (tmp_path / "rules.md").write_text(
+        "# broken\n\n## 组合使用建议\n| 评审节点 | 推荐组合的关注点 |\n|---|---|\n| 假行 | `focus:ghost` |\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "default_rules.md").write_text(
+        (
+            "# d\n\n"
+            "### focus:req | 需求\n"
+            "p\n\n"
+            "## 组合使用建议\n"
+            "| 评审节点 | 推荐组合的关注点 |\n"
+            "|---|---|\n"
+            "| 蓝图 | `focus:req` |\n"
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(app)
+    r = client.get("/api/v1/settings")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert isinstance(data.get("rules_md_error"), str) and data["rules_md_error"]
+    assert "解析失败" in data["rules_md_error"]
+    assert data["focus_points"] == []
+    assert data["focus_combo_tips"] == []
+    assert data["focus_presets"] == []
+
+
+def test_restore_default_rules_template_endpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
+    (tmp_path / "default_rules.md").write_text(
+        (
+            "# d\n\n"
+            "### focus:req | 需求\n"
+            "p\n\n"
+            "## 组合使用建议\n"
+            "| 评审节点 | 推荐组合的关注点 |\n"
+            "|---|---|\n"
+            "| 蓝图 | `focus:req` |\n"
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(app)
+    r = client.post("/api/v1/settings/rules-md/restore-default-template")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data.get("rules_md_error") in (None, "")
+    assert len(data["focus_points"]) >= 1
+    assert (tmp_path / "rules.md").is_file()
+
+
+def test_combo_tips_respects_ai_ka_rules_filename_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """AIKA_RULES_FILENAME=rules_new2.md 时只读该文件，不合并其它规则文件。"""
+    monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("AIKA_RULES_FILENAME", "rules_new2.md")
+    (tmp_path / "rules.md").write_text(
+        "# r\n\n### focus:x | X\n旧表\n## 组合使用建议\n| 评审节点 | 推荐组合的关注点 |\n|---|---|\n| 错 | `focus:x` |\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "rules_new2.md").write_text(
+        (
+            "# r\n\n"
+            "### focus:req | 需求\n"
+            "p\n\n"
+            "## 组合使用建议\n"
+            "| 评审节点 | 推荐组合的关注点 |\n"
+            "|---|---|\n"
+            "| 节点A | `focus:req` |\n"
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(app)
+    r = client.get("/api/v1/settings")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data.get("rules_filename") == "rules_new2.md"
+    tips = data["focus_combo_tips"]
+    assert len(tips) == 1
+    assert tips[0]["stage"] == "节点A"
+
+
+def test_combo_tips_uses_last_combo_heading_when_two_exist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """两处「组合*建议」标题时取最后一处（避免正文误匹配抢先）。"""
+    monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
+    (tmp_path / "rules.md").write_text(
+        (
+            "# r\n\n"
+            "### focus:req | 需求\n"
+            "## 组合与使用说明\n"
+            "正文无表格\n\n"
+            "## 组合使用建议\n"
+            "| 评审节点 | 推荐组合的关注点 |\n"
+            "|---|---|\n"
+            "| 末段评审 | `focus:req` |\n"
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(app)
+    r = client.get("/api/v1/settings")
+    assert r.status_code == 200
+    tips = r.json()["data"]["focus_combo_tips"]
+    assert len(tips) == 1
+    assert tips[0]["stage"] == "末段评审"
