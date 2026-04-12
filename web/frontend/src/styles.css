@@ -1,6 +1,16 @@
 :root {
   /* 首页审查报告 / 过程流 / 会话历史 共用阅读宽度 */
   --main-content-max-width: 820px;
+  --composer-bar-max-width: 900px;
+  /*
+   * 主输出列底部「可滚动垫高」：给固定底栏留出空白，避免挡住导出/点赞。
+   * 仅影响整页滚到**最底部**时多出来的空白高度；不改输入框高度、也不改首屏布局。
+   * 调大后请 `npm run build`，并在浏览器对 8765 强制刷新；用 DevTools → Elements 选中
+   * `.pipeline-output-panel--footer-clear` 看 computed 的 padding-bottom 是否已变。
+   */
+  --footer-clear-extra-lines: 6;
+  /* 无单位数字，与下面 calc 中 * 1px 相乘得到像素 */
+  --footer-clear-base-px: 36;
 }
 
 body {
@@ -63,14 +73,6 @@ body {
   padding: 18px;
 }
 
-/*
- * 导出 md / 点赞紧接在报告正文之后（正常文档流，不用浮动层）。
- * 底部额外留白 ≈ 多行输入（约 8 行字高）+ 工具条/免责条，滚到底时整段仍能在固定输入条之上完整看到。
- */
-.pipeline-output-panel--footer-clear {
-  padding-bottom: calc(8* 1.6em + 176px + env(safe-area-inset-bottom, 0px));
-}
-
 .composer-overlay {
   position: fixed;
   left: 52px;
@@ -79,9 +81,8 @@ body {
   pointer-events: none;
 }
 
-/* TEMP：输入区比结果区（--main-content-max-width: 820px）窄，便于对照底部留白；调好后改回 900px */
 .composer-overlay-inner {
-  max-width: 560px;
+  max-width: var(--composer-bar-max-width);
   margin: 0 auto;
   pointer-events: auto;
 }
@@ -222,7 +223,19 @@ body {
 .pipeline-output-panel {
   max-width: var(--main-content-max-width);
   margin: 12px auto 6px;
-  padding: 0 6px;
+  /* 勿写 padding 简写覆盖底栏：会冲掉 .pipeline-output-panel--footer-clear 的 padding-bottom */
+  padding-left: 6px;
+  padding-right: 6px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+/* 必须写在 .pipeline-output-panel 之后，否则会被后者的 padding 简写覆盖 */
+.pipeline-output-panel.pipeline-output-panel--footer-clear {
+  padding-bottom: calc(
+    var(--footer-clear-extra-lines) * 1.6em + var(--footer-clear-base-px) * 1px +
+      env(safe-area-inset-bottom, 0px)
+  );
 }
 
 /* 审查报告正文：在里程碑折叠区之外，始终展开 */

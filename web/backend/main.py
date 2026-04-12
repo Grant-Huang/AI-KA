@@ -68,6 +68,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def _no_cache_spa_entry(request: Request, call_next):
+    """避免浏览器长期缓存 index.html，导致仍引用旧哈希的 /assets/*.css、*.js。"""
+    response = await call_next(request)
+    if request.url.path in ("/", "/index.html") and response.status_code == 200:
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 _repo_root = repository_root()
 
 DEFAULT_FOCUS_POINTS: list[dict[str, str]] = [
@@ -1840,8 +1851,6 @@ def analyze_stream_post(project_id: int, payload: AnalyzeStreamBody) -> Streamin
         index_only_path.write_text(idx_lines_md, encoding="utf-8")
 
     def gen():
-        provider = get_provider(cfg.provider)
-        acc: list[str] = []
         try:
             yield _sse_stage("解析文档", "start", detail=f"chunks={len(used_entries)}")
             yield _sse_stage("解析文档", "end")
@@ -1856,13 +1865,14 @@ def analyze_stream_post(project_id: int, payload: AnalyzeStreamBody) -> Streamin
                 )
                 yield _sse_stage("片段与来源索引", "end")
             yield _sse_stage("思考分析", "start", detail=f"model={cfg.model}")
+            provider = get_provider(cfg.provider)
+            acc: list[str] = []
             for piece in provider.chat_stream(system=system, user=user, config=cfg):
                 acc.append(piece)
                 yield _sse_line({"type": "delta", "text": piece})
             yield _sse_stage("思考分析", "end")
-            full = "".join(acc)
             yield _sse_stage("呈现结果", "start")
-            body = _coerce_model_output_to_markdown(full)
+            body = _coerce_model_output_to_markdown("".join(acc))
             yield _sse_line({"type": "final", "markdown": body})
             yield _sse_stage("呈现结果", "end")
         except LLMError as e:
@@ -1938,8 +1948,6 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
         fragments_index_path.write_text(idx_lines_md, encoding="utf-8")
 
     def gen():
-        provider = get_provider(cfg.provider)
-        acc: list[str] = []
         try:
             yield _sse_stage("解析文档", "start", detail=f"chunks={len(used_entries)}")
             yield _sse_stage("解析文档", "end")
@@ -1954,15 +1962,16 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
                 )
                 yield _sse_stage("片段与来源索引", "end")
             yield _sse_stage("思考分析", "start", detail=f"model={cfg.model}")
+            provider = get_provider(cfg.provider)
+            acc: list[str] = []
             for piece in provider.chat_stream(
                 system=system, user=user, config=cfg, prior_messages=prior_tuples or None
             ):
                 acc.append(piece)
                 yield _sse_line({"type": "delta", "text": piece})
             yield _sse_stage("思考分析", "end")
-            full = "".join(acc)
             yield _sse_stage("呈现结果", "start")
-            body = _coerce_model_output_to_markdown(full)
+            body = _coerce_model_output_to_markdown("".join(acc))
             out_path.write_text(body, encoding="utf-8")
             dbm.insert_analysis_run(
                 conn,
@@ -2067,8 +2076,6 @@ def followup_conversation_stream(project_id: int, conversation_id: int, payload:
     cfg = _build_text_llm_config(conn, timeout_s=300.0)
 
     def gen():
-        provider = get_provider(cfg.provider)
-        acc: list[str] = []
         try:
             if idx_followup_lines.strip():
                 yield _sse_stage("片段与来源索引", "start")
@@ -2081,14 +2088,15 @@ def followup_conversation_stream(project_id: int, conversation_id: int, payload:
                 )
                 yield _sse_stage("片段与来源索引", "end")
             yield _sse_stage("追问", "start", detail=f"model={cfg.model}")
+            provider = get_provider(cfg.provider)
+            acc: list[str] = []
             for piece in provider.chat_stream(
                 system=system, user=user, config=cfg, prior_messages=prior_tuples or None
             ):
                 acc.append(piece)
                 yield _sse_line({"type": "delta", "text": piece})
             yield _sse_stage("追问", "end")
-            full = "".join(acc)
-            body = _coerce_model_output_to_markdown(full)
+            body = _coerce_model_output_to_markdown("".join(acc))
             dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=body)
             yield _sse_line({"type": "final", "markdown": body})
         except LLMError as e:
@@ -2149,6 +2157,7 @@ def download_file(project_id: int, filename: str) -> FileResponse:
     return FileResponse(path=str(target), filename="analysis_export.docx", media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 
-_dist = packaged_dist_dir() or dev_dist_dir(_repo_root)
+# 开发/本机部署：优先使用仓库内 `web/frontend/dist`（npm run build），避免 editable 安装仍沿用 wheel 里旧的 frontend_dist。
+_dist = dev_dist_dir(_repo_root) or packaged_dist_dir()
 if _dist is not None:
     app.mount("/", StaticFiles(directory=str(_dist), html=True), name="frontend")
