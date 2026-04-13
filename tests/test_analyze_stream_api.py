@@ -23,7 +23,7 @@ class _FakeAnalyzeProvider:
         assert "片段" in user and ("hello" in user or "文件" in user)
         del config
         assert prior_messages is None
-        yield '{"title":"T","blocks":[]}'
+        yield "## T\n\nOK\n"
 
 
 def test_analyze_stream_post_rejects_unknown_focus(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -33,15 +33,15 @@ def test_analyze_stream_post_rejects_unknown_focus(monkeypatch: pytest.MonkeyPat
     client = TestClient(app)
     src = tmp_path / "docs_in"
     src.mkdir()
-    create = client.post(
-        "/api/v1/projects",
-        json={"name": f"p-{uuid.uuid4().hex[:8]}", "root_path": str(src)},
-    )
+    create = client.post("/api/v1/projects/ensure", json={"name": f"p-{uuid.uuid4().hex[:8]}", "root_path": str(src)})
     assert create.status_code == 200
-    project_id = create.json()["data"]["id"]
+    project_id = int(create.json()["data"]["id"])
+    conv = client.post(f"/api/v1/projects/{project_id}/conversations", json={"analysis_type": "KA", "title": "T1"})
+    assert conv.status_code == 200
+    conversation_id = int(conv.json()["data"]["id"])
 
     resp = client.post(
-        f"/api/v1/projects/{project_id}/analyze/stream",
+        f"/api/v1/projects/{project_id}/conversations/{conversation_id}/analyze/stream",
         json={"chunk_limit": 40, "focus_points": ["不存在的关注点名称"]},
     )
     assert resp.status_code == 400
@@ -74,15 +74,15 @@ def test_analyze_stream_post_streams_success(monkeypatch: pytest.MonkeyPatch, tm
     client = TestClient(app)
     src = tmp_path / "docs_in"
     src.mkdir()
-    create = client.post(
-        "/api/v1/projects",
-        json={"name": f"p-{uuid.uuid4().hex[:8]}", "root_path": str(src)},
-    )
+    create = client.post("/api/v1/projects/ensure", json={"name": f"p-{uuid.uuid4().hex[:8]}", "root_path": str(src)})
     assert create.status_code == 200
-    project_id = create.json()["data"]["id"]
+    project_id = int(create.json()["data"]["id"])
+    conv = client.post(f"/api/v1/projects/{project_id}/conversations", json={"analysis_type": "KA", "title": "T1"})
+    assert conv.status_code == 200
+    conversation_id = int(conv.json()["data"]["id"])
 
     resp = client.post(
-        f"/api/v1/projects/{project_id}/analyze/stream",
+        f"/api/v1/projects/{project_id}/conversations/{conversation_id}/analyze/stream",
         json={"chunk_limit": 40, "focus_points": ["需求"]},
     )
     assert resp.status_code == 200

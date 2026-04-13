@@ -130,25 +130,6 @@ export type AnalyzeStreamPresetFields = {
   output_requirements?: string | null;
 };
 
-export async function postAnalyzeStream(
-  projectId: number,
-  body: { chunk_limit: number; focus_points: string[] } & AnalyzeStreamPresetFields,
-  onEvent: (ev: Record<string, unknown>) => void,
-  signal?: AbortSignal,
-): Promise<void> {
-  const r = await fetch(`${BASE}/api/v1/projects/${projectId}/analyze/stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  });
-  if (!r.ok) {
-    const j = (await r.json().catch(() => ({}))) as ApiErr;
-    throw new Error(j.message || `HTTP ${r.status}`);
-  }
-  await consumeSseFromResponse(r, onEvent, signal);
-}
-
 export async function getConversationDetail(
   projectId: number,
   conversationId: number,
@@ -216,6 +197,102 @@ export async function postFollowupConversationStream(
     throw new Error(j.message || `HTTP ${r.status}`);
   }
   await consumeSseFromResponse(r, onEvent, signal);
+}
+
+export type ConversationOutputsIndexItem = {
+  id: number;
+  conversation_id: number;
+  kind: string;
+  created_at: string;
+  final_download_path: string;
+  milestones_download_path: string;
+  fragments_index_download_path: string | null;
+};
+
+export async function getConversationOutputsIndex(
+  projectId: number,
+  conversationId: number,
+  limit: number = 50,
+): Promise<{ items: ConversationOutputsIndexItem[] }> {
+  return apiJson(
+    `/api/v1/projects/${projectId}/conversations/${conversationId}/outputs-index?limit=${encodeURIComponent(String(limit))}`,
+  );
+}
+
+export async function getConversationMessages(
+  projectId: number,
+  conversationId: number,
+  limit: number = 200,
+): Promise<{ messages: Array<{ id: number; role: string; content: string; created_at?: string }> }> {
+  return apiJson(
+    `/api/v1/projects/${projectId}/conversations/${conversationId}/messages?limit=${encodeURIComponent(String(limit))}`,
+  );
+}
+
+export async function deleteConversation(
+  projectId: number,
+  conversationId: number,
+): Promise<{ deleted: boolean }> {
+  return apiJson(`/api/v1/projects/${projectId}/conversations/${conversationId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function fetchTextFile(downloadPath: string): Promise<string> {
+  const r = await fetch(`${BASE}${downloadPath}`);
+  if (!r.ok) {
+    throw new Error(`HTTP ${r.status}`);
+  }
+  return await r.text();
+}
+
+export type GlobalConversationItem = {
+  id: number;
+  project_id: number;
+  project_name: string;
+  analysis_type: string;
+  title: string;
+  created_at?: string;
+  updated_at?: string;
+  preset_id?: string | null;
+  project_exists: boolean;
+  project_available: boolean;
+};
+
+export async function getConversationsGlobal(opts?: {
+  limit?: number;
+  offset?: number;
+  q?: string;
+}): Promise<{ conversations: GlobalConversationItem[] }> {
+  const limit = opts?.limit ?? 50;
+  const offset = opts?.offset ?? 0;
+  const q = (opts?.q ?? "").trim();
+  const qs = new URLSearchParams();
+  qs.set("limit", String(limit));
+  qs.set("offset", String(offset));
+  if (q) qs.set("q", q);
+  return apiJson(`/api/v1/conversations?${qs.toString()}`);
+}
+
+export async function getConversationsByPair(
+  projectId: number,
+  presetId: string,
+): Promise<{
+  count: number;
+  conversations: Array<{
+    id: number;
+    project_id: number;
+    analysis_type: string;
+    title: string;
+    created_at?: string;
+    updated_at?: string;
+    preset_id?: string | null;
+  }>;
+}> {
+  const qs = new URLSearchParams();
+  qs.set("project_id", String(projectId));
+  qs.set("preset_id", presetId);
+  return apiJson(`/api/v1/conversations/by-pair?${qs.toString()}`);
 }
 
 export function waitConvertStream(

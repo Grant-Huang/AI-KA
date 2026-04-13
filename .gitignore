@@ -11,6 +11,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+.venv.broken_backup_*/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
@@ -30,6 +31,9 @@ docs/epic-doc/out/
 # macOS metadata
 .DS_Store
 **/.DS_Store
+
+# Cursor / editor logs
+.cursor/
 
 # Local docs source files (not for commit)
 docs/*.docx

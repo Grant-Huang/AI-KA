@@ -272,7 +272,7 @@ V1.3  |  2026-04-12
   - 出参：下载信息（或 bytes 流）
 - `GET/POST /api/v1/settings`
   - 出参/入参（摘要）：含 `focus_points`、`focus_combo_tips`、`focus_presets`（预设含 `review_role`、`review_goals_principles`、`output_requirements`）、`chunk_strategy`、`llm_settings`、`rules_md_error`、`rules_filename` 等（以 OpenAPI/代码为准）。
-- `POST /api/v1/projects/{id}/analyze/stream`（及会话维度同类流式 analyze）
+- `POST /api/v1/projects/{id}/conversations/{conversation_id}/analyze/stream`（流式 analyze）
   - 请求体可选：`review_role`、`review_goals_principles`、`output_requirements`（与所选预设一致时由前端填充）。
 
 ---

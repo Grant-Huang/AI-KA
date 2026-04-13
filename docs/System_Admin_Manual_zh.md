@@ -21,8 +21,14 @@
 | `AIKA_REPO_ROOT` | 仓库根路径。 |
 | `AIKA_RULES_FILENAME` | （可选）活动规则文件名，相对于 `AIKA_REPO_ROOT`，默认 `rules.md`。设为例如 `rules_new2.md` 时，后端只加载该文件作为关注点与「组合使用建议」来源，不自动合并其他规则文件。 |
 | `AIKA_CHUNK_STRATEGY` | `blank` 或 `structured`：**仅**在缺少 Web 写入的 `app_settings.md` 时作为 CLI/脚本的默认分块策略；**Web 用户以设置页保存的 `chunk_strategy` 为准**。 |
-| `AIKA_LLM_*` / `OPENAI_*` | 模型与 Key 的后备（可选；用户可在设置中覆盖）。 |
+| `AIKA_LLM_PROVIDER` | 文本模型 Provider（默认 `openai_compatible`；也可用 `mock` 做离线演示）。 |
+| `AIKA_LLM_BASE_URL` / `OPENAI_BASE_URL` | OpenAI 兼容接口根地址（可选）。 |
+| `AIKA_LLM_API_KEY` / `OPENAI_API_KEY` | API Key（可选；Web 端也可在设置中写入 `app_settings.md` 的 `llm_text_api_key` / `llm_vl_api_key`）。 |
+| `AIKA_LLM_MODEL` | 默认模型名（可选；Web 端优先使用设置）。 |
 | `AIKA_ENABLE_NATIVE_FOLDER_PICKER` / `AIKA_FS_PICKER_LOCALHOST_ONLY` | 本机目录选择行为与安全限制。 |
+| `DOCS2MD_ROOT` | （可选）本地克隆的 `docs2md` 仓库根目录，用于覆盖已安装的 docs2md。 |
+| `DOCS2MD_PYTHON` | （可选）运行 docs2md 子进程所用解释器，默认与后端同解释器（`sys.executable`）。 |
+| `AIKA_PROJECTS_ALLOW_PREFIX` | （可选）限制用户只能注册该前缀下的目录路径。 |
 
 完整列表见根目录 [README.md](../README.md)。
 
@@ -49,7 +55,7 @@
 
 ## 7. 日志与排错
 
-- 使用 Flask/FastAPI/uvicorn 日志配置查看请求与异常。  
+- 使用 FastAPI/uvicorn 日志配置查看请求与异常。  
 - **禁止**在日志中打印 API Key 或原文全文。  
 - 分析接口错误响应可能包含 provider、model、`repo_root` 等**非密钥**上下文，便于定位环境错误。
 

@@ -20,6 +20,7 @@ V1.0  |  2025年Q2
 | 日期         | 说明                                                                                        |
 | ---------- | ----------------------------------------------------------------------------------------- |
 | 2026-04-10 | 增加可配置文档分块策略（空行 / Markdown 结构感知）；审查输出可追溯片段与文件章节行号；Web 流程体验（任务说明、里程碑折叠、完成提示）；运维侧见《系统管理员手册》。 |
+| 2026-04-13 | 文档对齐代码实现：当前 Web 范围聚焦“项目选择/转换/索引/流式审查/追问/导出/规则与模型设置”；更新接口清单（SSE 替代 WebSocket）、技术栈与安全/运维说明。 |
 
 
 # **目录**
@@ -52,6 +53,19 @@ V1.0  |  2025年Q2
 - 架构/接口文档：依赖关系、异常与降级策略、跨系统一致性约束。
 
 该能力边界由 `rules.md` 定义，不与某一行业或交付阶段强绑定。
+
+### **1.2.3  当前实现范围（以代码为准）**
+
+本仓库当前 Web 形态（M0/M1）聚焦“单项目目录 → docs2md 转换 → 索引与分块 → 流式审查输出”的闭环能力，核心包括：
+
+- 项目：选择/注册项目目录（可选本机文件夹选择器）
+- 设置：`chunk_limit`、分块策略（空行 / Markdown 结构感知）、规则（关注点与预设组合）、模型（文本与 VL）
+- 一键流程：转换（docs2md）→ 索引与分块 → 模型流式分析（SSE）
+- 证据追溯：输出中“片段与来源索引”（片段编号、文件、章节、行号范围）
+- 会话：按项目保存会话（conversation）与分析运行记录，支持基于上次结果的追问（SSE）
+- 导出：导出 Markdown；以及将分析映射为 `epic-doc` 配置并生成 docx（仅调用 `epic-doc`，本项目不实现排版引擎）
+
+本《需求与设计文档》早期章节包含较多“产品愿景”模块（知识库、任务队列、向量库、仪表盘等）。若与本节冲突，以本节与代码实现为准；未实现内容应视为后续规划，而非当前可用功能。
 
 ### **1.2.2  规则文件与「组合使用建议」（配置约定，与实现对齐）**
 
@@ -264,7 +278,7 @@ V1.0  |  2025年Q2
 ## **4.1  整体架构概览**
 
 
-| 系统分层架构（从上到下） ┌──────────────────────────────────────────────────┐ │ 前端层 (Web App) │ │ React Tailwind CSS Monaco Editor │ └────────────────┬─────────────────────────────────┘ │ REST API / WebSocket ┌────────────────▼─────────────────────────────────┐ │ 后端服务层 (Backend API Server) │ │ Python FastAPI / Node.js Express │ │ ┌──────────┐ ┌──────────┐ ┌───────────────┐ │ │ │文档处理引擎│ │分析编排器│ │报告生成引擎 │ │ │ └──────────┘ └────┬─────┘ └───────────────┘ │ └───────────────────-─┼────────────────────────────┘ │ ┌─────────────────────▼────────────────────────────┐ │ LLM 网关层 (LLM Gateway) │ │ ┌──────────┐ ┌──────────┐ ┌──────────┐ │ │ │ Claude │ │ Qwen │ │ MiniMax │ ... │ │ └──────────┘ └──────────┘ └──────────┘ │ └──────────────────────────────────────────────────┘ ┌──────────────────────────────────────────────────┐ │ 存储层 │ │ ┌──────────┐ ┌──────────┐ ┌──────────────┐ │ │ │ 文件系统 │ │向量数据库│ │ 关系数据库 │ │ │ │(本地/OSS) │ │(Chroma/ │ │ (SQLite/PG) │ │ │ │ │ │ Qdrant) │ │ │ │ │ └──────────┘ └──────────┘ └──────────────┘ │ └──────────────────────────────────────────────────┘ |
+| 系统分层架构（从上到下） ┌──────────────────────────────────────────────────┐ │ 前端层 (Web App) │ │ React + Ant Design + Vite │ └────────────────┬─────────────────────────────────┘ │ REST API + SSE（流式） ┌────────────────▼─────────────────────────────────┐ │ 后端服务层 (Backend API Server) │ │ Python FastAPI（同进程提供静态前端） │ │ ┌────────────┐ ┌────────────┐ ┌───────────────┐ │ │ │文档转换（docs2md）│ │索引与分块│ │流式审查与会话 │ │ │ └────────────┘ └────┬──────┘ └───────────────┘ │ └───────────────────-─┼────────────────────────────┘ │ ┌─────────────────────▼────────────────────────────┐ │ LLM 适配层（Provider） │ │ OpenAI 兼容接口 / Mock / 其它 Provider │ └──────────────────────────────────────────────────┘ ┌──────────────────────────────────────────────────┐ │ 存储层 │ │ 文件系统（md_out/导出/里程碑日志） + SQLite（索引/会话/运行记录） │ └──────────────────────────────────────────────────┘ |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 
 
@@ -276,10 +290,8 @@ V1.0  |  2025年Q2
 | 层次      | 技术选型                     | 选型理由                             |
 | ------- | ------------------------ | -------------------------------- |
 | 框架      | React 18 TypeScript      | 生态成熟，组件复用性强，TypeScript 保障代码质量    |
-| UI 组件库  | Ant Design 5 / shadcn/ui | 企业级组件，国际化支持完善                    |
-| 样式      | Tailwind CSS             | 快速构建，定制化能力强                      |
-| 文档预览/编辑 | Monaco Editor            | VS Code 同款，支持 Markdown/JSON 语法高亮 |
-| 图表      | ECharts / Recharts       | 支持复杂甘特图、热力图等分析图表                 |
+| UI 组件库  | Ant Design 5             | 企业级组件，交互与表单能力完善                  |
+| 样式      | CSS（配合 Ant Design）       | 以现有 UI 组件为主，少量自定义样式补齐布局          |
 | 桌面端（可选） | Electron / Tauri         | 本地文件系统访问，离线可用                    |
 | 状态管理    | Zustand / Jotai          | 轻量级，适合中等复杂度应用                    |
 | 构建工具    | Vite                     | 极速构建，开发体验优秀                      |
@@ -301,20 +313,17 @@ V1.0  |  2025年Q2
 
 | 组件     | 技术选型                            | 说明                                    |
 | ------ | ------------------------------- | ------------------------------------- |
-| Web 框架 | Python FastAPI                  | 异步支持好，适合 I/O 密集的 LLM 调用；自动 OpenAPI 文档 |
-| 文档解析   | pandoc python-docx pdfminer     | 全格式文档解析，保留文档结构                        |
-| 向量嵌入   | sentence-transformers           | 本地可用，支持中文，可替换为云端 API                  |
-| 向量数据库  | ChromaDB（轻量）/ Qdrant（生产）        | 语义检索知识库                               |
-| 关系数据库  | SQLite（开发）/ PostgreSQL（生产）      | 存储项目元数据、标注、配置                         |
-| 任务队列   | Celery Redis                    | 异步处理文档分析（LLM 调用可能耗时数分钟）               |
-| 文件存储   | 本地文件系统 / MinIO / 阿里云 OSS        | 可配置，支持本地部署和云部署                        |
-| 报告生成   | docx.js (Node.js) 或 python-docx | 生成专业格式的 Word 报告                       |
+| Web 框架 | Python FastAPI                  | 提供 REST API 与 SSE 流式输出；同进程可挂载前端静态资源 |
+| 文档转换   | docs2md                         | 将项目目录下原始文档转换为 Markdown（输出到 md_out）  |
+| 关系数据库  | SQLite                          | 存储项目、索引/分块、会话、分析运行与导出索引             |
+| 文件存储   | 本地文件系统                          | `.tmp`（SQLite/导出/日志）、`md_out`（转换结果） |
+| 报告导出   | epic-doc                         | 本项目只生成配置并调用 epic-doc 输出 docx         |
 
 
 ### **4.3.2  文档处理管道**
 
 
-| 文档处理流程 原始文档 ↓ 格式转换 pandoc → 统一 Markdown ↓ 结构解析 识别章节/标题层级/表格/列表 ↓ 分块切割 按语义边界切分（512-2048 tokens/chunk） ↓ 向量化 调用 Embedding 模型生成向量 ↓ 存储 chunk 存入向量库 元数据存入关系库 ↓ LLM 提取 按维度并行调用 LLM 提取结构化信息 ↓ 结果入库 标注条目存入关系库，关联原文段落 |
+| 文档处理流程（当前实现） 原始文档 ↓ docs2md 转换 → Markdown（md_out） ↓ 索引与分块（空行 / 结构感知）→ chunks（含文件/章节/行号） ↓ LLM 流式审查（SSE）→ Markdown 结论 + 片段与来源索引 ↓ 保存与导出：SQLite 记录会话与运行，文件系统保存输出与索引 |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 
 
@@ -424,40 +433,61 @@ V1.0  |  2025年Q2
 
 ## **7.1  RESTful API 规范**
 
-所有 API 遵循 RESTful 规范，基础路径为 /api/v1，认证方式为 JWT Bearer Token。
+所有 API 基础路径为 `/api/v1`，返回结构统一为：
+
+```json
+{
+  "status": "success|error",
+  "data": {},
+  "message": "optional"
+}
+```
+
+当前实现默认**不启用** JWT 等认证（单机/内网形态）；安全隔离与鉴权属于后续规划，部署侧应通过网络边界/反向代理/访问控制解决。
 
 ## **7.2  核心接口清单**
 
+> 说明：下表为当前代码实现的接口子集（以 `web/backend/main.py` 与 routers 为准）。历史文档中未实现的接口（知识库、任务队列等）不在此列。
 
-| 方法     | 路径                          | 功能        | 说明                         |
-| ------ | --------------------------- | --------- | -------------------------- |
-| GET    | /projects                   | 获取项目列表    | 支持按行业、健康度、创建时间筛选和排序        |
-| POST   | /projects                   | 创建项目      | 传入根目录路径，系统自动扫描文档           |
-| GET    | /projects/{id}              | 获取项目详情    | 含健康度评分、文档统计、最近活动           |
-| POST   | /projects/{id}/sync         | 同步项目文档    | 检测文件变化，增量更新索引              |
-| GET    | /projects/{id}/documents    | 获取文档列表    | 支持按阶段、格式筛选                 |
-| GET    | /documents/{id}             | 获取文档内容    | 返回结构化 Markdown 段落元数据       |
-| POST   | /analysis/jobs              | 创建分析任务    | 指定文档ID列表、分析类型、LLM 配置       |
-| GET    | /analysis/jobs/{id}         | 查询任务状态    | 返回进度（0-100%）和中间结果          |
-| GET    | /analysis/jobs/{id}/results | 获取分析结果    | 返回提取的标注条目列表                |
-| GET    | /projects/{id}/annotations  | 获取标注列表    | 支持按类型、置信度、来源筛选             |
-| POST   | /annotations                | 创建标注      | 手动创建标注                     |
-| PATCH  | /annotations/{id}           | 更新标注      | 修改内容、类型、验证状态               |
-| DELETE | /annotations/{id}           | 删除标注      |                            |
-| POST   | /reports                    | 创建评审报告    | 指定项目、模板、报告标题               |
-| GET    | /reports/{id}               | 获取报告详情    | 含章节结构和内容                   |
-| POST   | /reports/{id}/export        | 导出报告      | 指定格式（docx/pdf/md），返回下载 URL |
-| GET    | /llm/providers              | 获取可用提供商列表 |                            |
-| POST   | /llm/providers/{id}/test    | 测试 LLM 连接 | 返回延迟和可用性                   |
-| GET    | /knowledge/search           | 知识库语义搜索   | 传入 query 和行业标签，返回相关标注      |
+| 方法 | 路径 | 功能 | 说明 |
+| --- | --- | --- | --- |
+| GET | /health | 健康检查 | |
+| GET | /fs/capabilities | 文件夹选择能力 | 返回是否允许本机弹窗选目录 |
+| POST | /fs/pick-directory | 本机弹窗选目录 | 默认仅允许 localhost 调用 |
+| GET | /settings | 获取设置 | 含规则解析结果、活动规则文件路径等调试信息 |
+| POST | /settings | 保存设置 | 写入 `rules.md` 与 `app_settings.md` |
+| GET | /helpme | 获取帮助页 Markdown | 读取 `helpme.md` 或回退 `docs/helpme.md` |
+| POST | /settings/rules-md/validate | 校验 rules 文本 | 仅校验并解析关注点 |
+| POST | /settings/rules-md/import | 导入 rules 文本 | 写入当前活动规则文件 |
+| POST | /settings/rules-md/restore-default-template | 从模板恢复规则 | 将 `default_rules.md` 复制为活动规则文件 |
+| GET | /projects | 项目列表 | |
+| POST | /projects | 创建项目 | `name` + `root_path` |
+| POST | /projects/ensure | 确保项目存在 | 按 `root_path` 复用或创建 |
+| GET | /projects/{project_id} | 项目详情 | 返回 `md_out` 路径等 |
+| PATCH | /projects/{project_id} | 修改项目 | 修改 `root_path` 会清空索引状态 |
+| GET | /projects/{project_id}/conversations | 会话列表 | 返回 `preset_id` 等 |
+| POST | /projects/{project_id}/conversations | 创建会话 | 支持 `preset_id` |
+| GET | /projects/{project_id}/conversations/{conversation_id} | 会话详情 | 返回是否已有分析、最近一次关注点等 |
+| GET | /projects/{project_id}/conversations/preset-history | 预设历史 | 查询某 preset 最近一次有分析输出的会话 |
+| GET | /projects/{project_id}/rules | 项目规则 | 项目级 rules（与 `rules.md` 的关注点不同） |
+| POST | /projects/{project_id}/rules | 保存项目规则 | |
+| GET | /projects/{project_id}/convert-md/stream | 转换流 | SSE：调用 docs2md 输出日志 |
+| POST | /projects/{project_id}/index-md | 索引与分块 | 扫描 `md_out` 入库并按策略分块 |
+| POST | /projects/{project_id}/conversations/{conversation_id}/analyze/stream | 流式审查 | SSE：输出 delta + stage + final 等事件 |
+| POST | /projects/{project_id}/conversations/{conversation_id}/followup/stream | 流式追问 | SSE：基于上次结果与 chunks 追问 |
+| GET | /projects/{project_id}/conversations/{conversation_id}/outputs-index | 输出文件索引 | 列出该会话产生的导出文件 |
+| GET | /files/{project_id}/{filename} | 下载导出文件 | 仅允许 `.md/.txt/.json/.docx` |
+| POST | /projects/{project_id}/export/docx | 导出 docx | 生成 `epic_export.json` 并调用 `epic-doc` 产出 docx |
 
+## **7.3  流式输出（SSE）**
 
-## **7.3  WebSocket 实时接口**
+当前实现使用 **Server-Sent Events（SSE）** 返回流式日志与模型输出（`text/event-stream`），典型事件包括：
 
-分析任务执行期间通过 WebSocket 推送实时进度和流式内容：
+- `stage`：里程碑开始/结束（例如“解析文档”“片段与来源索引”“思考分析”“呈现结果”）
+- `delta`：模型增量输出片段
+- `final`：最终 Markdown 与导出路径信息（如可用）
 
-| WebSocket 消息格式示例 // 订阅分析任务进度 ws://localhost:8000/ws/analysis/{jobid} // 服务端推送格式 {   "type": "progress",        // progress | chunk | error | done   "jobid": "uuid",   "progress": 45,            // 0-100   "message": "正在分析：蓝图生产执行模块.md",   "data": {                  // type=chunk 时包含     "annotation": { ... }    // 新提取的标注条目（流式推送）   } } |
-| :---- |
+前端据此实现：过程流式展示、里程碑折叠/展开、完成提示与导出按钮。
 
 # **第八章  报告生成引擎详设**
 
@@ -508,7 +538,7 @@ V1.0  |  2025年Q2
 ## **9.2  Docker Compose 配置（本地服务器版）**
 
 
-| docker-compose.yml 服务构成 services: frontend: React 静态文件 Nginx 代理 backend: FastAPI 主服务（端口 8000） worker: Celery 异步任务处理器 redis: 任务队列 缓存 postgres: 主数据库 chromadb: 向量数据库 report-gen: Node.js 报告生成服务（端口 3001） 数据卷挂载： ./data/projects:/app/projects 项目文件目录 ./data/postgres:/var/lib/postgresql/data ./data/chromadb:/chroma/chroma |
+| docker-compose.yml（当前仓库推荐形态） 以单容器/单进程提供前后端同源服务为主：backend（FastAPI + 静态前端 dist）。关键挂载：项目目录（供 docs2md 读取）与 `/app/.tmp`（SQLite/导出/里程碑日志）。若要扩展为多服务（队列、向量库等），属于后续规划与二次集成范围。 |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 
 
@@ -517,7 +547,7 @@ V1.0  |  2025年Q2
 - API 密钥加密存储：使用 AES-256 加密，密钥派生自用户密码（PBKDF2）。
 - 项目数据隔离：多用户场景下通过 Row-Level Security 保证数据隔离。
 - LLM 调用审计：记录每次 LLM 调用的输入输出摘要（可配置是否记录完整内容）。
-- 文档内容不上传：向量化时只上传文本片段（chunks），原始文件不离开本地存储。
+- 文档内容不上传：当前实现默认不做向量化；仅在本地将片段（chunks）送入配置的 LLM Provider（可能是云端 API），管理员需按企业合规要求配置 Provider、网络与脱敏策略。
 
 # **第十章  开发路线图**
 
@@ -586,8 +616,8 @@ V1.0  |  2025年Q2
 
 - docx npm 库官方文档：[https://docx.js.org/](https://docx.js.org/)
 - FastAPI 官方文档：[https://fastapi.tiangolo.com/](https://fastapi.tiangolo.com/)
-- ChromaDB 向量数据库：[https://www.trychroma.com/](https://www.trychroma.com/)
-- LangChain 文档处理框架：[https://python.langchain.com/](https://python.langchain.com/)
+- ChromaDB 向量数据库（规划）：[https://www.trychroma.com/](https://www.trychroma.com/)
+- LangChain 文档处理框架（规划）：[https://python.langchain.com/](https://python.langchain.com/)
 - Anthropic Claude API：[https://docs.anthropic.com/](https://docs.anthropic.com/)
 - 阿里云 Qwen API：[https://help.aliyun.com/zh/model-studio/](https://help.aliyun.com/zh/model-studio/)
 - MiniMax API 文档：[https://platform.minimaxi.com/](https://platform.minimaxi.com/)

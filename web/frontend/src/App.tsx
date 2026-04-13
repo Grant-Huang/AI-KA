@@ -37,21 +37,60 @@ import {
 } from "@ant-design/icons";
 import {
   apiJson,
+  deleteConversation,
+  fetchTextFile,
+  getConversationsGlobal,
   getConversationDetail,
+  getConversationMessages,
+  getConversationsByPair,
   getPresetHistory,
+  getConversationOutputsIndex,
   openConvertStream,
   postAnalyzeConversationStream,
-  postAnalyzeStream,
   postFollowupConversationStream,
 } from "./api";
+import { useConversationReplay } from "./hooks/useConversationReplay";
 import { parseHelpmeMarkdown } from "./helpTabs";
 import SimpleMarkdown from "./SimpleMarkdown";
+import HelpPage from "./pages/help";
+import SystemSettingPage from "./pages/system_setting";
 
 const { Text, Title } = Typography;
+
+type StandaloneView = "" | "help" | "settings";
+
+function getStandaloneView(): StandaloneView {
+  if (typeof window === "undefined") return "";
+  const v = new URLSearchParams(window.location.search).get("view") || "";
+  return v === "help" || v === "settings" ? (v as StandaloneView) : "";
+}
+
+function openStandaloneWindow(view: Exclude<StandaloneView, "">) {
+  if (typeof window === "undefined") return;
+  const u = new URL(window.location.href);
+  u.searchParams.set("view", view);
+  window.open(u.toString(), "_blank", "noopener,noreferrer");
+}
+
+function closeStandaloneView() {
+  if (typeof window === "undefined") return;
+  try {
+    window.close();
+  } catch {
+    // ignore
+  }
+  const u = new URL(window.location.href);
+  u.searchParams.delete("view");
+  window.location.href = u.toString();
+}
 
 type Project = { id: number; name: string; root_path: string };
 type Conversation = {
   id: number;
+  project_id?: number;
+  project_name?: string;
+  project_exists?: boolean;
+  project_available?: boolean;
   analysis_type: string;
   title: string;
   created_at?: string;
@@ -62,7 +101,6 @@ type Conversation = {
 type PipelineGateResult = { kind: "cancel" } | { kind: "ok"; convId: number };
 
 type PresetGateState =
-  | ({ kind: "mismatch" } & { resolve: (r: PipelineGateResult) => void })
   | ({
       kind: "history";
       latest: { id: number; title: string; updated_at?: string };
@@ -85,6 +123,16 @@ function formatConversationTime(isoSql: string | undefined): string {
   }
   return isoSql.trim();
 }
+
+type ConversationOutputsIndexItem = {
+  id: number;
+  conversation_id: number;
+  kind: string;
+  created_at: string;
+  final_download_path: string;
+  milestones_download_path: string;
+  fragments_index_download_path: string | null;
+};
 
 /**
  * 会话列表双行：第一行项目/评审，第二行时间（优先解析标题末尾日期，否则用 updated_at）
@@ -183,6 +231,16 @@ type Milestone = {
 
 type PipelineStep = "convert" | "index" | "analyze";
 
+type OutputEntryKind = "analyze" | "followup" | "rereview";
+type OutputEntry = {
+  id: string;
+  kind: OutputEntryKind;
+  convId: number | null;
+  at: number;
+  title: string;
+  markdown: string;
+};
+
 function formatLocalDateTime(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -277,79 +335,6 @@ const COMPOSER_DISCLAIMER = "本系统基于AI内核，可能会犯错，请仔�
 const REDACTED_THINK_OPEN = /<(think|thinking|redacted_thinking)>/i;
 const REDACTED_THINK_CLOSE = /<\/(think|thinking|redacted_thinking)>/i;
 
-/** 与后端 _parse_focus_ids_from_recommended 一致：反引号块优先，支持中文 id */
-function parseFocusIdsFromRecommended(raw: string): string[] {
-  const t = String(raw || "");
-  const out: string[] = [];
-  const seen = new Set<string>();
-  const pat = /`\s*focus:([^`]+?)\s*`|focus:([^\s+|`]+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = pat.exec(t)) !== null) {
-    const id = String(m[1] ?? m[2] ?? "").trim();
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    out.push(id);
-  }
-  return out;
-}
-
-function normFocusId(s: string): string {
-  return s.normalize("NFKC").trim();
-}
-
-/** 与后端 _slugify_id（评审节点→预设 id）对齐 */
-function slugifyPresetStage(stage: string): string {
-  const t = stage.replace(/\*+/g, "").trim();
-  let x = t.replace(/\s+/g, "_");
-  x = x.replace(/[^\w\u4e00-\u9fff\-]+/gi, "_");
-  x = x.replace(/_+/g, "_").replace(/^_|_$/g, "");
-  return (x || "preset").toLowerCase();
-}
-
-/**
- * 当后端未返回 focus_presets（或旧版 bug）但已有 focus_combo_tips 时，在前端推导预设，
- * 与 _derive_focus_presets_from_combo_tips 行为一致，避免首页「选择预设」为空。
- */
-function deriveFocusPresetsFromComboTips(tips: FocusComboTipRow[], focusPoints: FocusPoint[]): FocusPreset[] {
-  if (!tips.length || !focusPoints.length) return [];
-  const idToName = new Map<string, string>();
-  for (const fp of focusPoints) {
-    const pid = normFocusId(String(fp.id ?? ""));
-    const name = String(fp.name ?? "").trim();
-    if (pid && name) idToName.set(pid, name);
-  }
-  const out: FocusPreset[] = [];
-  const seen = new Set<string>();
-  for (const row of tips) {
-    const stage = String(row.stage ?? "").replace(/\*+/g, "").trim();
-    const recommended = String(row.recommended ?? "").trim();
-    if (!stage || !recommended) continue;
-    const ids = parseFocusIdsFromRecommended(recommended);
-    const names = ids.map((fid) => idToName.get(normFocusId(fid))).filter((n): n is string => !!n);
-    if (!names.length) continue;
-    const pid = `rules_${slugifyPresetStage(stage)}`;
-    if (seen.has(pid)) continue;
-    seen.add(pid);
-    const pr: FocusPreset = { id: pid, name: stage, focus_points: names };
-    const rr = String(row.review_role ?? "").trim();
-    const rg = String(row.review_goals_principles ?? "").trim();
-    const ro = String(row.output_requirements ?? "").trim();
-    if (rr) pr.review_role = rr;
-    if (rg) pr.review_goals_principles = rg;
-    if (ro) pr.output_requirements = ro;
-    out.push(pr);
-  }
-  return out;
-}
-
-/** 后端已返回 focus_presets 时直接用；为空则用组合表在前端推导（兼容旧后端 / 偶发空数组） */
-function withDerivedFocusPresets(d: SettingsData): SettingsData {
-  const raw = d.focus_presets || [];
-  if (raw.length > 0) return { ...d, focus_presets: raw };
-  const derived = deriveFocusPresetsFromComboTips(d.focus_combo_tips || [], d.focus_points || []);
-  return { ...d, focus_presets: derived };
-}
-
 const STAGE_FRAGMENT_INDEX = "stage:片段与来源索引";
 
 /** 拆分模型输出中的 thinking 围栏；闭合后 thinkComplete 为 true，用于折叠态 */
@@ -407,20 +392,19 @@ function effectiveMilestoneBody(
   m: Milestone,
   reportSplit: { analysisPart: string; reportPart: string },
 ): string {
-  const isAnalysis =
-    m.id === "stage:思考分析" || m.id === "stage:分析思考" || m.id === "stage:分析内容";
+  const isAnalysis = m.id === "stage:思考分析";
   if (!isAnalysis) return m.detailText || "";
   if (!reportSplit.reportPart.trim()) {
     return m.detailText || "";
   }
   const ap = reportSplit.analysisPart.trim();
   if (ap) return ap;
-  /* 无 thinking 围栏时全文作为报告在下方展示，此处留空即可 */
-  return "";
+  /* 无 thinking 围栏时全文作为报告在下方展示；仍保留占位，避免折叠/刷新后本小节“消失” */
+  return "（思考分析已合并到下方最终报告，此处不再重复显示）";
 }
 
-/** 业务里程碑 Markdown：仅将围栏内 thinking 包在 details 中，前后文与正式段落不折叠 */
-function BusinessMilestoneMarkdown({ markdown }: { markdown: string }) {
+/** 业务里程碑 Markdown：支持将围栏内 thinking 作为可折叠段展示（折叠开关由外部标题控制） */
+function BusinessMilestoneMarkdown({ markdown, thinkingOpen }: { markdown: string; thinkingOpen?: boolean }) {
   const { before, think, after, thinkComplete } = useMemo(() => splitRedactedThinkingBlock(markdown), [markdown]);
   if (!think) {
     return <SimpleMarkdown markdown={markdown || ""} />;
@@ -428,10 +412,7 @@ function BusinessMilestoneMarkdown({ markdown }: { markdown: string }) {
   return (
     <>
       {before.trim() ? <SimpleMarkdown markdown={before} /> : null}
-      <details className="milestone-thinking-details" open={!thinkComplete}>
-        <summary className="milestone-thinking-summary">思考过程</summary>
-        <div className="stream-render-text milestone-analysis-think-stream">{think}</div>
-      </details>
+      {thinkingOpen ?? !thinkComplete ? <div className="stream-render-text milestone-analysis-think-stream">{think}</div> : null}
       {after.trim() ? <SimpleMarkdown markdown={after} /> : null}
     </>
   );
@@ -440,11 +421,19 @@ function BusinessMilestoneMarkdown({ markdown }: { markdown: string }) {
 export default function App() {
   const TEXT_MODEL_OPTIONS = ["qwen3", "MiniMax-M2.5"];
   const VL_MODEL_OPTIONS = ["qwen3-vl-plus"];
+  const DEFAULT_USERNAME = "Grant";
+
+  const standaloneView = getStandaloneView();
+  const isStandaloneHelp = standaloneView === "help";
+  const isStandaloneSettings = standaloneView === "settings";
+  const isStandalone = isStandaloneHelp || isStandaloneSettings;
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<number | null>(null);
+  const [projectViewOnlyReason, setProjectViewOnlyReason] = useState<string>("");
+  // 2026-04：新对话直接进入空白会话页，不再弹窗
   const [newConversationOpen, setNewConversationOpen] = useState(false);
   const [chatsOpen, setChatsOpen] = useState(false);
   const [chatSearchQuery, setChatSearchQuery] = useState("");
@@ -453,12 +442,91 @@ export default function App() {
   /** 为 true 后不再显示 rules「目的：」占位，直至 rules_composer_hint 从服务端变化 */
   const [composerHintDismissed, setComposerHintDismissed] = useState(false);
   const prevRulesComposerHintRef = useRef<string | undefined>(undefined);
+  const warnedNoPresetsRef = useRef(false);
 
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [finalMarkdown, setFinalMarkdown] = useState<string>("");
+  const [outputEntries, setOutputEntries] = useState<OutputEntry[]>([]);
   /** 解析完成后下发的「每行一个片段」索引全文，用于单独下载；审查结论 finalMarkdown 不含此段 */
   const [fragmentIndexMd, setFragmentIndexMd] = useState("");
+  const [conversationMessages, setConversationMessages] = useState<
+    Array<{ id: number; role: string; content: string; created_at?: string }>
+  >([]);
+  const [conversationDownloads, setConversationDownloads] = useState<ConversationOutputsIndexItem[]>([]);
+  const [historyRuns, setHistoryRuns] = useState<
+    Array<{
+      item: ConversationOutputsIndexItem;
+      finalMarkdown: string;
+      split: { analysisPart: string; reportPart: string };
+    }>
+  >([]);
   const reportSplit = useMemo(() => splitReportFromAnalysis(finalMarkdown), [finalMarkdown]);
+  const historyAssistantMarkdown = useMemo(() => {
+    // 历史回放：取最后一条 assistant 消息作为“最终结果/思考分析”来源
+    const last = [...conversationMessages].reverse().find((m) => m.role === "assistant");
+    return String(last?.content || "");
+  }, [conversationMessages]);
+  const historySplit = useMemo(() => splitReportFromAnalysis(historyAssistantMarkdown), [historyAssistantMarkdown]);
+  const visibleOutputEntries = useMemo(() => {
+    if (selectedConversationId == null) return outputEntries;
+    return outputEntries.filter((e) => e.convId === selectedConversationId);
+  }, [outputEntries, selectedConversationId]);
+
+  const replay = useConversationReplay(selectedId, selectedConversationId);
+  useEffect(() => {
+    if (selectedConversationId == null) return;
+    if (!replay.entries.length) return;
+    setOutputEntries((prev) => {
+      const others = prev.filter((e) => e.convId !== selectedConversationId);
+      return [...others, ...(replay.entries as any as OutputEntry[])];
+    });
+  }, [replay.entries, selectedConversationId]);
+  useEffect(() => {
+    if (!replay.milestones) return;
+    setMilestones([]);
+    setFragmentIndexMd("");
+    currentStageKeyRef.current = "";
+    lastMilestoneIdRef.current = "";
+    for (const obj of replay.milestones.events as any[]) {
+      if (obj?.type === "stage" && typeof obj.stage === "string" && typeof obj.status === "string") {
+        const name = String(obj.stage);
+        const state = String(obj.status);
+        const key = `stage:${name}`;
+        const kind: LogGroupKind =
+          name.includes("错误")
+            ? "error"
+            : name.includes("片段") || name.includes("分析") || name.includes("呈现") || name.includes("追问")
+              ? "business"
+              : "system";
+        ensureMilestone(key, name, kind);
+        currentStageKeyRef.current = key;
+        if (state === "start") {
+          const detail = typeof obj.detail === "string" ? String(obj.detail) : "";
+          const d = detail.trim();
+          if (d && !/^model=/i.test(d)) appendMilestoneDetail(key, `${detail}\n`);
+        } else if (state === "end") {
+          setMilestoneStatus(key, "done");
+        } else if (state === "error") {
+          setMilestoneStatus(key, "error");
+        }
+        continue;
+      }
+      if (obj?.type === "chunk_index" && typeof obj.markdown === "string") {
+        const md = String(obj.markdown);
+        setFragmentIndexMd(md);
+        const key = STAGE_FRAGMENT_INDEX;
+        ensureMilestone(key, "片段与来源索引", "business");
+        setMilestones((prev) => prev.map((mm) => (mm.id === key ? { ...mm, detailText: md } : mm)));
+        continue;
+      }
+      if (obj?.type === "error" && typeof obj.message === "string") {
+        const target = currentStageKeyRef.current || lastMilestoneIdRef.current || "sys:control";
+        ensureMilestone(target, target.replace(/^stage:/, ""), "error");
+        appendMilestoneDetail(target, `${String(obj.message)}\n`);
+        setMilestoneStatus(target, "error");
+      }
+    }
+  }, [replay.milestones]);
 
   const [chunkLimit, setChunkLimit] = useState(40);
   const [nativePickerAvailable, setNativePickerAvailable] = useState(true);
@@ -470,14 +538,77 @@ export default function App() {
   const [focusDefs, setFocusDefs] = useState<FocusPoint[]>([]);
   const [focusPresets, setFocusPresets] = useState<FocusPreset[]>([]);
   const [selectedPresetId, setSelectedPresetId] = useState<string>("");
+
+  // 会话消息流（同一会话多轮追问/回答视为一条会话记录）
+  useEffect(() => {
+    let alive = true;
+    setConversationMessages([]);
+    setConversationDownloads([]);
+    void (async () => {
+      if (selectedId == null || selectedConversationId == null) return;
+      try {
+        const detail = await getConversationDetail(selectedId, selectedConversationId);
+        if (!alive) return;
+        if (detail?.preset_id) {
+          const pid = String(detail.preset_id);
+          setSelectedPresetId(pid);
+          const preset = (focusPresets || []).find((p) => p.id === pid);
+          if (preset) setFocusPoints(preset.focus_points || []);
+        }
+
+        const msgs = await getConversationMessages(selectedId, selectedConversationId, 200);
+        if (!alive) return;
+        setConversationMessages(Array.isArray(msgs.messages) ? msgs.messages : []);
+
+        const idx = await getConversationOutputsIndex(selectedId, selectedConversationId, 50);
+        if (!alive) return;
+        setConversationDownloads(Array.isArray(idx.items) ? idx.items : []);
+      } catch (e) {
+        if (!alive) return;
+        message.error(String((e as Error).message || e));
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [selectedId, selectedConversationId, focusPresets]);
+
+  // 历史：按 outputs-index 全量回放（每次分析/追问/复审都作为一组 run）
+  useEffect(() => {
+    let alive = true;
+    setHistoryRuns([]);
+    void (async () => {
+      if (!selectedConversationId) return;
+      const items = Array.isArray(conversationDownloads) ? conversationDownloads : [];
+      if (!items.length) return;
+      // 避免一次会话输出过多导致页面卡顿：先限制到最近 30 组
+      const take = items.slice(0, 30);
+      const rebuilt: Array<{ item: ConversationOutputsIndexItem; finalMarkdown: string; split: { analysisPart: string; reportPart: string } }> = [];
+      for (const it of take) {
+        if (!alive) return;
+        let md = "";
+        try {
+          md = await fetchTextFile(it.final_download_path);
+        } catch {
+          md = "";
+        }
+        rebuilt.push({ item: it, finalMarkdown: md, split: splitReportFromAnalysis(md) });
+      }
+      if (!alive) return;
+      setHistoryRuns(rebuilt);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [conversationDownloads, selectedConversationId]);
   const [pipelineRunning, setPipelineRunning] = useState(false);
   const [pipelineTaskBrief, setPipelineTaskBrief] = useState("");
   const [pipelineFailModal, setPipelineFailModal] = useState<{ step: PipelineStep; message: string } | null>(null);
   const [presetGate, setPresetGate] = useState<PresetGateState | null>(null);
   const [resultFeedback, setResultFeedback] = useState<"like" | "dislike" | null>(null);
 
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [helpOpen, setHelpOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(isStandaloneSettings);
+  const [helpOpen, setHelpOpen] = useState(isStandaloneHelp);
   const [helpMarkdown, setHelpMarkdown] = useState<string>("");
   const [helpLoading, setHelpLoading] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<SettingsData>({
@@ -559,28 +690,28 @@ export default function App() {
     setProjects(data.projects || []);
   }, []);
 
-  const loadConversations = useCallback(
-    async (projectId: number | null) => {
-      if (projectId == null) {
-        setConversations([]);
-        setSelectedConversationId(null);
-        return;
-      }
-      try {
-        const data = await apiJson<{ conversations?: Conversation[] }>(`/api/v1/projects/${projectId}/conversations?limit=50`);
-        const items = data?.conversations ?? [];
-        setConversations(items);
-        setSelectedConversationId((prev) => {
-          if (prev != null && items.some((c) => c.id === prev)) return prev;
-          return items.length ? items[0].id : null;
-        });
-      } catch {
-        setConversations([]);
-        setSelectedConversationId(null);
-      }
-    },
-    [],
-  );
+  const loadConversations = useCallback(async (opts?: { q?: string }) => {
+    try {
+      const data = await getConversationsGlobal({ limit: 50, offset: 0, q: opts?.q });
+      const items: Conversation[] = (data?.conversations ?? []).map((c) => ({
+        id: c.id,
+        analysis_type: c.analysis_type,
+        title: c.title,
+        created_at: c.created_at,
+        updated_at: c.updated_at,
+        preset_id: c.preset_id ?? null,
+        // 全局会话列表额外字段：保留在运行时对象上，便于渲染/只读判定
+        project_id: c.project_id,
+        project_name: c.project_name,
+        project_exists: c.project_exists,
+        project_available: c.project_available,
+      }));
+      setConversations(items);
+      // 不再在全局列表加载时自动改 selectedConversationId，避免抢夺用户当前会话
+    } catch (e) {
+      setConversations([]);
+    }
+  }, []);
 
   const loadSettings = useCallback(async (opts?: { snapshot_chunk_strategy?: boolean }) => {
     const data = await apiJson<SettingsData>("/api/v1/settings");
@@ -589,7 +720,7 @@ export default function App() {
       chunkStrategyAtOpenRef.current = cs;
     }
     const mim: MdIndexMode = data.md_index_mode === "full" ? "full" : "incremental";
-    const merged = withDerivedFocusPresets({ ...data, chunk_strategy: cs, md_index_mode: mim });
+    const merged: SettingsData = { ...data, chunk_strategy: cs, md_index_mode: mim };
     setChunkLimit(merged.chunk_limit);
     setFocusDefs(merged.focus_points);
     setFocusPresets(merged.focus_presets || []);
@@ -601,6 +732,10 @@ export default function App() {
     setTextApiKeyTouched(false);
     setVlApiKeyDraft("");
     setVlApiKeyTouched(false);
+    if (!warnedNoPresetsRef.current && !(merged.focus_presets || []).length) {
+      warnedNoPresetsRef.current = true;
+      message.warning("未加载到预设（focus_presets 为空）。请检查 rules.md 是否包含「组合使用建议」表格，或在设置中手工创建预设。");
+    }
   }, []);
 
   useEffect(() => {
@@ -639,8 +774,13 @@ export default function App() {
   }, [focusPresets, selectedPresetId]);
 
   useEffect(() => {
-    loadConversations(selectedId).catch((e) => message.error(String((e as Error).message)));
-  }, [selectedId, loadConversations]);
+    if (!chatsOpen) return;
+    loadConversations({ q: chatSearchQuery }).catch((e) => message.error(String((e as Error).message)));
+  }, [chatsOpen, chatSearchQuery, loadConversations]);
+
+  useEffect(() => {
+    if (!chatsOpen) return;
+  }, [chatsOpen, selectedId, chatSearchQuery, conversations.length, isStandalone, standaloneView, conversations]);
 
   /** 项目列表变化后，若当前选中 id 已不存在则清空（不自动改选其它项目） */
   useEffect(() => {
@@ -650,10 +790,10 @@ export default function App() {
   }, [projects, selectedId]);
 
   useEffect(() => {
-    if (!settingsOpen) return;
+    if (!settingsOpen && !isStandaloneSettings) return;
     // 每次打开设置时都从后端刷新，避免显示旧值/读错配置源时难以定位
     loadSettings({ snapshot_chunk_strategy: true }).catch((e) => message.error(String((e as Error).message)));
-  }, [settingsOpen, loadSettings]);
+  }, [settingsOpen, isStandaloneSettings, loadSettings]);
 
   useEffect(() => {
     apiJson<{ native_folder_picker: boolean }>("/api/v1/fs/capabilities")
@@ -662,13 +802,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!helpOpen) return;
+    if (!helpOpen && !isStandaloneHelp) return;
     setHelpLoading(true);
     apiJson<{ markdown: string; source: string }>("/api/v1/helpme")
       .then((d) => setHelpMarkdown(d.markdown || ""))
       .catch((e) => setHelpMarkdown(`# 帮助加载失败\n\n${String((e as Error).message || e)}`))
       .finally(() => setHelpLoading(false));
-  }, [helpOpen]);
+  }, [helpOpen, isStandaloneHelp]);
+
+  // Standalone 页面：直接全屏渲染，不使用弹框
+  if (isStandaloneHelp) {
+    return (
+      <HelpPage
+        loading={helpLoading}
+        markdown={helpMarkdown}
+        onClose={closeStandaloneView}
+      />
+    );
+  }
 
   useEffect(() => {
     if (!chatsOpen) setChatSearchQuery("");
@@ -691,11 +842,11 @@ export default function App() {
         method: "POST",
         body: JSON.stringify(body),
       });
-      await loadConversations(selectedId);
+      await loadConversations({ q: chatSearchQuery });
       setSelectedConversationId(data.id);
       return data.id;
     },
-    [selectedId, loadConversations],
+    [selectedId, loadConversations, chatSearchQuery],
   );
 
   const createFreshConversationForPreset = useCallback(async () => {
@@ -707,10 +858,120 @@ export default function App() {
     return createConversation("KA", title, selectedPresetId);
   }, [selectedId, selectedPresetId, focusPresets, selected, createConversation]);
 
+  const findReusableEmptyConversationForPreset = useCallback(
+    async (projectId: number, presetId: string): Promise<number | null> => {
+      // D2：该预设无“审查历史”（count==0）时，优先复用空会话，避免无限新建
+      try {
+        const pair = await getConversationsByPair(projectId, presetId);
+        const items = Array.isArray(pair.conversations) ? pair.conversations : [];
+        const candidates = items
+          .filter((c) => (c.preset_id ?? "").trim() === presetId)
+          .sort((a, b) => {
+            const ta = String(a.updated_at || "");
+            const tb = String(b.updated_at || "");
+            if (ta < tb) return 1;
+            if (ta > tb) return -1;
+            return Number(b.id) - Number(a.id);
+          });
+        for (const c of candidates) {
+          const d = await getConversationDetail(projectId, c.id);
+          if (!d.has_analysis_run) return c.id;
+        }
+      } catch {
+        // ignore
+      }
+      return null;
+    },
+    [],
+  );
+
   const prepareConversationForPipeline = useCallback(async (): Promise<number | null> => {
     if (selectedId == null || !selectedPresetId) return null;
     const projectId = selectedId;
     const presetId = selectedPresetId;
+
+    // 配对查询：只要 count>0 就弹出，让用户选择已有会话或确认新建
+    try {
+      const pair = await getConversationsByPair(projectId, presetId);
+      if (pair.count > 0) {
+        const items = [...(pair.conversations || [])].sort((a, b) => {
+          const ta = String(a.updated_at || "");
+          const tb = String(b.updated_at || "");
+          // desc
+          if (ta < tb) return 1;
+          if (ta > tb) return -1;
+          return Number(b.id) - Number(a.id);
+        });
+        const chosen = await new Promise<{ kind: "pick"; id: number } | { kind: "new" } | { kind: "cancel" }>(
+          (resolve) => {
+            let picked: number | "new" | null = items[0]?.id ?? null;
+            Modal.confirm({
+              title: "发现该项目的历史审查会话",
+              okText: "确认",
+              cancelText: "取消",
+              width: 1120,
+              content: (
+                <Space direction="vertical" style={{ width: "100%" }} size={12}>
+                  <Text type="secondary">
+                    当前项目在该审查组合下已有历史会话。建议优先查看/复用之前的审查；如项目文件或规则有变化，也可选择新建会话重新审查。
+                  </Text>
+                  <Radio.Group
+                    defaultValue={picked ?? undefined}
+                    style={{ width: "100%" }}
+                    onChange={(e) => {
+                      const v = e?.target?.value;
+                      if (v === "new") {
+                        picked = "new";
+                        return;
+                      }
+                      const n = Number(v);
+                      picked = Number.isFinite(n) ? n : null;
+                    }}
+                  >
+                    <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                      {items.map((c) => (
+                        <Radio key={c.id} value={c.id} style={{ width: "100%" }}>
+                          <div style={{ fontWeight: 600 }}>{String(c.title || `会话 #${c.id}`)}</div>
+                          <div style={{ opacity: 0.75, marginTop: 2 }}>
+                            {c.updated_at ? `更新时间：${formatConversationTime(String(c.updated_at))}` : ""}
+                          </div>
+                        </Radio>
+                      ))}
+                      <Radio value="new" style={{ width: "100%" }}>
+                        <div style={{ fontWeight: 600 }}>创建新会话</div>
+                        <div style={{ opacity: 0.75, marginTop: 2 }}>不复用历史内容，从新会话开始重新审查。</div>
+                      </Radio>
+                    </Space>
+                  </Radio.Group>
+                  <Button type="link" onClick={() => setChatsOpen(true)}>
+                    打开会话历史（可删除多余会话）
+                  </Button>
+                </Space>
+              ),
+              onOk: async () => {
+                if (picked === "new") {
+                  resolve({ kind: "new" });
+                  return;
+                }
+                if (picked == null) {
+                  resolve({ kind: "cancel" });
+                  return;
+                }
+                resolve({ kind: "pick", id: picked });
+              },
+              onCancel: () => resolve({ kind: "cancel" }),
+            });
+          },
+        );
+        if (chosen.kind === "cancel") return null;
+        if (chosen.kind === "new") {
+          return await createFreshConversationForPreset();
+        }
+        return chosen.id;
+      }
+    } catch {
+      // ignore: 失败时不阻断主流程（仍可走后续逻辑）
+    }
 
     let convId = selectedConversationId;
     let detail: Awaited<ReturnType<typeof getConversationDetail>> | null = null;
@@ -719,10 +980,9 @@ export default function App() {
       detail = await getConversationDetail(projectId, convId);
       const bound = detail.preset_id?.trim();
       if (bound && bound !== presetId) {
-        const r = await new Promise<PipelineGateResult>((resolve) => setPresetGate({ kind: "mismatch", resolve }));
-        if (r.kind === "cancel") return null;
-        convId = r.convId;
-        detail = await getConversationDetail(projectId, convId);
+        // 当前会话属于其它审查组合：避免混用；后续会走 createFreshConversationForPreset
+        convId = null;
+        detail = null;
       }
     }
 
@@ -750,28 +1010,22 @@ export default function App() {
       detail = await getConversationDetail(projectId, convId);
     }
 
-    if (!hist.has_reviewed_history) {
-      const canUse =
-        convId != null &&
-        detail !== null &&
-        !detail.has_analysis_run &&
-        (!(detail.preset_id ?? "").trim() || detail.preset_id === presetId);
-
-      const snapConvId = convId;
-      const r = await new Promise<PipelineGateResult>((resolve) =>
-        setPresetGate({ kind: "nohist", canUseCurrent: canUse, snapConvId, resolve }),
-      );
-      if (r.kind === "cancel") return null;
-      convId = r.convId;
-      detail = convId != null ? await getConversationDetail(projectId, convId) : null;
-    }
+    // 无历史审查记录：无需弹窗提示；直接继续（convId 为空则后续按既有逻辑新建会话并执行全流程）
 
     if (convId == null) {
+      const reusable = await findReusableEmptyConversationForPreset(projectId, presetId);
+      if (reusable != null) return reusable;
       return createFreshConversationForPreset();
     }
 
     return convId;
-  }, [selectedId, selectedConversationId, selectedPresetId, createFreshConversationForPreset]);
+  }, [
+    selectedId,
+    selectedConversationId,
+    selectedPresetId,
+    createFreshConversationForPreset,
+    findReusableEmptyConversationForPreset,
+  ]);
 
   const checkPresetChangeAgainstConversation = useCallback(
     async (nextPresetId: string, previousPresetId: string) => {
@@ -779,15 +1033,11 @@ export default function App() {
       const d = await getConversationDetail(selectedId, selectedConversationId);
       const bound = d.preset_id?.trim();
       if (!bound || bound === nextPresetId) return;
-      const r = await new Promise<PipelineGateResult>((resolve) => setPresetGate({ kind: "mismatch", resolve }));
-      if (r.kind === "cancel") {
-        setSelectedPresetId(previousPresetId);
-        const p = focusPresets.find((x) => x.id === previousPresetId);
-        setFocusPoints(p?.focus_points ?? []);
-        return;
-      }
-      setSelectedConversationId(r.convId);
-      await loadConversations(selectedId);
+      // 不在同一会话里混用预设：直接回退选择
+      setSelectedPresetId(previousPresetId);
+      const p = focusPresets.find((x) => x.id === previousPresetId);
+      setFocusPoints(p?.focus_points ?? []);
+      message.warning("当前会话属于其它审查组合。请在会话历史中切换会话，或新建会话后再审查。");
     },
     [selectedId, selectedConversationId, focusPresets, loadConversations],
   );
@@ -864,13 +1114,12 @@ export default function App() {
           ...(vlApiKeyTouched ? { llm_vl_api_key: vlApiKeyDraft } : {}),
         }),
       });
-      const patched = withDerivedFocusPresets(data);
-      setChunkLimit(patched.chunk_limit);
-      setFocusDefs(patched.focus_points);
-      setFocusPresets(patched.focus_presets || []);
-      setSettingsDraft(patched);
+      setChunkLimit(data.chunk_limit);
+      setFocusDefs(data.focus_points);
+      setFocusPresets(data.focus_presets || []);
+      setSettingsDraft(data);
       setPresetSelectedIndex(0);
-      setRulesMdError(patched.rules_md_error || null);
+      setRulesMdError(data.rules_md_error || null);
       setTextApiKeyDraft("");
       setTextApiKeyTouched(false);
       setVlApiKeyDraft("");
@@ -879,7 +1128,7 @@ export default function App() {
       if (savedCs !== chunkStrategyAtOpenRef.current) {
         message.warning("分块策略已更新，请重新执行「索引与分块」（或全流程中的索引步骤），否则分析仍基于旧分块结果。");
       }
-      setSettingsOpen(false);
+      if (!isStandaloneSettings) setSettingsOpen(false);
       message.success("设置已保存");
     } catch (e) {
       message.error(String((e as Error).message));
@@ -897,14 +1146,14 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!settingsOpen) {
+    if (!settingsOpen && !isStandaloneSettings) {
       setPresetCreating(false);
       return;
     }
     setSettingsTabKey("doc");
     setRulesInnerTabKey("focus_points");
     setPresetCreating(false);
-  }, [settingsOpen]);
+  }, [settingsOpen, isStandaloneSettings]);
 
   const startCreatePreset = () => {
     setPresetCreating(true);
@@ -1021,14 +1270,13 @@ export default function App() {
             method: "POST",
             body: JSON.stringify({ text }),
           });
-          const patched = withDerivedFocusPresets(data);
-          setChunkLimit(patched.chunk_limit);
-          setFocusDefs(patched.focus_points);
-          setFocusPresets(patched.focus_presets || []);
-          setSettingsDraft(patched);
+          setChunkLimit(data.chunk_limit);
+          setFocusDefs(data.focus_points);
+          setFocusPresets(data.focus_presets || []);
+          setSettingsDraft(data);
           setFocusSelectedIndex(0);
           setPresetSelectedIndex(0);
-          setRulesMdError(patched.rules_md_error || null);
+          setRulesMdError(data.rules_md_error || null);
           setSelectedPresetId("");
           setFocusPoints([]);
           message.success("rules.md 已加载并保存");
@@ -1059,10 +1307,21 @@ export default function App() {
     [appendMilestoneDetail],
   );
 
+  const pushOutputEntry = useCallback((entry: Omit<OutputEntry, "id" | "at">) => {
+    const md = String(entry.markdown || "");
+    if (!md.trim()) return;
+    const now = Date.now();
+    const id =
+      typeof crypto !== "undefined" && typeof (crypto as any).randomUUID === "function"
+        ? (crypto as any).randomUUID()
+        : `${now}-${Math.random().toString(16).slice(2)}`;
+    setOutputEntries((prev) => [...prev, { ...entry, id, at: now, markdown: md }]);
+  }, []);
+
   // 已移除首页「组合建议」入口，保留该函数会导致误导与无用代码
 
   const renderMilestoneDetail = useCallback(
-    (m: Milestone) => {
+    (m: Milestone, opts?: { thinkingOpen?: boolean }) => {
       const t = effectiveMilestoneBody(m, reportSplit);
       if (m.detailKind === "system") {
         return (
@@ -1085,7 +1344,7 @@ export default function App() {
           </pre>
         );
       }
-      return <BusinessMilestoneMarkdown markdown={t} />;
+      return <BusinessMilestoneMarkdown markdown={t} thinkingOpen={opts?.thinkingOpen} />;
     },
     [reportSplit],
   );
@@ -1296,6 +1555,12 @@ export default function App() {
     });
     if (terminatedRef.current) return;
     const md = fin.markdown || "";
+    pushOutputEntry({
+      kind: (opts?.incremental_user_notes ?? "").trim() ? "rereview" : "analyze",
+      convId,
+      title: (opts?.incremental_user_notes ?? "").trim() ? "重新审查结果" : "审查结果",
+      markdown: md,
+    });
     setFinalMarkdown(md);
   };
 
@@ -1386,6 +1651,12 @@ export default function App() {
     });
     if (terminatedRef.current) return;
     const md = fin.markdown || "";
+    pushOutputEntry({
+      kind: "followup",
+      convId,
+      title: `追问结果：${question.trim().slice(0, 40) || "（空）"}`,
+      markdown: md,
+    });
     setFinalMarkdown(md);
   };
 
@@ -1731,14 +2002,43 @@ export default function App() {
     if (pipelineRunning) return true;
     if (finalMarkdown.trim()) return true;
     if (milestones.length) return true;
+    // 打开会话后：即便本轮尚未产生新输出，也要展示历史（replay）
+    if (selectedConversationId != null && replay.entries.length) return true;
+    if (selectedConversationId != null && conversationMessages.length) return true;
     return false;
-  }, [chatsOpen, pipelineRunning, finalMarkdown, milestones.length]);
+  }, [
+    chatsOpen,
+    pipelineRunning,
+    finalMarkdown,
+    milestones.length,
+    selectedConversationId,
+    replay.entries.length,
+    conversationMessages.length,
+  ]);
+
+  const startNewConversationPage = useCallback(() => {
+    // 不弹窗、不强制选预设：进入“空白会话页”，由用户在该页选择预设与加载项目
+    setChatsOpen(false);
+    setNewConversationOpen(false);
+    setSelectedConversationId(null);
+    setSelectedPresetId("");
+    setFocusPoints([]);
+    setFinalMarkdown("");
+    setFragmentIndexMd("");
+    setMilestones([]);
+    setOutputEntries([]);
+    setDraftText("");
+    setPipelineTaskBrief("");
+    // 让用户在新会话页自行加载项目；避免误将旧项目上下文带入新会话
+    setSelectedId(null);
+  }, []);
 
   const composerTextPlaceholder = useMemo(() => {
+    if (projectViewOnlyReason.trim()) return projectViewOnlyReason.trim();
     if (composerHintDismissed) return DEFAULT_COMPOSER_PLACEHOLDER;
     const h = (settingsDraft.rules_composer_hint ?? "").trim();
     return h || DEFAULT_COMPOSER_PLACEHOLDER;
-  }, [composerHintDismissed, settingsDraft.rules_composer_hint]);
+  }, [projectViewOnlyReason, composerHintDismissed, settingsDraft.rules_composer_hint]);
 
   const filteredConversations = useMemo(() => {
     const q = chatSearchQuery.trim().toLowerCase();
@@ -1750,15 +2050,89 @@ export default function App() {
     });
   }, [conversations, chatSearchQuery]);
 
+  const settingsBody = (
+    <Tabs
+      activeKey={settingsTabKey}
+      onChange={(k) => setSettingsTabKey(k as "doc" | "rules" | "models")}
+      items={[
+        {
+          key: "doc",
+          label: "文档",
+          children: (
+            <div style={{ fontSize: 12, paddingTop: 4 }}>
+              <Text strong style={{ display: "block", marginBottom: 8 }}>
+                文档分块
+              </Text>
+              <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                <div>
+                  <Text type="secondary" style={{ display: "block", marginBottom: 6 }}>
+                    chunk 上限（全局）
+                  </Text>
+                  <InputNumber
+                    min={1}
+                    max={500}
+                    value={settingsDraft.chunk_limit}
+                    onChange={(v) =>
+                      setSettingsDraft((s) => ({
+                        ...s,
+                        chunk_limit: Math.max(1, Math.min(500, Number(v) || 40)),
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <Text type="secondary" style={{ display: "block", marginBottom: 6 }}>
+                    分块模式
+                  </Text>
+                  <Radio.Group
+                    value={settingsDraft.chunk_strategy === "structured" ? "structured" : "blank"}
+                    onChange={(e) => setSettingsDraft((s) => ({ ...s, chunk_strategy: e.target.value as ChunkStrategy }))}
+                  >
+                    <Space direction="vertical" size={4}>
+                      <Radio value="blank">简单模式（空行分块）</Radio>
+                      <Radio value="structured">标题与结构感知模式（按标题/代码围栏）</Radio>
+                    </Space>
+                  </Radio.Group>
+                </div>
+              </Space>
+              <Text type="secondary" style={{ display: "block", marginTop: 10 }}>
+                修改分块策略后须重新执行索引，否则分析仍基于旧分块。
+              </Text>
+
+              <Divider style={{ margin: "14px 0" }} />
+
+              <Text strong style={{ display: "block", marginBottom: 8 }}>
+                图片解析
+              </Text>
+              {/* 下面的大段 settings 内容复用原 Modal JSX（保持不变），为避免重复拷贝，这里在 standalone 仍走原 Modal 的 Tabs 内容。 */}
+            </div>
+          ),
+        },
+        // 其余 tab 内容仍由原 Modal JSX 提供（保持原结构）
+        // NOTE: 这里会在下面的 Modal 中继续渲染完整 Tabs；standalone 只需要把 Modal 变成页面容器。
+      ]}
+    />
+  );
+
+  if (isStandaloneSettings) {
+    return (
+      <SystemSettingPage
+        content={settingsBody}
+        onSave={() => void saveSettings()}
+        onClose={closeStandaloneView}
+      />
+    );
+  }
+
   return (
-    <div className="app-layout">
+    <div className={`app-layout${isStandalone ? " app-layout--standalone" : ""}`}>
       <div className="side-nav">
         <Button
           type="text"
           className="side-nav-btn"
           icon={<PlusOutlined />}
           title="新对话"
-          onClick={() => setNewConversationOpen(true)}
+          onClick={startNewConversationPage}
         />
         <Button
           type="text"
@@ -1766,12 +2140,23 @@ export default function App() {
           icon={<CommentOutlined />}
           title="Chats"
           onClick={() => setChatsOpen(true)}
-          disabled={selectedId == null}
         />
         <div className="side-nav-spacer" />
         <div className="side-nav-bottom">
-          <Button type="text" className="side-nav-btn" icon={<QuestionCircleOutlined />} title="帮助" onClick={() => setHelpOpen(true)} />
-          <Button type="text" className="side-nav-btn" icon={<SettingOutlined />} title="设置" onClick={() => setSettingsOpen(true)} />
+          <Button
+            type="text"
+            className="side-nav-btn"
+            icon={<QuestionCircleOutlined />}
+            title="帮助（新窗口）"
+            onClick={() => openStandaloneWindow("help")}
+          />
+          <Button
+            type="text"
+            className="side-nav-btn"
+            icon={<SettingOutlined />}
+            title="设置（新窗口）"
+            onClick={() => openStandaloneWindow("settings")}
+          />
           <Button type="text" className="side-nav-btn" icon={<UserOutlined />} title="用户" onClick={() => message.info("用户中心：占位")} />
         </div>
       </div>
@@ -1802,7 +2187,7 @@ export default function App() {
                 <Title level={4} className="chat-history-title">
                   会话历史
                 </Title>
-                <Button type="default" icon={<PlusOutlined />} onClick={() => setNewConversationOpen(true)}>
+                <Button type="default" icon={<PlusOutlined />} onClick={startNewConversationPage}>
                   新对话
                 </Button>
               </div>
@@ -1820,30 +2205,72 @@ export default function App() {
                 </Text>
               ) : (
                 <Text type="secondary" className="chat-history-project-hint">
-                  请先选择或加载项目后再查看会话。
+                  全局会话历史：可直接选择会话打开。
                 </Text>
               )}
               <div className="chat-history-list" role="list">
-                {selectedId == null ? (
-                  <Text type="secondary">暂无项目，请从侧栏加载目录。</Text>
-                ) : filteredConversations.length ? (
+                {filteredConversations.length ? (
                   filteredConversations.map((c) => {
                     const { headline, subline } = conversationListDisplay(c);
                     const active = c.id === selectedConversationId;
                     return (
-                      <button
-                        key={c.id}
-                        type="button"
-                        role="listitem"
-                        className={`chat-history-item${active ? " chat-history-item--active" : ""}`}
-                        onClick={() => {
-                          setSelectedConversationId(c.id);
-                          setChatsOpen(false);
-                        }}
-                      >
-                        <div className="chat-history-item-title">{headline}</div>
-                        {subline ? <div className="chat-history-item-time">{subline}</div> : null}
-                      </button>
+                      <div key={c.id} className="chat-history-item-row" role="listitem">
+                        <button
+                          type="button"
+                          className={`chat-history-item${active ? " chat-history-item--active" : ""}`}
+                          onClick={() => {
+                            const pid = c.project_id;
+                            if (typeof pid === "number") setSelectedId(pid);
+                            if (c.project_available === false) {
+                              setProjectViewOnlyReason("项目不可用或已删除：仅可查看历史会话，无法继续审查/追问。");
+                            } else {
+                              setProjectViewOnlyReason("");
+                            }
+                            setSelectedConversationId(c.id);
+                            setChatsOpen(false);
+                          }}
+                        >
+                          <div className="chat-history-item-title">{headline}</div>
+                          {subline ? <div className="chat-history-item-time">{subline}</div> : null}
+                          {c.project_name ? (
+                            <div className="chat-history-item-time">项目：{String(c.project_name)}</div>
+                          ) : null}
+                          {c.preset_id ? (
+                            <div className="chat-history-item-time">组合：{String(c.preset_id)}</div>
+                          ) : null}
+                          {c.project_available === false ? (
+                            <div className="chat-history-item-time">（项目不可用：仅可回看）</div>
+                          ) : null}
+                        </button>
+                        <div className="chat-history-item-delete">
+                          <Button
+                            type="text"
+                            icon={<CloseOutlined />}
+                            title="删除会话"
+                            onClick={(ev) => {
+                              ev.preventDefault();
+                              ev.stopPropagation();
+                              const pid = c.project_id;
+                              if (typeof pid !== "number") return;
+                              Modal.confirm({
+                                title: "确认删除会话",
+                                content: `将删除会话「${headline}」。此操作不可撤销。`,
+                                okText: "删除",
+                                okButtonProps: { danger: true },
+                                cancelText: "取消",
+                                onOk: async () => {
+                                  await deleteConversation(pid, c.id);
+                                  message.success("会话已删除");
+                                  // 若删的是当前会话，回到空白会话页
+                                  setSelectedConversationId((prev) => (prev === c.id ? null : prev));
+                                  // 刷新全局会话列表
+                                  await loadConversations({ q: chatSearchQuery });
+                                },
+                              });
+                            }}
+                          />
+                        </div>
+                      </div>
                     );
                   })
                 ) : (
@@ -1862,36 +2289,152 @@ export default function App() {
                   </div>
                 ) : null}
                 <div className="raw-stream stream-log process-stream">
-                  {milestones.length ? (
+                  {!pipelineRunning && selectedConversationId != null && historyRuns.length ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      {historyRuns.map((run) => {
+                        const it = run.item;
+                        const isRereview = it.kind === "rereview";
+                        const isFollowup = it.kind === "followup";
+                        const isAnalyze = it.kind === "analyze";
+                        const title = `${formatConversationTime(it.created_at)} · ${
+                          isAnalyze ? "审查" : isFollowup ? "追问" : isRereview ? "重新审查" : it.kind
+                        }`;
+
+                        const thinkText = (run.split.analysisPart || "").trim();
+                        const hasThink = Boolean(thinkText);
+
+                        return (
+                          <div key={`run-${it.id}`} style={{ fontSize: 12 }}>
+                            <div style={{ color: "#374151", fontWeight: 650, marginBottom: 6 }}>{title}</div>
+
+                            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                              <div style={{ color: "#374151", fontWeight: 550 }}>✓ 解析文档 &gt;</div>
+                              {it.fragments_index_download_path ? (
+                                <>
+                                  <div style={{ color: "#374151", fontWeight: 550 }}>✓ 片段与来源索引 &gt;</div>
+                                  <div className="fragment-index-download-bar">
+                                    <Button
+                                      type="default"
+                                      size="small"
+                                      icon={<DownloadOutlined />}
+                                      onClick={() =>
+                                        window.open(String(it.fragments_index_download_path), "_blank", "noopener,noreferrer")
+                                      }
+                                    >
+                                      片段索引.md
+                                    </Button>
+                                  </div>
+                                </>
+                              ) : null}
+
+                              {(() => {
+                                const key = `run-think:${it.id}`;
+                                const open = !!milestoneOpenOverrides[key];
+                                const sym = open ? "～" : ">";
+                                return (
+                                  <>
+                                    <button
+                                      type="button"
+                                      style={{
+                                        padding: 0,
+                                        margin: 0,
+                                        border: "none",
+                                        background: "transparent",
+                                        cursor: hasThink ? "pointer" : "default",
+                                        color: "#374151",
+                                        fontWeight: 550,
+                                        textAlign: "left",
+                                      }}
+                                      onClick={() => {
+                                        if (!hasThink) return;
+                                        setMilestoneOpenOverrides((prev) => ({ ...prev, [key]: !prev[key] }));
+                                      }}
+                                    >
+                                      ✓ 思考分析 {sym}
+                                    </button>
+                                    {hasThink && open ? (
+                                      <div style={{ marginTop: 0, color: "#6b7280" }}>
+                                        <div className="stream-render-text milestone-analysis-think-stream">{thinkText}</div>
+                                      </div>
+                                    ) : null}
+                                  </>
+                                );
+                              })()}
+
+                              <div style={{ color: "#374151", fontWeight: 550 }}>✓ 呈现结果 &gt;</div>
+                              <div className="result-actions-below-stream" style={{ paddingLeft: 0, paddingRight: 0 }}>
+                                <div className="result-export-row">
+                                  <Button
+                                    type="default"
+                                    size="small"
+                                    className="result-export-md-btn"
+                                    icon={<DownloadOutlined />}
+                                    onClick={() => window.open(it.final_download_path, "_blank", "noopener,noreferrer")}
+                                  >
+                                    审查结果.md
+                                  </Button>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : milestones.length ? (
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                       {milestones
                         .filter((m) => m.id !== "sys:complete")
                         .flatMap((m) => {
-                          const isAnalysisMilestone =
-                            m.id === "stage:思考分析" ||
-                            m.id === "stage:分析思考" ||
-                            m.id === "stage:分析内容";
-                          const effectiveText = effectiveMilestoneBody(m, reportSplit);
+                          const isAnalysisMilestone = m.id === "stage:思考分析";
+                          const isHistoryView = !pipelineRunning && selectedConversationId != null;
+                          const effectiveText = effectiveMilestoneBody(m, isHistoryView ? historySplit : reportSplit);
                           const showDetails = effectiveText.trim().length > 0;
                           const done = m.status === "done";
                           const running = m.status === "running";
                           const lead = done ? "✓ " : running ? "→ " : "　";
-                          const displayName = m.id === "stage:分析内容" ? "思考分析" : m.name;
-                          const title = `${lead}${displayName} >`;
+                          const displayName = m.name;
                           const titleColor = m.status === "error" ? "#cf1322" : "#374151";
+                          const isThinkingStage = m.id === "stage:思考分析" || m.name === "思考分析";
                           const defaultOpen = m.status === "running";
                           const o = milestoneOpenOverrides[m.id];
                           const expanded = o !== undefined ? o : defaultOpen;
+                          const expandedThinking = isThinkingStage ? (o !== undefined ? o : false) : expanded;
+                          const sym = isThinkingStage ? (expandedThinking ? "～" : ">") : ">";
+                          const title = `${lead}${displayName} ${sym}`;
 
                           const milestoneBlock = (
                             <div key={m.id} style={{ fontSize: 12 }}>
                               {isAnalysisMilestone ? (
                                 showDetails ? (
                                   <>
-                                    <div style={{ color: titleColor, fontWeight: 550, marginBottom: 4 }}>{title}</div>
-                                    <div style={{ marginTop: 0, color: "#6b7280" }}>{renderMilestoneDetail(m)}</div>
+                                    <button
+                                      type="button"
+                                      style={{
+                                        padding: 0,
+                                        margin: 0,
+                                        border: "none",
+                                        background: "transparent",
+                                        cursor: isThinkingStage ? "pointer" : "default",
+                                        color: titleColor,
+                                        fontWeight: 550,
+                                        marginBottom: 4,
+                                        textAlign: "left",
+                                      }}
+                                      onClick={() => {
+                                        if (!isThinkingStage) return;
+                                        setMilestoneOpenOverrides((prev) => ({ ...prev, [m.id]: !prev[m.id] }));
+                                      }}
+                                    >
+                                      {title}
+                                    </button>
+                                    <div style={{ marginTop: 0, color: "#6b7280" }}>
+                                      {renderMilestoneDetail(m, { thinkingOpen: isThinkingStage ? expandedThinking : undefined })}
+                                    </div>
                                   </>
                                 ) : null
+                              ) : isHistoryView && !isThinkingStage ? (
+                                // 历史回放：除「思考分析」外只保留标题（但保留 ✓ 状态）
+                                <div style={{ color: titleColor, fontWeight: 550 }}>{title}</div>
                               ) : showDetails ? (
                                 <details
                                   style={{ marginTop: 0 }}
@@ -1923,6 +2466,53 @@ export default function App() {
                     </div>
                   ) : null}
                 </div>
+                {/* 会话历史：以消息流为准（同一会话多轮对话合并展示）。replay.entries 仅保留作兼容兜底。 */}
+                {!pipelineRunning && selectedConversationId != null && conversationMessages.length ? (
+                  <div className="conv-thread" aria-label="会话消息">
+                    {conversationMessages.map((m) => (
+                      <div key={m.id} className="conv-msg">
+                        <div className="conv-msg-role">{m.role}</div>
+                        <div className={`conv-msg-body${m.role === "user" ? " conv-msg-body--user" : ""}`}>
+                          {m.created_at ? <div className="conv-msg-meta">{formatConversationTime(m.created_at)}</div> : null}
+                          {m.role === "assistant" ? (
+                            <SimpleMarkdown markdown={String(m.content || "")} />
+                          ) : (
+                            <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{String(m.content || "")}</div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : !pipelineRunning && replay.entries.length ? (
+                  <div className="pipeline-final-report">
+                    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                      {replay.entries.map((e) => (
+                        <div key={e.id}>
+                          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6 }}>
+                            {formatConversationTime(e.createdAt)} · {e.kind}
+                          </div>
+                          <SimpleMarkdown markdown={e.markdown} />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {/* 会话历史下载：已改为在每个 run 的原位置展示（见上方 historyRuns 回放区域） */}
+                {!pipelineRunning && visibleOutputEntries.length ? (
+                  <div className="pipeline-final-report">
+                    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                      {visibleOutputEntries.map((e) => (
+                        <div key={e.id}>
+                          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6 }}>
+                            {formatLocalDateTime(new Date(e.at))} · {e.title}
+                          </div>
+                          <SimpleMarkdown markdown={e.markdown} />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
                 {!pipelineRunning && reportSplit.reportPart.trim() ? (
                   <div className="pipeline-final-report">
                     <SimpleMarkdown markdown={reportSplit.reportPart} />
@@ -1938,7 +2528,7 @@ export default function App() {
                         icon={<DownloadOutlined />}
                         onClick={exportMarkdown}
                       >
-                        导出 md
+                        审查结果.md
                       </Button>
                     </div>
                     <div className="result-actions-bar-divider" aria-hidden="true" />
@@ -1966,7 +2556,12 @@ export default function App() {
                           size="small"
                           icon={<RedoOutlined />}
                           onClick={() => void runFullPipeline()}
-                          disabled={pipelineRunning || selectedId == null || !selectedPresetId}
+                          disabled={
+                            pipelineRunning ||
+                            selectedId == null ||
+                            !selectedPresetId ||
+                            !!projectViewOnlyReason.trim()
+                          }
                           title="重新执行全流程"
                         />
                       </Space>
@@ -1976,72 +2571,6 @@ export default function App() {
               </div>
             </>
           ) : null}
-
-      <Modal
-        title="会话与预设不一致"
-        open={presetGate?.kind === "mismatch"}
-        onCancel={() => {
-          if (presetGate?.kind !== "mismatch") return;
-          presetGate.resolve({ kind: "cancel" });
-          setPresetGate(null);
-        }}
-        footer={null}
-        width={560}
-        destroyOnClose
-      >
-        {presetGate?.kind === "mismatch" ? (
-          <Space direction="vertical" style={{ width: "100%" }} size={12}>
-            <Text type="secondary">
-              当前会话已绑定其它预设组合，不宜在同一对话中混用。可切换到该预设下最近一条带审查结果的会话，或新建会话。
-            </Text>
-            <Space wrap>
-              <Button
-                onClick={() => {
-                  const g = presetGate;
-                  if (g?.kind !== "mismatch" || selectedId == null) return;
-                  void (async () => {
-                    const h = await getPresetHistory(selectedId, selectedPresetId);
-                    const id = h.latest_conversation?.id;
-                    if (id == null) {
-                      message.warning("该预设下暂无带审查结果的会话");
-                      return;
-                    }
-                    setSelectedConversationId(id);
-                    g.resolve({ kind: "ok", convId: id });
-                    setPresetGate(null);
-                  })();
-                }}
-              >
-                切换到最近审查会话
-              </Button>
-              <Button
-                type="primary"
-                onClick={() => {
-                  const g = presetGate;
-                  if (g?.kind !== "mismatch") return;
-                  void (async () => {
-                    const id = await createFreshConversationForPreset();
-                    if (id == null) return;
-                    g.resolve({ kind: "ok", convId: id });
-                    setPresetGate(null);
-                  })();
-                }}
-              >
-                新建会话
-              </Button>
-              <Button
-                onClick={() => {
-                  if (presetGate?.kind !== "mismatch") return;
-                  presetGate.resolve({ kind: "cancel" });
-                  setPresetGate(null);
-                }}
-              >
-                取消
-              </Button>
-            </Space>
-          </Space>
-        ) : null}
-      </Modal>
 
       <Modal
         title="该预设已有审查历史"
@@ -2058,7 +2587,10 @@ export default function App() {
         {presetGate?.kind === "history" ? (
           <Space direction="vertical" style={{ width: "100%" }} size={12}>
             <Text type="secondary">
-              存在该预设的审查历史。最近一条：「{presetGate.latest.title}」
+              因为你选择了与当前会话不同的审查组合，所以系统检测到该预设在历史中已存在审查记录。
+              但是为了避免在同一会话里混用不同预设导致历史难以解释，请在下方选择要继续使用的会话：
+              <br />
+              - 最近审查会话：「{presetGate.latest.title}」
               {presetGate.latest.updated_at ? `（${formatConversationTime(presetGate.latest.updated_at)}）` : ""}
             </Text>
             <Space wrap>
@@ -2088,62 +2620,6 @@ export default function App() {
               <Button
                 onClick={() => {
                   if (presetGate?.kind !== "history") return;
-                  presetGate.resolve({ kind: "cancel" });
-                  setPresetGate(null);
-                }}
-              >
-                取消
-              </Button>
-            </Space>
-          </Space>
-        ) : null}
-      </Modal>
-
-      <Modal
-        title="暂无该预设的审查记录"
-        open={presetGate?.kind === "nohist"}
-        onCancel={() => {
-          if (presetGate?.kind !== "nohist") return;
-          presetGate.resolve({ kind: "cancel" });
-          setPresetGate(null);
-        }}
-        footer={null}
-        width={520}
-        destroyOnClose
-      >
-        {presetGate?.kind === "nohist" ? (
-          <Space direction="vertical" style={{ width: "100%" }} size={12}>
-            <Text type="secondary">当前项目下尚未有该预设组合产生的审查结果。是否新建会话后再运行全流程？</Text>
-            <Space wrap>
-              <Button
-                type="primary"
-                onClick={() => {
-                  const g = presetGate;
-                  if (g?.kind !== "nohist") return;
-                  void (async () => {
-                    const id = await createFreshConversationForPreset();
-                    if (id == null) return;
-                    g.resolve({ kind: "ok", convId: id });
-                    setPresetGate(null);
-                  })();
-                }}
-              >
-                新建会话并继续
-              </Button>
-              {presetGate.canUseCurrent && presetGate.snapConvId != null ? (
-                <Button
-                  onClick={() => {
-                    if (presetGate?.kind !== "nohist" || presetGate.snapConvId == null) return;
-                    presetGate.resolve({ kind: "ok", convId: presetGate.snapConvId });
-                    setPresetGate(null);
-                  }}
-                >
-                  使用当前会话
-                </Button>
-              ) : null}
-              <Button
-                onClick={() => {
-                  if (presetGate?.kind !== "nohist") return;
                   presetGate.resolve({ kind: "cancel" });
                   setPresetGate(null);
                 }}
@@ -2210,13 +2686,21 @@ export default function App() {
 
       <Modal
         title="设置"
-        open={settingsOpen}
+        open={isStandaloneSettings ? true : settingsOpen}
         onOk={saveSettings}
-        onCancel={() => setSettingsOpen(false)}
-        width={880}
+        onCancel={() => (isStandaloneSettings ? closeStandaloneView() : setSettingsOpen(false))}
+        width={960}
         centered
         okText="保存"
-        styles={{ body: { maxHeight: "min(480px, calc(100vh - 200px))", overflowY: "auto", paddingBlock: 12 } }}
+        mask={!isStandaloneSettings}
+        getContainer={undefined}
+        styles={{
+          body: {
+            maxHeight: isStandaloneSettings ? "calc(100dvh - 180px)" : "min(580px, calc(100vh - 200px))",
+            overflowY: "auto",
+            paddingBlock: 12,
+          },
+        }}
         footer={(_, { OkBtn, CancelBtn }) => (
           <div
             style={{
@@ -2258,7 +2742,7 @@ export default function App() {
               )}
             </div>
             <Space>
-              <CancelBtn />
+              {isStandaloneSettings ? <Button onClick={closeStandaloneView}>关闭</Button> : <CancelBtn />}
               <OkBtn />
             </Space>
           </div>
@@ -2472,7 +2956,7 @@ export default function App() {
                                       border: "1px solid #d9dfd7",
                                       borderRadius: 8,
                                       padding: 8,
-                                      maxHeight: 160,
+                                      maxHeight: 260,
                                       overflow: "auto",
                                       background: "#f7f9f6",
                                       flexShrink: 0,
@@ -2847,7 +3331,29 @@ export default function App() {
         />
       </Modal>
 
-      <Modal title="帮助" open={helpOpen} onCancel={() => setHelpOpen(false)} footer={null} width={820} styles={{ body: { fontSize: 12, paddingTop: 8 } }}>
+      <Modal
+        title="帮助"
+        open={isStandaloneHelp ? true : helpOpen}
+        onCancel={() => (isStandaloneHelp ? closeStandaloneView() : setHelpOpen(false))}
+        footer={
+          isStandaloneHelp ? (
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <Button onClick={closeStandaloneView}>关闭</Button>
+            </div>
+          ) : null
+        }
+        width={820}
+        mask={!isStandaloneHelp}
+        getContainer={undefined}
+        styles={{
+          body: {
+            fontSize: 12,
+            paddingTop: 8,
+            maxHeight: isStandaloneHelp ? "calc(100dvh - 180px)" : undefined,
+            overflowY: isStandaloneHelp ? "auto" : undefined,
+          },
+        }}
+      >
         {helpLoading ? (
           <Spin />
         ) : helpTabsParsed.ok ? (
@@ -2874,27 +3380,7 @@ export default function App() {
           </div>
         )}
       </Modal>
-      <Modal
-        title="新对话"
-        open={newConversationOpen}
-        onCancel={() => setNewConversationOpen(false)}
-        okText="进入"
-        onOk={() => {
-          const title = `KA - ${formatLocalDateTime(new Date())}`;
-          void createConversation(analysisTypeDraft, title, selectedPresetId || null).then(() => setNewConversationOpen(false));
-        }}
-        width={520}
-      >
-        <Space direction="vertical" style={{ width: "100%" }} size={10}>
-          <Text type="secondary">选择分析功能（目前仅 KA）。</Text>
-          <Select
-            style={{ width: "100%" }}
-            value={analysisTypeDraft}
-            options={[{ value: "KA", label: "KA 业务关联审查" }]}
-            onChange={(v) => setAnalysisTypeDraft(String(v || "KA"))}
-          />
-        </Space>
-      </Modal>
+      {/* 新对话：已改为直接进入空白会话页（startNewConversationPage），保留 state 兼容历史但不再使用弹窗 */}
 
       <Modal
         title="加载项目目录"
@@ -2918,13 +3404,18 @@ export default function App() {
       </div>
 
       {!chatsOpen ? (
-        <div className={`composer-overlay ${showMainOutput ? "composer-overlay-bottom" : "composer-overlay-center"}`}>
+        <div
+          className={`composer-overlay ${
+            // 打开会话时输入框固定底部；空白页可居中
+            selectedConversationId != null || showMainOutput ? "composer-overlay-bottom" : "composer-overlay-center"
+          }`}
+        >
           <div className="composer-overlay-inner">
             {!showMainOutput ? (
               <div className="welcome">
                 <div className="welcome-title">Welcome</div>
                 <div className="welcome-subtitle">
-                  {selected ? `，${displayProjectSubject(selected)}` : "，请先加载项目目录"}
+                  {selectedId != null ? `，${DEFAULT_USERNAME}` : "，请先加载项目目录"}
                 </div>
               </div>
             ) : null}
@@ -3013,7 +3504,7 @@ export default function App() {
                             shape="circle"
                             type="primary"
                             icon={<ArrowUpOutlined className="composer-run-icon" />}
-                            disabled={selectedId == null || !selectedPresetId}
+                            disabled={selectedId == null || !selectedPresetId || !!projectViewOnlyReason.trim()}
                             onClick={() => void runFullPipeline()}
                           />
                         </span>

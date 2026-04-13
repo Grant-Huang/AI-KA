@@ -112,6 +112,19 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
 
 CREATE INDEX IF NOT EXISTS idx_runs_conversation_created ON analysis_runs(conversation_id, created_at);
 
+CREATE TABLE IF NOT EXISTS conversation_outputs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  final_filename TEXT NOT NULL,
+  milestones_filename TEXT NOT NULL,
+  fragments_index_filename TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_conv_outputs_conversation_created ON conversation_outputs(conversation_id, created_at);
+
 CREATE TABLE IF NOT EXISTS annotations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id INTEGER NOT NULL,
@@ -198,11 +211,24 @@ class ConversationRow:
 
 
 @dataclass(frozen=True)
+class ConversationGlobalRow:
+    id: int
+    project_id: int
+    project_name: str
+    analysis_type: str
+    title: str
+    created_at: str
+    updated_at: str
+    preset_id: str | None = None
+
+
+@dataclass(frozen=True)
 class MessageRow:
     id: int
     conversation_id: int
     role: str
     content: str
+    created_at: str
 
 
 @dataclass(frozen=True)
@@ -215,6 +241,17 @@ class AnalysisRunRow:
     chunk_strategy: str
     used_entries_json: str
     output_markdown_path: str
+
+
+@dataclass(frozen=True)
+class ConversationOutputRow:
+    id: int
+    conversation_id: int
+    kind: str
+    final_filename: str
+    milestones_filename: str
+    fragments_index_filename: str | None
+    created_at: str
 
 
 def connect(db_file: Path) -> sqlite3.Connection:
@@ -680,6 +717,69 @@ def list_conversations(conn: sqlite3.Connection, *, project_id: int, limit: int 
     return [_row_to_conversation(r) for r in rows]
 
 
+def list_conversations_global(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    q: str | None = None,
+) -> list[ConversationGlobalRow]:
+    lim = max(1, min(200, int(limit)))
+    off = max(0, int(offset))
+    query = (q or "").strip().lower()
+    sql = """
+    SELECT c.id, c.project_id, c.analysis_type, c.title, c.created_at, c.updated_at, c.preset_id,
+           p.name AS project_name
+    FROM conversations c
+    JOIN projects p ON p.id = c.project_id
+    """
+    params: list[object] = []
+    if query:
+        sql += " WHERE lower(c.title) LIKE ? OR lower(p.name) LIKE ? "
+        like = f"%{query}%"
+        params.extend([like, like])
+    sql += " ORDER BY c.updated_at DESC, c.id DESC LIMIT ? OFFSET ? "
+    params.extend([lim, off])
+    rows = conn.execute(sql, params).fetchall()
+    out: list[ConversationGlobalRow] = []
+    for r in rows:
+        pj = r["preset_id"] if "preset_id" in r.keys() else None
+        preset_out: str | None = None
+        if pj is not None and str(pj).strip():
+            preset_out = str(pj).strip()
+        out.append(
+            ConversationGlobalRow(
+                id=int(r["id"]),
+                project_id=int(r["project_id"]),
+                project_name=str(r["project_name"]),
+                analysis_type=str(r["analysis_type"]),
+                title=str(r["title"]),
+                created_at=str(r["created_at"]),
+                updated_at=str(r["updated_at"]),
+                preset_id=preset_out,
+            )
+        )
+    return out
+
+
+def list_conversations_by_pair(
+    conn: sqlite3.Connection, *, project_id: int, preset_id: str
+) -> list[ConversationRow]:
+    pid = str(preset_id).strip()
+    if not pid:
+        return []
+    rows = conn.execute(
+        """
+        SELECT id, project_id, analysis_type, title, created_at, updated_at, preset_id
+        FROM conversations
+        WHERE project_id=? AND preset_id=?
+        ORDER BY updated_at DESC, id DESC
+        """,
+        (int(project_id), pid),
+    ).fetchall()
+    return [_row_to_conversation(r) for r in rows]
+
+
 def get_conversation(conn: sqlite3.Connection, conversation_id: int) -> ConversationRow | None:
     r = conn.execute(
         """
@@ -692,6 +792,18 @@ def get_conversation(conn: sqlite3.Connection, conversation_id: int) -> Conversa
     if r is None:
         return None
     return _row_to_conversation(r)
+
+
+def delete_conversation(conn: sqlite3.Connection, *, conversation_id: int) -> bool:
+    """
+    Delete a conversation by id.
+
+    Note: related rows (messages/analysis_runs/conversation_outputs) are deleted by FK ON DELETE CASCADE.
+    Output files on disk are not removed here.
+    """
+    cur = conn.execute("DELETE FROM conversations WHERE id=?", (int(conversation_id),))
+    conn.commit()
+    return bool(cur.rowcount and int(cur.rowcount) > 0)
 
 
 def find_latest_conversation_with_analysis_for_preset(
@@ -738,13 +850,31 @@ def insert_message(
     conn.execute("UPDATE conversations SET updated_at=datetime('now') WHERE id=?", (conversation_id,))
     conn.commit()
     mid = int(cur.lastrowid)
-    return MessageRow(id=mid, conversation_id=conversation_id, role=str(role), content=str(content))
+    r = conn.execute(
+        "SELECT id, conversation_id, role, content, created_at FROM messages WHERE id=?",
+        (mid,),
+    ).fetchone()
+    if r is None:
+        return MessageRow(
+            id=mid,
+            conversation_id=conversation_id,
+            role=str(role),
+            content=str(content),
+            created_at="",
+        )
+    return MessageRow(
+        id=int(r["id"]),
+        conversation_id=int(r["conversation_id"]),
+        role=str(r["role"]),
+        content=str(r["content"]),
+        created_at=str(r["created_at"]),
+    )
 
 
 def list_messages(conn: sqlite3.Connection, *, conversation_id: int, limit: int = 200) -> list[MessageRow]:
     rows = conn.execute(
         """
-        SELECT id, conversation_id, role, content
+        SELECT id, conversation_id, role, content, created_at
         FROM messages
         WHERE conversation_id=?
         ORDER BY id ASC
@@ -758,6 +888,7 @@ def list_messages(conn: sqlite3.Connection, *, conversation_id: int, limit: int 
             conversation_id=int(r["conversation_id"]),
             role=str(r["role"]),
             content=str(r["content"]),
+            created_at=str(r["created_at"]),
         )
         for r in rows
     ]
@@ -858,6 +989,85 @@ def get_latest_analysis_run(conn: sqlite3.Connection, *, conversation_id: int) -
         used_entries_json=str(r["used_entries_json"]),
         output_markdown_path=str(r["output_markdown_path"]),
     )
+
+
+def insert_conversation_output(
+    conn: sqlite3.Connection,
+    *,
+    conversation_id: int,
+    kind: str,
+    final_filename: str,
+    milestones_filename: str,
+    fragments_index_filename: str | None = None,
+) -> ConversationOutputRow:
+    cur = conn.execute(
+        """
+        INSERT INTO conversation_outputs(
+          conversation_id, kind, final_filename, milestones_filename, fragments_index_filename
+        )
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            int(conversation_id),
+            str(kind),
+            str(final_filename),
+            str(milestones_filename),
+            (str(fragments_index_filename) if fragments_index_filename is not None else None),
+        ),
+    )
+    conn.execute("UPDATE conversations SET updated_at=datetime('now') WHERE id=?", (conversation_id,))
+    conn.commit()
+    rid = int(cur.lastrowid)
+    r = conn.execute(
+        """
+        SELECT id, conversation_id, kind, final_filename, milestones_filename, fragments_index_filename, created_at
+        FROM conversation_outputs
+        WHERE id=?
+        """,
+        (rid,),
+    ).fetchone()
+    assert r is not None
+    return ConversationOutputRow(
+        id=int(r["id"]),
+        conversation_id=int(r["conversation_id"]),
+        kind=str(r["kind"]),
+        final_filename=str(r["final_filename"]),
+        milestones_filename=str(r["milestones_filename"]),
+        fragments_index_filename=(
+            str(r["fragments_index_filename"]) if r["fragments_index_filename"] is not None else None
+        ),
+        created_at=str(r["created_at"]),
+    )
+
+
+def list_conversation_outputs(
+    conn: sqlite3.Connection, *, conversation_id: int, limit: int = 50
+) -> list[ConversationOutputRow]:
+    lim = max(1, min(200, int(limit)))
+    rows = conn.execute(
+        """
+        SELECT id, conversation_id, kind, final_filename, milestones_filename, fragments_index_filename, created_at
+        FROM conversation_outputs
+        WHERE conversation_id=?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (int(conversation_id), lim),
+    ).fetchall()
+    return [
+        ConversationOutputRow(
+            id=int(r["id"]),
+            conversation_id=int(r["conversation_id"]),
+            kind=str(r["kind"]),
+            final_filename=str(r["final_filename"]),
+            milestones_filename=str(r["milestones_filename"]),
+            fragments_index_filename=(
+                str(r["fragments_index_filename"]) if r["fragments_index_filename"] is not None else None
+            ),
+            created_at=str(r["created_at"]),
+        )
+        for r in rows
+    ]
 
 
 def list_annotations(conn: sqlite3.Connection, project_id: int, type_: str | None = None) -> list[AnnotationRow]:

@@ -34,6 +34,14 @@ from backend.prompt_builder import (
 )
 from backend.repo_paths import project_export_dir, project_md_out_dir, repository_root
 from backend.response import err, ok
+from backend.routers.conversations import router as conversations_router
+from backend.routers.outputs import router as outputs_router
+from backend.services.outputs_files_service import (
+    append_milestone_event,
+    finalize_milestones_file,
+    init_milestones_file,
+    make_outputs_filenames,
+)
 
 
 def _conn():
@@ -67,6 +75,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(outputs_router)
+app.include_router(conversations_router)
 
 
 @app.middleware("http")
@@ -96,8 +106,6 @@ DEFAULT_CHUNK_STRATEGY = CHUNK_STRATEGY_BLANK
 DEFAULT_TEXT_MODEL = "qwen3"
 DEFAULT_VL_MODEL = "qwen3-vl-plus"
 DEFAULT_TEXT_PROVIDER = "openai_compatible"
-DEFAULT_MINIMAX_TEXT_BASE_URL = "https://api.minimax.io/v1"
-DEFAULT_DASHSCOPE_COMPAT_BASE_URL_CN = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
 @app.get("/api/v1/health")
@@ -910,10 +918,6 @@ def _get_text_base_url() -> str:
     v = raw.get("text_base_url") if isinstance(raw, dict) else None
     if isinstance(v, str) and v.strip():
         return v.strip()
-    # model-aware fallback (avoid confusing "base_url required" errors)
-    model = str((raw.get("text_model") if isinstance(raw, dict) else None) or "").strip()
-    if model.lower().startswith("minimax-"):
-        return DEFAULT_MINIMAX_TEXT_BASE_URL
     return str(get_settings().llm_base_url or "").strip()
 
 
@@ -932,10 +936,6 @@ def _get_vl_base_url() -> str:
     v = raw.get("vl_base_url") if isinstance(raw, dict) else None
     if isinstance(v, str) and v.strip():
         return v.strip()
-    # model-aware fallback for qwen-vl on DashScope openai-compatible endpoint (CN)
-    model = str((raw.get("vl_model") if isinstance(raw, dict) else None) or "").strip()
-    if model.lower() in {"qwen3-vl-plus"}:
-        return DEFAULT_DASHSCOPE_COMPAT_BASE_URL_CN
     return str(get_settings().llm_base_url or "").strip()
 
 
@@ -1464,6 +1464,33 @@ def get_conversation_detail(project_id: int, conversation_id: int) -> JSONRespon
     )
 
 
+@app.get("/api/v1/projects/{project_id}/conversations/{conversation_id}/messages")
+def list_conversation_messages(project_id: int, conversation_id: int, limit: int = 200) -> JSONResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    conv = dbm.get_conversation(conn, conversation_id)
+    if conv is None or conv.project_id != project_id:
+        return JSONResponse(err("conversation not found"), status_code=404)
+    items = dbm.list_messages(conn, conversation_id=conversation_id, limit=int(limit))
+    return JSONResponse(
+        ok(
+            {
+                "messages": [
+                    {
+                        "id": m.id,
+                        "role": m.role,
+                        "content": m.content,
+                        "created_at": m.created_at,
+                    }
+                    for m in items
+                ]
+            }
+        )
+    )
+
+
 @app.post("/api/v1/projects/{project_id}/conversations")
 def create_conversation(project_id: int, payload: CreateConversationBody) -> JSONResponse:
     conn = _conn()
@@ -1492,6 +1519,19 @@ def create_conversation(project_id: int, payload: CreateConversationBody) -> JSO
             }
         )
     )
+
+
+@app.delete("/api/v1/projects/{project_id}/conversations/{conversation_id}")
+def delete_conversation(project_id: int, conversation_id: int) -> JSONResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    conv = dbm.get_conversation(conn, conversation_id)
+    if conv is None or conv.project_id != project_id:
+        return JSONResponse(err("conversation not found"), status_code=404)
+    ok_del = dbm.delete_conversation(conn, conversation_id=conversation_id)
+    return JSONResponse(ok({"deleted": bool(ok_del)}))
 
 
 @app.get("/api/v1/projects/{project_id}/rules")
@@ -1527,37 +1567,9 @@ def _sse_stage(name: str, state: str, *, detail: str | None = None) -> str:
         payload["detail"] = detail
     return _sse_line(payload)
 
-
-def _extract_first_json_object_text(raw: str) -> str | None:
-    s = raw.strip()
-    start = s.find("{")
-    if start < 0:
-        return None
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(start, len(s)):
-        ch = s[i]
-        if in_str:
-            if esc:
-                esc = False
-                continue
-            if ch == "\\":
-                esc = True
-                continue
-            if ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return s[start : i + 1]
-    return None
+def _strip_think_blocks(text: str) -> str:
+    """去除模型输出中的 <think>…</think> 块，避免对外展示或扰动后续处理。"""
+    return re.sub(r"<think>[\s\S]*?</think>", "", (text or ""), flags=re.IGNORECASE).strip()
 
 
 class AnalyzeStreamBody(BaseModel):
@@ -1604,167 +1616,12 @@ def _resolve_focus_definitions_for_subset(conn: Any, focus_names: list[str]) -> 
     return out, None
 
 
-def _normalize_analysis_for_ui(obj: Any) -> dict[str, Any]:
-    if not isinstance(obj, dict):
-        return {"title": "分析", "blocks": [{"type": "paragraph", "text": str(obj)}]}
-    if obj.get("blocks"):
-        return obj
-    anns = obj.get("annotations")
-    if isinstance(anns, list) and anns:
-        items: list[dict[str, Any]] = []
-        for a in anns:
-            if not isinstance(a, dict):
-                continue
-            items.append(
-                {
-                    "title": str(a.get("type") or "item"),
-                    "body": str(a.get("content") or ""),
-                    "tags": [str(a.get("confidence") or "")] if a.get("confidence") else [],
-                }
-            )
-        return {"title": str(obj.get("title") or "分析"), "blocks": [{"type": "cards", "items": items}]}
-    return {"title": str(obj.get("title") or "分析"), "blocks": [{"type": "paragraph", "text": json.dumps(obj, ensure_ascii=False)}]}
-
-
-def _analysis_blocks_to_markdown(analysis: dict[str, Any]) -> str:
-    """
-    Convert the legacy structured blocks format into Markdown for display/export.
-    Keep it resilient: never raise, and never expose raw JSON unless unavoidable.
-    """
-    title = str(analysis.get("title") or "").strip()
-    blocks = analysis.get("blocks") if isinstance(analysis.get("blocks"), list) else []
-
-    out: list[str] = []
-    if title:
-        out.append(f"# {title}\n")
-
-    def add(s: str) -> None:
-        s2 = (s or "").rstrip()
-        if not s2:
-            return
-        out.append(s2 + "\n")
-
-    for b in blocks:
-        if not isinstance(b, dict):
-            add(str(b))
-            continue
-        t = str(b.get("type") or "").lower()
-        if t == "heading":
-            level = int(b.get("level") or 2)
-            level = max(1, min(6, level))
-            add(f"{'#' * level} {str(b.get('text') or '').strip()}")
-            continue
-        if t == "paragraph":
-            add(str(b.get("text") or "").strip())
-            continue
-        if t == "tags":
-            items = b.get("items") if isinstance(b.get("items"), list) else []
-            tags = [str(x) for x in items if str(x).strip()]
-            if tags:
-                add(" ".join(f"`{x}`" for x in tags))
-            continue
-        if t == "table":
-            headers = b.get("headers") if isinstance(b.get("headers"), list) else []
-            rows = b.get("rows") if isinstance(b.get("rows"), list) else []
-            hs = [str(x) for x in headers]
-            if not hs:
-                add(str(b))
-                continue
-            add("| " + " | ".join(hs) + " |")
-            add("| " + " | ".join(["---"] * len(hs)) + " |")
-            for r in rows:
-                if not isinstance(r, list):
-                    continue
-                cells = [str(x) for x in r]
-                # pad / trim
-                if len(cells) < len(hs):
-                    cells += [""] * (len(hs) - len(cells))
-                if len(cells) > len(hs):
-                    cells = cells[: len(hs)]
-                add("| " + " | ".join(cells) + " |")
-            add("")
-            continue
-        if t == "cards":
-            items = b.get("items") if isinstance(b.get("items"), list) else []
-            for it in items:
-                if not isinstance(it, dict):
-                    add(str(it))
-                    continue
-                it_title = str(it.get("title") or "").strip() or "项"
-                add(f"## {it_title}")
-                body = str(it.get("body") or "").strip()
-                if body:
-                    add(body)
-                tags = it.get("tags") if isinstance(it.get("tags"), list) else []
-                tg = [str(x) for x in tags if str(x).strip()]
-                if tg:
-                    add(" ".join(f"`{x}`" for x in tg))
-                add("")
-            continue
-        if t == "tabs":
-            items = b.get("items") if isinstance(b.get("items"), list) else []
-            for it in items:
-                if not isinstance(it, dict):
-                    continue
-                tab = str(it.get("tab") or "").strip() or "Tab"
-                add(f"## {tab}")
-                inner = it.get("blocks") if isinstance(it.get("blocks"), list) else []
-                # recursive (shallow)
-                inner_obj = {"title": "", "blocks": inner}
-                add(_analysis_blocks_to_markdown(inner_obj))
-            continue
-        if t == "callout":
-            c_title = str(b.get("title") or "").strip()
-            c_text = str(b.get("text") or "").strip()
-            header = f"**{c_title}**\n\n" if c_title else ""
-            if c_text:
-                add("> " + (header + c_text).replace("\n", "\n> "))
-                add("")
-            continue
-        # fallback
-        txt = str(b.get("text") or "").strip()
-        if txt:
-            add(txt)
-        else:
-            add(json.dumps(b, ensure_ascii=False))
-
-    md = "\n".join(out).strip() + "\n"
-    return md
-
-
-def _coerce_model_output_to_markdown(full_text: str) -> str:
-    """
-    Best-effort: if output is JSON (legacy structured format), convert to Markdown.
-    Otherwise treat it as Markdown/plain text.
-    """
-    cleaned = (full_text or "").strip()
-    # Always drop <think> before any parsing/normalization so that:
-    # - streamed preamble doesn't leak into final output
-    # - JSON extraction is not disturbed by think blocks
-    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", cleaned, flags=re.IGNORECASE).strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```\s*$", "", cleaned)
-        cleaned = cleaned.strip()
-    # Try parse as JSON object; tolerate leading "reasoning"/preamble text by extracting the first JSON object.
-    obj = None
-    try:
-        obj = json.loads(cleaned)
-    except json.JSONDecodeError:
-        extracted = _extract_first_json_object_text(cleaned)
-        if extracted:
-            try:
-                obj = json.loads(extracted)
-            except json.JSONDecodeError:
-                obj = None
-    if obj is None:
-        # Treat as Markdown/plain text.
-        return cleaned + ("\n" if cleaned and not cleaned.endswith("\n") else "")
-    # Parsed JSON
-    analysis = _normalize_analysis_for_ui(obj)
-    md = _analysis_blocks_to_markdown(analysis)
-    md = re.sub(r"<think>[\s\S]*?</think>", "", md, flags=re.IGNORECASE).strip()
-    return md + ("\n" if md and not md.endswith("\n") else "")
+def _normalize_model_markdown(text: str) -> str:
+    """当前只接受模型输出的 Markdown/纯文本（不再兼容 legacy JSON blocks）。"""
+    cleaned = _strip_think_blocks(text)
+    if cleaned and not cleaned.endswith("\n"):
+        cleaned += "\n"
+    return cleaned
 
 
 @app.get("/api/v1/projects/{project_id}/convert-md/stream")
@@ -1816,74 +1673,6 @@ def index_md(project_id: int) -> JSONResponse:
         full_resync=_get_md_index_mode() == MD_INDEX_MODE_FULL,
     )
     return JSONResponse(ok({"indexed_documents": n}))
-
-
-@app.post("/api/v1/projects/{project_id}/analyze/stream")
-def analyze_stream_post(project_id: int, payload: AnalyzeStreamBody) -> StreamingResponse:
-    conn = _conn()
-    prj = dbm.get_project_by_id(conn, project_id)
-    if prj is None:
-        raise HTTPException(status_code=404, detail="project not found")
-
-    resolved, err = _resolve_focus_definitions_for_subset(conn, payload.focus_points)
-    if err:
-        raise HTTPException(status_code=400, detail=err)
-
-    entries = dbm.list_chunk_entries(conn, project_id=project_id, limit=payload.chunk_limit)
-    if not entries:
-        raise HTTPException(status_code=400, detail="no chunks; run index-md after convert-md")
-
-    cfg = _build_text_llm_config(conn, timeout_s=300.0)
-    system = build_system_prompt(
-        None,
-        focus_definitions=resolved,
-        review_role=payload.review_role,
-        review_goals_principles=payload.review_goals_principles,
-        output_requirements=payload.output_requirements,
-    )
-    user, used_entries = build_user_prompt_from_entries(entries)
-    idx_lines_md = format_chunk_index_lines_markdown(used_entries)
-    exp_dir = project_export_dir(project_id)
-    exp_dir.mkdir(parents=True, exist_ok=True)
-    ts_idx = datetime.now().strftime("%Y%m%d-%H%M%S")
-    index_only_path = exp_dir / f"fragments-index-{ts_idx}.md"
-    if idx_lines_md.strip():
-        index_only_path.write_text(idx_lines_md, encoding="utf-8")
-
-    def gen():
-        try:
-            yield _sse_stage("解析文档", "start", detail=f"chunks={len(used_entries)}")
-            yield _sse_stage("解析文档", "end")
-            if idx_lines_md.strip():
-                yield _sse_stage("片段与来源索引", "start")
-                yield _sse_line(
-                    {
-                        "type": "chunk_index",
-                        "markdown": idx_lines_md,
-                        "index_file_path": str(index_only_path),
-                    }
-                )
-                yield _sse_stage("片段与来源索引", "end")
-            yield _sse_stage("思考分析", "start", detail=f"model={cfg.model}")
-            provider = get_provider(cfg.provider)
-            acc: list[str] = []
-            for piece in provider.chat_stream(system=system, user=user, config=cfg):
-                acc.append(piece)
-                yield _sse_line({"type": "delta", "text": piece})
-            yield _sse_stage("思考分析", "end")
-            yield _sse_stage("呈现结果", "start")
-            body = _coerce_model_output_to_markdown("".join(acc))
-            yield _sse_line({"type": "final", "markdown": body})
-            yield _sse_stage("呈现结果", "end")
-        except LLMError as e:
-            yield _sse_line(
-                {
-                    "type": "error",
-                    "message": f"[text-llm provider={cfg.provider} model={cfg.model} base_url={cfg.base_url or ''} repo_root={str(repository_root())}] {str(e)}",
-                }
-            )
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 def _safe_slug(text: str) -> str:
@@ -1942,25 +1731,50 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
     exp_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     base = _safe_slug(conv.title)
-    out_path = exp_dir / f"{base}-{ts}.md"
-    fragments_index_path = exp_dir / f"{base}-{ts}-fragments-index.md"
-    if idx_lines_md.strip():
+    kind = "rereview" if notes else "analyze"
+    files = make_outputs_filenames(
+        kind=kind,
+        safe_base=base,
+        ts=ts,
+        include_fragments_index=bool(idx_lines_md.strip()),
+    )
+    out_path = exp_dir / files.final_filename
+    milestones_path = exp_dir / files.milestones_filename
+    fragments_index_path = (exp_dir / files.fragments_index_filename) if files.fragments_index_filename else None
+    init_milestones_file(milestones_path)
+    if idx_lines_md.strip() and fragments_index_path is not None:
         fragments_index_path.write_text(idx_lines_md, encoding="utf-8")
 
     def gen():
         try:
+            ev = {"type": "stage", "stage": "解析文档", "status": "start", "detail": f"chunks={len(used_entries)}"}
+            append_milestone_event(milestones_path, ev)
             yield _sse_stage("解析文档", "start", detail=f"chunks={len(used_entries)}")
+            ev = {"type": "stage", "stage": "解析文档", "status": "end"}
+            append_milestone_event(milestones_path, ev)
             yield _sse_stage("解析文档", "end")
             if idx_lines_md.strip():
+                ev = {"type": "stage", "stage": "片段与来源索引", "status": "start"}
+                append_milestone_event(milestones_path, ev)
                 yield _sse_stage("片段与来源索引", "start")
+                payload = {
+                    "type": "chunk_index",
+                    "markdown": idx_lines_md,
+                    "index_file_path": str(fragments_index_path) if fragments_index_path is not None else None,
+                }
+                append_milestone_event(milestones_path, payload)
                 yield _sse_line(
                     {
                         "type": "chunk_index",
                         "markdown": idx_lines_md,
-                        "index_file_path": str(fragments_index_path),
+                        "index_file_path": str(fragments_index_path) if fragments_index_path is not None else None,
                     }
                 )
+                ev = {"type": "stage", "stage": "片段与来源索引", "status": "end"}
+                append_milestone_event(milestones_path, ev)
                 yield _sse_stage("片段与来源索引", "end")
+            ev = {"type": "stage", "stage": "思考分析", "status": "start", "detail": f"model={cfg.model}"}
+            append_milestone_event(milestones_path, ev)
             yield _sse_stage("思考分析", "start", detail=f"model={cfg.model}")
             provider = get_provider(cfg.provider)
             acc: list[str] = []
@@ -1969,9 +1783,13 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
             ):
                 acc.append(piece)
                 yield _sse_line({"type": "delta", "text": piece})
+            ev = {"type": "stage", "stage": "思考分析", "status": "end"}
+            append_milestone_event(milestones_path, ev)
             yield _sse_stage("思考分析", "end")
+            ev = {"type": "stage", "stage": "呈现结果", "status": "start"}
+            append_milestone_event(milestones_path, ev)
             yield _sse_stage("呈现结果", "start")
-            body = _coerce_model_output_to_markdown("".join(acc))
+            body = _normalize_model_markdown("".join(acc))
             out_path.write_text(body, encoding="utf-8")
             dbm.insert_analysis_run(
                 conn,
@@ -1984,22 +1802,53 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
                 output_markdown_path=str(out_path),
             )
             dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=body)
+            dbm.insert_conversation_output(
+                conn,
+                conversation_id=conversation_id,
+                kind=kind,
+                final_filename=files.final_filename,
+                milestones_filename=files.milestones_filename,
+                fragments_index_filename=files.fragments_index_filename,
+            )
+            append_milestone_event(
+                milestones_path,
+                {
+                    "type": "final",
+                    "output_markdown_path": str(out_path),
+                    "output_fragments_index_path": (
+                        str(fragments_index_path) if fragments_index_path is not None else None
+                    ),
+                },
+            )
             yield _sse_line(
                 {
                     "type": "final",
                     "markdown": body,
                     "output_markdown_path": str(out_path),
-                    "output_fragments_index_path": str(fragments_index_path) if idx_lines_md.strip() else None,
+                    "output_fragments_index_path": (
+                        str(fragments_index_path) if fragments_index_path is not None else None
+                    ),
                 }
             )
+            ev = {"type": "stage", "stage": "呈现结果", "status": "end"}
+            append_milestone_event(milestones_path, ev)
             yield _sse_stage("呈现结果", "end")
         except LLMError as e:
+            append_milestone_event(
+                milestones_path,
+                {"type": "error", "message": str(e)},
+            )
             yield _sse_line(
                 {
                     "type": "error",
                     "message": f"[text-llm provider={cfg.provider} model={cfg.model} base_url={cfg.base_url or ''} repo_root={str(repository_root())}] {str(e)}",
                 }
             )
+        finally:
+            try:
+                finalize_milestones_file(milestones_path)
+            except Exception:
+                pass
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -2052,9 +1901,21 @@ def followup_conversation_stream(project_id: int, conversation_id: int, payload:
     exp_fu = project_export_dir(project_id)
     exp_fu.mkdir(parents=True, exist_ok=True)
     ts_fu = datetime.now().strftime("%Y%m%d-%H%M%S")
-    followup_index_path = exp_fu / f"{_safe_slug(conv.title)}-{ts_fu}-followup-fragments-index.md"
-    if idx_followup_lines.strip():
+    base_fu = _safe_slug(conv.title)
+    files_fu = make_outputs_filenames(
+        kind="followup",
+        safe_base=base_fu,
+        ts=ts_fu,
+        include_fragments_index=bool(idx_followup_lines.strip()),
+    )
+    followup_index_path = (
+        (exp_fu / files_fu.fragments_index_filename) if files_fu.fragments_index_filename else None
+    )
+    if idx_followup_lines.strip() and followup_index_path is not None:
         followup_index_path.write_text(idx_followup_lines, encoding="utf-8")
+    out_path = exp_fu / files_fu.final_filename
+    milestones_path = exp_fu / files_fu.milestones_filename
+    init_milestones_file(milestones_path)
     user = (
         "以下是上一轮分析结果（可能已截断）：\n\n"
         + prev_excerpt
@@ -2078,15 +1939,37 @@ def followup_conversation_stream(project_id: int, conversation_id: int, payload:
     def gen():
         try:
             if idx_followup_lines.strip():
+                append_milestone_event(
+                    milestones_path, {"type": "stage", "stage": "片段与来源索引", "status": "start"}
+                )
                 yield _sse_stage("片段与来源索引", "start")
+                append_milestone_event(
+                    milestones_path,
+                    {
+                        "type": "chunk_index",
+                        "markdown": idx_followup_lines,
+                        "index_file_path": (
+                            str(followup_index_path) if followup_index_path is not None else None
+                        ),
+                    },
+                )
                 yield _sse_line(
                     {
                         "type": "chunk_index",
                         "markdown": idx_followup_lines,
-                        "index_file_path": str(followup_index_path),
+                        "index_file_path": (
+                            str(followup_index_path) if followup_index_path is not None else None
+                        ),
                     }
                 )
+                append_milestone_event(
+                    milestones_path, {"type": "stage", "stage": "片段与来源索引", "status": "end"}
+                )
                 yield _sse_stage("片段与来源索引", "end")
+            append_milestone_event(
+                milestones_path,
+                {"type": "stage", "stage": "追问", "status": "start", "detail": f"model={cfg.model}"},
+            )
             yield _sse_stage("追问", "start", detail=f"model={cfg.model}")
             provider = get_provider(cfg.provider)
             acc: list[str] = []
@@ -2095,17 +1978,43 @@ def followup_conversation_stream(project_id: int, conversation_id: int, payload:
             ):
                 acc.append(piece)
                 yield _sse_line({"type": "delta", "text": piece})
+            append_milestone_event(milestones_path, {"type": "stage", "stage": "追问", "status": "end"})
             yield _sse_stage("追问", "end")
-            body = _coerce_model_output_to_markdown("".join(acc))
+            body = _normalize_model_markdown("".join(acc))
+            out_path.write_text(body, encoding="utf-8")
             dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=body)
+            dbm.insert_conversation_output(
+                conn,
+                conversation_id=conversation_id,
+                kind="followup",
+                final_filename=files_fu.final_filename,
+                milestones_filename=files_fu.milestones_filename,
+                fragments_index_filename=files_fu.fragments_index_filename,
+            )
+            append_milestone_event(
+                milestones_path,
+                {
+                    "type": "final",
+                    "output_markdown_path": str(out_path),
+                    "output_fragments_index_path": (
+                        str(followup_index_path) if followup_index_path is not None else None
+                    ),
+                },
+            )
             yield _sse_line({"type": "final", "markdown": body})
         except LLMError as e:
+            append_milestone_event(milestones_path, {"type": "error", "message": str(e)})
             yield _sse_line(
                 {
                     "type": "error",
                     "message": f"[text-llm provider={cfg.provider} model={cfg.model} base_url={cfg.base_url or ''} repo_root={str(repository_root())}] {str(e)}",
                 }
             )
+        finally:
+            try:
+                finalize_milestones_file(milestones_path)
+            except Exception:
+                pass
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -2140,21 +2049,6 @@ def export_docx(project_id: int, payload: dict[str, Any]) -> JSONResponse:
             }
         )
     )
-
-
-@app.get("/api/v1/files/{project_id}/{filename:path}")
-def download_file(project_id: int, filename: str) -> FileResponse:
-    if filename != "analysis_export.docx":
-        raise HTTPException(status_code=404, detail="not found")
-    base = project_export_dir(project_id)
-    target = (base / filename).resolve()
-    try:
-        validate_path_under_dir(target, base)
-    except PathValidationError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    if not target.is_file():
-        raise HTTPException(status_code=404, detail="file not found")
-    return FileResponse(path=str(target), filename="analysis_export.docx", media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 
 # 开发/本机部署：优先使用仓库内 `web/frontend/dist`（npm run build），避免 editable 安装仍沿用 wheel 里旧的 frontend_dist。
