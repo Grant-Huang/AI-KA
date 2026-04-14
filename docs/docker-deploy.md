@@ -28,7 +28,7 @@ curl -s http://localhost:8765/api/v1/health
 |------|------|
 | **环境变量** | 见根目录 `README.md` 中 `AIKA_*`、`OPENAI_*` 等；可在 `docker-compose.yml` 的 `environment` 中追加。 |
 | **`app_settings.md`** | 建议挂载只读或首次复制进数据卷，勿把含 Key 的文件提交到 Git。 |
-| **`rules.md`** | 可挂载 `./rules.md:/app/rules.md`，或使用仓库内 `default_rules.md` 作为模板复制为 `rules.md` 再放入镜像/卷。 |
+| **`default_skills.md`** | 可挂载为 `./default_skills.md:/app/default_skills.md`，供首次初始化默认审查技能包时作为 `review_domain.md` 种子；或直接挂载整个 `./review_skill_packages` 目录。 |
 
 ## 数据持久化
 

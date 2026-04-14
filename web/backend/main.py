@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import unicodedata
+import shutil
 from typing import Any, Iterator
 from pathlib import Path
 
@@ -36,11 +36,32 @@ from backend.repo_paths import project_export_dir, project_md_out_dir, repositor
 from backend.response import err, ok
 from backend.routers.conversations import router as conversations_router
 from backend.routers.outputs import router as outputs_router
+from backend.run_metadata import build_run_metadata, sha256_short
+from backend.memory_recall import iter_memory_candidate_files, memory_root_under_repo, recall_memory_snippets
+from backend.hooks import register_builtin_hooks, run_after_analyze_hooks, run_before_analyze_hooks
+from backend.hooks.registry import list_hook_names
 from backend.services.outputs_files_service import (
     append_milestone_event,
     finalize_milestones_file,
     init_milestones_file,
     make_outputs_filenames,
+)
+from backend.skills import (
+    DEFAULT_PACKAGE_ID,
+    domain_path,
+    ensure_default_skill_package,
+    list_skill_packages,
+    package_version_for_hash,
+    read_manifest,
+    skill_packages_root,
+)
+from backend.skills.review_domain_io import (
+    derive_focus_presets_from_combo_tips,
+    extract_focus_combo_tips_from_domain_text,
+    merge_preset_review_into_derived,
+    read_composer_hint_from_domain_text,
+    read_settings_from_domain_text,
+    write_review_domain_file,
 )
 
 
@@ -78,6 +99,8 @@ app.add_middleware(
 app.include_router(outputs_router)
 app.include_router(conversations_router)
 
+register_builtin_hooks()
+
 
 @app.middleware("http")
 async def _no_cache_spa_entry(request: Request, call_next):
@@ -113,28 +136,98 @@ def health() -> dict[str, Any]:
     return ok({"ok": True})
 
 
-def _active_rules_filename() -> str:
-    """
-    当前唯一使用的规则文件 basename（位于 AIKA_REPO_ROOT 下）。
-    环境变量 AIKA_RULES_FILENAME，默认 rules.md。可改为 rules_new2.md 等；各文件彼此独立，同时只加载其中一个。
-    仅允许 [A-Za-z0-9._-]+.md，禁止路径片段。
-    """
-    raw = (os.environ.get("AIKA_RULES_FILENAME") or "rules.md").strip()
-    if not raw:
-        return "rules.md"
-    if os.path.basename(raw) != raw or ".." in raw:
-        return "rules.md"
-    if not re.fullmatch(r"[A-Za-z0-9._-]+\.md", raw):
-        return "rules.md"
-    return raw
+@app.post("/api/v1/tools/invoke")
+def tools_invoke(payload: dict[str, Any]) -> JSONResponse:
+    """内部 Tool 注册表调用（与 backend.tools.registry 对齐）。"""
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        return JSONResponse(err("name is required"), status_code=400)
+    raw_kw = payload.get("kwargs")
+    kwargs: dict[str, Any] = raw_kw if isinstance(raw_kw, dict) else {}
+    from backend.tools.registry import invoke_tool
+
+    return JSONResponse(ok(invoke_tool(name, **kwargs)))
 
 
-def _rules_md_path() -> Path:
-    return repository_root() / _active_rules_filename()
+@app.get("/api/v1/projects/{project_id}/memory/files")
+def list_project_memory_files(project_id: int) -> JSONResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    root = memory_root_under_repo(repository_root())
+    files = iter_memory_candidate_files(root, project_id)
+    rels = [str(f.relative_to(root)).replace("\\", "/") for f in files]
+    return JSONResponse(ok({"memory_root": str(root), "files": rels}))
 
 
-def _default_rules_md_path() -> Path:
-    return repository_root() / "default_rules.md"
+@app.post("/api/v1/projects/{project_id}/memory/upsert")
+def upsert_project_memory_file(project_id: int, payload: dict[str, Any]) -> JSONResponse:
+    """写入单条记忆文件（相对路径须落在 user|feedback|project/<id>|reference/<id> 下）。"""
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    rel = str(payload.get("path") or "").strip().replace("\\", "/")
+    content = str(payload.get("content") or "")
+    if not rel.endswith(".md"):
+        return JSONResponse(err("path must be a .md file under allowed memory dirs"), status_code=400)
+    root = memory_root_under_repo(repository_root())
+    allowed_prefixes = (
+        "user/",
+        "feedback/",
+        f"project/{project_id}/",
+        f"reference/{project_id}/",
+    )
+    if not any(rel.startswith(p) for p in allowed_prefixes):
+        return JSONResponse(err("path not in allowed memory directories"), status_code=400)
+    dest = (root / rel).resolve()
+    try:
+        dest.relative_to(root.resolve())
+    except ValueError:
+        return JSONResponse(err("invalid path"), status_code=400)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dest.write_text(content, encoding="utf-8")
+    except OSError as e:
+        return JSONResponse(err(str(e)), status_code=500)
+    return JSONResponse(ok({"path": rel, "written": True}))
+
+
+def _get_active_skill_package_id() -> str:
+    """活动审查技能包 id，存于 app_settings.md JSON。"""
+    app_cfg, _ = _read_app_settings_md()
+    if isinstance(app_cfg, dict):
+        v = app_cfg.get("active_skill_package_id")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return DEFAULT_PACKAGE_ID
+
+
+def _active_review_domain_path() -> Path:
+    """当前活动包的 review_domain.md（唯一关注点与组合表来源）。"""
+    rr = repository_root()
+    ensure_default_skill_package(rr)
+    return domain_path(rr, _get_active_skill_package_id())
+
+
+def _review_domain_file_hash_and_name() -> tuple[str, str]:
+    rr = repository_root()
+    ensure_default_skill_package(rr)
+    pid = _get_active_skill_package_id()
+    p = domain_path(rr, pid)
+    if not p.is_file():
+        return "", f"{pid}"
+    try:
+        txt = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "", f"{pid}"
+    ver = package_version_for_hash(rr, pid)
+    return sha256_short(txt + "@" + ver), f"{pid}@{ver}"
+
+
+def _default_skills_template_path() -> Path:
+    return repository_root() / "default_skills.md"
 
 
 def _app_settings_md_path() -> Path:
@@ -242,16 +335,28 @@ def _normalize_md_index_mode(v: Any) -> str:
 
 
 def _write_app_settings_md(payload: dict[str, Any]) -> None:
+    """合并写入 app_settings.md，保留 focus_preset_review_overlay、active_skill_package_id 等扩展键。"""
     p = _app_settings_md_path()
-    obj = {
-        "chunk_limit": int(payload.get("chunk_limit") or DEFAULT_CHUNK_LIMIT),
-        "chunk_strategy": _normalize_chunk_strategy(payload.get("chunk_strategy")),
-        "disable_image_parse": bool(payload.get("disable_image_parse", True)),
-        "md_index_mode": _normalize_md_index_mode(payload.get("md_index_mode")),
-        "llm_settings": payload.get("llm_settings") if isinstance(payload.get("llm_settings"), dict) else {},
-        "llm_text_api_key": str(payload.get("llm_text_api_key") or ""),
-        "llm_vl_api_key": str(payload.get("llm_vl_api_key") or ""),
+    base, _ = _read_app_settings_md()
+    merged: dict[str, Any] = dict(base) if isinstance(base, dict) else {}
+    merged.update(payload)
+    obj: dict[str, Any] = {
+        "chunk_limit": int(merged.get("chunk_limit") or DEFAULT_CHUNK_LIMIT),
+        "chunk_strategy": _normalize_chunk_strategy(merged.get("chunk_strategy")),
+        "disable_image_parse": bool(merged.get("disable_image_parse", True)),
+        "md_index_mode": _normalize_md_index_mode(merged.get("md_index_mode")),
+        "llm_settings": merged.get("llm_settings") if isinstance(merged.get("llm_settings"), dict) else {},
+        "llm_text_api_key": str(merged.get("llm_text_api_key") or ""),
+        "llm_vl_api_key": str(merged.get("llm_vl_api_key") or ""),
     }
+    aid = merged.get("active_skill_package_id")
+    if isinstance(aid, str) and aid.strip():
+        obj["active_skill_package_id"] = aid.strip()
+    else:
+        obj["active_skill_package_id"] = DEFAULT_PACKAGE_ID
+    ovr = merged.get("focus_preset_review_overlay")
+    if isinstance(ovr, list):
+        obj["focus_preset_review_overlay"] = ovr
     text = "# 应用设置\n\n```json\n" + json.dumps(obj, ensure_ascii=False, indent=2) + "\n```\n"
     p.write_text(text, encoding="utf-8")
 
@@ -266,7 +371,11 @@ def _helpme_md_path() -> Path:
 def _build_settings_payload(conn: Any) -> dict[str, Any]:
     derived = _get_focus_presets()
     overlay = _read_focus_preset_review_overlay()
-    merged_presets = _merge_preset_review_into_derived(derived, overlay) if overlay else derived
+    merged_presets = merge_preset_review_into_derived(derived, overlay) if overlay else derived
+    rr = repository_root()
+    ensure_default_skill_package(rr)
+    sp_id = _get_active_skill_package_id()
+    sp_list = list_skill_packages(rr)
     return {
         "focus_points": _get_focus_points(),
         "focus_presets": merged_presets,
@@ -275,308 +384,56 @@ def _build_settings_payload(conn: Any) -> dict[str, Any]:
         "disable_image_parse": _get_disable_image_parse(),
         "md_index_mode": _get_md_index_mode(),
         "llm_settings": _get_llm_settings(),
-        # 便于前端排查「预设不显示」：实际读取的仓库根与 rules 路径、原始组合表行
-        "repo_root": str(repository_root()),
-        "rules_filename": _active_rules_filename(),
-        "rules_md_path": str(_rules_md_path()),
-        "focus_combo_tips": _read_focus_combo_tips_from_rules_md(),
-        "rules_composer_hint": _read_rules_composer_hint_from_rules_md(),
+        "repo_root": str(rr),
+        "active_skill_package_id": sp_id,
+        "skill_packages": sp_list,
+        "skill_packages_root": str(skill_packages_root(rr)),
+        "review_domain_path": str(domain_path(rr, sp_id)),
+        "focus_combo_tips": _read_focus_combo_tips_from_review_domain(),
+        "composer_hint": _read_composer_hint_from_review_domain(),
     }
 
 
-def _read_settings_from_rules_md() -> tuple[dict[str, Any] | None, str | None]:
-    """
-    仅从当前规则文件（AIKA_RULES_FILENAME）读取；不自动读取 default_rules.md。
-    default_rules.md 仅作人工/「恢复默认模板」复制源，见 restore_default_rules_template。
-    """
-    fn = _active_rules_filename()
-    p = _rules_md_path()
+def _read_settings_from_review_domain() -> tuple[dict[str, Any] | None, str | None]:
+    """从当前活动审查技能包的 review_domain.md 读取。"""
+    p = _active_review_domain_path()
+    pid = _get_active_skill_package_id()
     if not p.is_file():
-        return None, f"{fn} 不存在：{p}。可将仓库内 default_rules.md 复制为该文件后编辑，或使用恢复接口。"
+        return (
+            None,
+            f"审查技能包「{pid}」的 review_domain.md 不存在：{p}。请检查 review_skill_packages 目录或使用恢复模板接口。",
+        )
     text = p.read_text(encoding="utf-8", errors="replace")
-    parsed, err = _read_settings_from_rules_text(text)
+    parsed, err = read_settings_from_domain_text(text)
     if parsed and not err:
         return parsed, None
-    return None, f"{fn} 解析失败：{err}"
+    return None, f"review_domain.md（包 {pid}）解析失败：{err}"
 
 
-def _normalize_md_line_for_heading(line: str) -> str:
-    """全角 # 等与 Markdown 标题比对时做 NFKC，避免行首 `＃＃` 无法识别为 ##。"""
-    return unicodedata.normalize("NFKC", (line or "").strip())
-
-
-# 二级节：仅允许「关注点块」节与含「组合使用建议」的组合节。
-_RULES_H2_FOCUS_BLOCK_MARKER = "关注点块"
-_RULES_H2_COMBO_MARKER = "组合使用建议"
-
-# 三级节：仅允许 ### focus:<id> | <名称>
-_RULES_FOCUS_HEADING_LINE_RE = re.compile(
-    r"^###\s+focus:\s*([^\s|]+)\s*\|\s*(.+)$"
-)
-
-
-def _is_allowed_rules_h2_line(line: str) -> bool:
-    s = _normalize_md_line_for_heading(line)
-    m = re.match(r"^##(?!#)\s+(.+)$", s)
-    if not m:
-        return False
-    title = m.group(1).strip()
-    if _RULES_H2_FOCUS_BLOCK_MARKER in title:
-        return True
-    if _RULES_H2_COMBO_MARKER in title:
-        return True
-    return False
-
-
-def _is_focus_block_h2_line(line: str) -> bool:
-    s = _normalize_md_line_for_heading(line)
-    m = re.match(r"^##(?!#)\s+(.+)$", s)
-    if not m:
-        return False
-    return _RULES_H2_FOCUS_BLOCK_MARKER in m.group(1).strip()
-
-
-def _rules_strict_schema_error(text: str) -> str | None:
-    """
-    强校验：二级标题（##）仅允许含「关注点块」的节或含「组合使用建议」的组合节；
-    三级标题（###）仅允许「### focus:<id> | <名称>」；
-    首个「### focus:」之前须已出现含「关注点块」的二级标题（如 ## 关注点块）。
-    """
-    seen_focus_block_h2 = False
-    for line in text.splitlines():
-        s = _normalize_md_line_for_heading(line)
-        if re.match(r"^##(?!#)", s):
-            if not _is_allowed_rules_h2_line(line):
-                return (
-                    "规则文件格式无效：二级标题（##）仅允许「关注点块」节（如 ## 关注点块）"
-                    "或含「组合使用建议」的组合节标题（如 ## 组合使用建议）。"
-                )
-            if _is_focus_block_h2_line(line):
-                seen_focus_block_h2 = True
-            continue
-        if re.match(r"^###\s+", s) and not re.match(r"^####", s):
-            if not _RULES_FOCUS_HEADING_LINE_RE.match(s):
-                return (
-                    "规则文件格式无效：三级标题（###）仅允许「### focus:<id> | <名称>」格式，"
-                    "例如 ### focus:handover | 运维交接与知识转移。"
-                )
-            if not seen_focus_block_h2:
-                return (
-                    "规则文件格式无效：在首个「### focus:…」之前必须有含「关注点块」的二级标题（如 ## 关注点块）。"
-                )
-    return None
-
-
-def _is_combo_suggestions_heading(line: str) -> bool:
-    """识别「组合使用建议」二级标题（标题中须含专用词「组合使用建议」）。"""
-    s = unicodedata.normalize("NFKC", (line or "").strip())
-    m = re.match(r"^##\s+(.+)$", s)
-    if not m:
-        return False
-    title = m.group(1).strip()
-    return _RULES_H2_COMBO_MARKER in title
-
-
-def _is_combo_like_h3_heading(line: str) -> bool:
-    """
-    识别「组合使用建议」类三级标题（### …）。
-    说明：不能用 `"###".startswith("##")` 这类判断混到二级标题逻辑里；否则 `### 组合…` 会被当作普通正文吞进最后一个关注点。
-    """
-    s = unicodedata.normalize("NFKC", (line or "").strip())
-    m = re.match(r"^###\s+(.+)$", s)
-    if not m:
-        return False
-    title = m.group(1).strip()
-    if "组合" not in title:
-        return False
-    return any(x in title for x in ("建议", "预设", "搭配", "使用"))
-
-
-def _normalize_table_line(raw: str) -> str:
-    return raw.strip().replace("｜", "|")
-
-
-def _is_md_table_separator_row(cells: list[str]) -> bool:
-    if len(cells) < 2:
-        return False
-
-    def cell_is_sep(c: str) -> bool:
-        t = c.strip().replace(" ", "")
-        return bool(t) and all(ch in "-:" for ch in t)
-
-    return all(cell_is_sep(c) for c in cells)
-
-
-def _extract_focus_combo_tips_from_rules_text(text: str) -> list[dict[str, str]]:
-    """解析固定五列表：评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求"""
-    lines = text.splitlines()
-    start = -1
-    for i, raw in enumerate(lines):
-        if _is_combo_suggestions_heading(raw) or _is_combo_like_h3_heading(raw):
-            start = i
-    if start < 0:
-        return []
-
-    rows: list[dict[str, str]] = []
-    in_table = False
-    for raw in lines[start + 1 :]:
-        line = _normalize_table_line(raw)
-        if not line:
-            continue
-        if line.startswith("## ") and in_table:
-            break
-        if not line.startswith("|"):
-            if in_table:
-                break
-            continue
-        cells = [x.strip() for x in line.strip("|").split("|")]
-        if len(cells) < 2:
-            continue
-        if _is_md_table_separator_row(cells):
-            in_table = True
-            continue
-        c0, c1 = cells[0], cells[1] if len(cells) > 1 else ""
-        if not in_table and ("评审" in c0 or "阶段" in c0 or "节点" in c0) and ("推荐" in c1 or "关注点" in c1):
-            in_table = True
-            continue
-        if c0 in {"评审节点", "---"} and not in_table:
-            in_table = True
-            continue
-        if c0.startswith("---") and len(c0) <= 5:
-            in_table = True
-            continue
-        in_table = True
-        if len(cells) < 5:
-            continue
-        stage = c0
-        recommended = c1
-        review_role = _combo_cell_decode(cells[2])
-        review_goals_principles = _combo_cell_decode(cells[3])
-        output_requirements = _combo_cell_decode(cells[4])
-        if stage and recommended:
-            rows.append(
-                {
-                    "stage": stage,
-                    "recommended": recommended,
-                    "review_role": review_role,
-                    "review_goals_principles": review_goals_principles,
-                    "output_requirements": output_requirements,
-                }
-            )
-    return rows
-
-
-def _rules_text_aligned_with_focus_parse() -> str | None:
-    """与关注点同源：仅当当前规则文件能成功解析关注点时，才用其全文抽组合表。"""
-    p = _rules_md_path()
+def _domain_text_aligned_with_focus_parse() -> str | None:
+    p = _active_review_domain_path()
     if not p.is_file():
         return None
     text = p.read_text(encoding="utf-8", errors="replace")
-    parsed, err = _read_settings_from_rules_text(text)
+    parsed, err = read_settings_from_domain_text(text)
     if parsed and not err:
         return text
     return None
 
 
-def _read_focus_combo_tips_from_rules_md() -> list[dict[str, str]]:
-    """从与关注点同源的全文解析「组合使用建议」表格（见 _rules_text_aligned_with_focus_parse）。"""
-    raw = _rules_text_aligned_with_focus_parse()
+def _read_focus_combo_tips_from_review_domain() -> list[dict[str, str]]:
+    raw = _domain_text_aligned_with_focus_parse()
     if not raw:
         return []
-    return _extract_focus_combo_tips_from_rules_text(raw)
+    return extract_focus_combo_tips_from_domain_text(raw)
 
 
-def _slugify_id(text: str) -> str:
-    s = re.sub(r"\s+", "_", (text or "").strip())
-    s = re.sub(r"[^\w\-]+", "_", s, flags=re.UNICODE)
-    s = re.sub(r"_+", "_", s).strip("_")
-    return s.lower() or "preset"
-
-
-def _combo_cell_encode(text: str) -> str:
-    """表格单元格写回：竖线转义、换行转为 <br>。"""
-    s = str(text or "")
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-    s = s.replace("|", "&#124;")
-    return s.replace("\n", "<br>")
-
-
-def _combo_cell_decode(text: str) -> str:
-    """解析表格单元格：还原 <br> 与竖线。"""
-    s = str(text or "").strip()
-    s = s.replace("<br>", "\n").replace("<BR>", "\n")
-    s = s.replace("&#124;", "|")
-    return s
-
-
-def _parse_focus_ids_from_recommended(text: str) -> list[str]:
-    """
-    rules.md 的推荐组合通常形如：`focus:req` + `` `focus:一审-文档结构` `` + ...
-    支持 ASCII / 中文等 id，与 ### focus:<id> | 名称 一致即可映射。
-    按在文本中出现的顺序去重。
-    """
-    t = str(text or "")
-    out: list[str] = []
-    seen: set[str] = set()
-    # 优先匹配反引号块，避免与裸 focus: 重复计数；单次扫描保证顺序
-    pat = re.compile(r"`\s*focus:([^`]+?)\s*`|focus:([^\s+|`]+)")
-    for m in pat.finditer(t):
-        raw = m.group(1) if m.group(1) is not None else m.group(2)
-        x = str(raw or "").strip()
-        if not x or x in seen:
-            continue
-        seen.add(x)
-        out.append(x)
-    return out
-
-
-def _norm_focus_id(s: str) -> str:
-    """统一空白与兼容字符（如全角/半角连字符），便于表格内 focus:id 与 ### focus: 行一致匹配。"""
-    return unicodedata.normalize("NFKC", (s or "").strip())
-
-
-def _derive_focus_presets_from_combo_tips(
-    combo_tips: list[dict[str, str]], focus_defs: list[dict[str, str]]
-) -> list[dict[str, Any]]:
-    """
-    将 rules.md 的“组合使用建议”转换为可保存/可选用的 focus_presets。
-    主页与后端 analyze 接口使用的是关注点 name，因此这里把 focus:id 映射为 name。
-    """
-    id_to_name: dict[str, str] = {}
-    for d in focus_defs:
-        if not isinstance(d, dict):
-            continue
-        pid = _norm_focus_id(str(d.get("id") or ""))
-        name = str(d.get("name") or "").strip()
-        if pid and name:
-            id_to_name[pid] = name
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for row in combo_tips:
-        if not isinstance(row, dict):
-            continue
-        stage = str(row.get("stage") or "").strip()
-        # 表格单元格内常见 **加粗**，与关注点 name 展示对齐
-        stage = re.sub(r"\*+", "", stage).strip()
-        recommended = str(row.get("recommended") or "").strip()
-        if not stage or not recommended:
-            continue
-        fid_list = _parse_focus_ids_from_recommended(recommended)
-        names = [id_to_name.get(_norm_focus_id(fid)) for fid in fid_list]
-        focus_points = [n for n in names if n]
-        if not focus_points:
-            continue
-        pid = f"rules_{_slugify_id(stage)}"
-        if pid in seen:
-            continue
-        seen.add(pid)
-        row_obj: dict[str, Any] = {"id": pid, "name": stage, "focus_points": focus_points}
-        for key in ("review_role", "review_goals_principles", "output_requirements"):
-            v = str(row.get(key) or "").strip()
-            if v:
-                row_obj[key] = v
-        out.append(row_obj)
-    return out
+def _read_composer_hint_from_review_domain() -> str | None:
+    p = _active_review_domain_path()
+    if not p.is_file():
+        return None
+    text = p.read_text(encoding="utf-8", errors="replace")
+    return read_composer_hint_from_domain_text(text)
 
 
 def _read_focus_preset_review_overlay() -> list[dict[str, Any]]:
@@ -588,235 +445,8 @@ def _read_focus_preset_review_overlay() -> list[dict[str, Any]]:
     return [x for x in raw if isinstance(x, dict) and x.get("id")]
 
 
-def _merge_preset_review_into_derived(
-    derived: list[dict[str, Any]], overlay: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """将本次保存请求中的审查角色/目标/输出要求合并回从组合表推导的预设（按 id 对齐）。"""
-    by_id = {str(x.get("id")): x for x in overlay if isinstance(x, dict) and x.get("id")}
-    out: list[dict[str, Any]] = []
-    for p in derived:
-        pid = str(p.get("id") or "")
-        o = by_id.get(pid)
-        merged = dict(p)
-        if o:
-            for k in ("review_role", "review_goals_principles", "output_requirements"):
-                v = o.get(k)
-                if isinstance(v, str) and v.strip():
-                    merged[k] = v.strip()
-        out.append(merged)
-    return out
-
-
-def _trim_accidental_combo_section_in_prompt(prompt: str) -> str:
-    """
-    防御：旧版解析或历史保存会把「## 组合使用建议」及表格留在 prompt 内；
-    按行截断到首个「组合*建议」类二级标题。
-    """
-    if not prompt:
-        return prompt
-    lines = prompt.splitlines()
-    out: list[str] = []
-    for line in lines:
-        st = _normalize_md_line_for_heading(line)
-        # 注意：在 Python 中 `"### x".startswith("##")` 为 True，必须用 `^##(?!#)` 区分真正的二级标题
-        if re.match(r"^##(?!#)", st) and _is_combo_suggestions_heading(st):
-            break
-        if _is_combo_like_h3_heading(line):
-            break
-        out.append(line)
-    return "\n".join(out).strip()
-
-
-def _extract_rules_intro_preamble(text: str) -> str | None:
-    """
-    提取「# 分析规则配置」标题行之后、首个二级标题（## …）之前的正文（可含多行），
-    用于写回时保留「该文件由…」「目的：」等完整前言，避免保存时误删。
-    """
-    lines = text.splitlines()
-    i = 0
-    while i < len(lines):
-        st = _normalize_md_line_for_heading(lines[i]).strip()
-        if st.startswith("# ") and not st.startswith("##") and "分析规则配置" in st:
-            i += 1
-            parts: list[str] = []
-            while i < len(lines):
-                st2 = _normalize_md_line_for_heading(lines[i]).strip()
-                if re.match(r"^##(?!#)", st2):
-                    break
-                parts.append(lines[i])
-                i += 1
-            out = "\n".join(parts).strip()
-            return out or None
-        i += 1
-    return None
-
-
-def _read_rules_composer_hint_from_text(text: str) -> str | None:
-    """
-    从 # 分析规则配置 与首个 ## 之间的前言中解析「目的：」后的说明（可在行首或行内，如「…。目的：xxx」）。
-    """
-    preamble = _extract_rules_intro_preamble(text)
-    if not preamble:
-        return None
-    m = re.search(r"目的\s*[:：]\s*([^\n\r]+)", preamble)
-    if not m:
-        return None
-    hint = m.group(1).strip()
-    return hint or None
-
-
-def _read_rules_composer_hint_from_rules_md() -> str | None:
-    p = _rules_md_path()
-    if not p.is_file():
-        return None
-    text = p.read_text(encoding="utf-8", errors="replace")
-    return _read_rules_composer_hint_from_text(text)
-
-
-def _read_settings_from_rules_text(text: str) -> tuple[dict[str, Any] | None, str | None]:
-    strict_err = _rules_strict_schema_error(text)
-    if strict_err:
-        return None, strict_err
-
-    lines = text.splitlines()
-
-    focus_points: list[dict[str, str]] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if line.startswith("### focus:"):
-            rest = line[len("### focus:") :].strip()
-            if "|" in rest:
-                pid, name = [x.strip() for x in rest.split("|", 1)]
-            else:
-                pid = rest
-                name = rest
-            j = i + 1
-            buf: list[str] = []
-            while j < len(lines):
-                nxt = lines[j]
-                st = _normalize_md_line_for_heading(nxt)
-                if st.startswith("### focus:"):
-                    break
-                # 二级标题：必须用 ^##(?!#)，避免 "### x".startswith("##") 的 Python 陷阱把三级标题当成正文
-                if re.match(r"^##(?!#)", st):
-                    break
-                if _is_combo_like_h3_heading(nxt):
-                    break
-                buf.append(nxt)
-                j += 1
-            prompt = _trim_accidental_combo_section_in_prompt("\n".join(buf).strip())
-            if pid and name:
-                focus_points.append({"id": pid, "name": name, "prompt": prompt})
-            i = j
-            continue
-        i += 1
-
-    if not focus_points:
-        return None, "rules.md 格式无效：未找到“关注点块”（格式：### focus:<id> | <name>）"
-
-    out: dict[str, Any] = {"focus_points": focus_points}
-    return out, None
-
-
-def _write_settings_to_rules_md(payload: dict[str, Any]) -> None:
-    p = _rules_md_path()
-    focus_points = payload.get("focus_points")
-    if not isinstance(focus_points, list):
-        focus_points = DEFAULT_FOCUS_POINTS
-    elif len(focus_points) == 0:
-        # 写入时避免生成空关注点文件；不读取 default_rules.md，仅用内置占位（与「恢复模板」无关）
-        focus_points = DEFAULT_FOCUS_POINTS
-
-    focus_presets = payload.get("focus_presets")
-    if not isinstance(focus_presets, list):
-        focus_presets = []
-
-    blocks: list[str] = []
-    for item in focus_points:
-        if not isinstance(item, dict):
-            continue
-        fid = str(item.get("id") or "").strip()
-        name = str(item.get("name") or "").strip()
-        prm = _trim_accidental_combo_section_in_prompt(str(item.get("prompt") or "").strip())
-        if not fid or not name:
-            continue
-        blocks.append(f"### focus:{fid} | {name}\n{prm}\n")
-
-    # Preserve any custom tail content after combo section (best-effort).
-    existing_suffix = ""
-    intro_block = "该文件由 AI-KA 自动维护，用于保存关注点及其 Prompt。\n\n"
-    if p.is_file():
-        old_text = p.read_text(encoding="utf-8", errors="replace")
-        preserved_intro = _extract_rules_intro_preamble(old_text)
-        if preserved_intro:
-            # 保留「该文件由…」「目的：」等完整前言，勿仅写回「目的：」一行以免误删其它说明
-            intro_block = preserved_intro.rstrip() + "\n\n"
-        lines = old_text.splitlines()
-        start = -1
-        for i, raw in enumerate(lines):
-            if _is_combo_suggestions_heading(raw):
-                start = i
-                break
-        if start >= 0:
-            j = start + 1
-            in_table = False
-            while j < len(lines):
-                line = lines[j].strip()
-                if line.startswith("|"):
-                    in_table = True
-                    j += 1
-                    continue
-                if in_table:
-                    # table ended; preserve the rest
-                    break
-                j += 1
-            existing_suffix = "\n".join(lines[j:]).strip()
-
-    combo_lines: list[str] = []
-    if focus_presets:
-        combo_lines.append("## 组合使用建议\n")
-        combo_lines.append("| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |")
-        combo_lines.append("| --- | --- | --- | --- | --- |")
-        for it in focus_presets:
-            if not isinstance(it, dict):
-                continue
-            name = str(it.get("name") or "").strip()
-            fps = it.get("focus_points")
-            if not name or not isinstance(fps, list):
-                continue
-            by_name = {str(d.get("name") or ""): str(d.get("id") or "") for d in focus_points if isinstance(d, dict)}
-            ids = [by_name.get(str(x), "") for x in fps]
-            ids = [x for x in ids if x]
-            if not ids:
-                continue
-            rec = " + ".join(f"`focus:{x}`" for x in ids)
-            rr = _combo_cell_encode(str(it.get("review_role") or ""))
-            rg = _combo_cell_encode(str(it.get("review_goals_principles") or ""))
-            ro = _combo_cell_encode(str(it.get("output_requirements") or ""))
-            n_enc = _combo_cell_encode(name)
-            rec_enc = _combo_cell_encode(rec)
-            combo_lines.append(f"| {n_enc} | {rec_enc} | {rr} | {rg} | {ro} |")
-        combo_lines.append("")
-
-    md = (
-        "# 分析规则配置\n\n"
-        + intro_block
-        + "## 关注点块\n\n"
-        + "\n".join(blocks)
-    )
-    if combo_lines:
-        md = md.rstrip() + "\n\n---\n\n" + "\n".join(combo_lines).rstrip() + "\n"
-    if existing_suffix:
-        md = md.rstrip() + "\n\n" + existing_suffix.strip() + "\n"
-    strict_err = _rules_strict_schema_error(md)
-    if strict_err:
-        raise ValueError(strict_err)
-    p.write_text(md, encoding="utf-8")
-
-
 def _get_focus_points() -> list[dict[str, str]]:
-    parsed, _ = _read_settings_from_rules_md()
+    parsed, _ = _read_settings_from_review_domain()
     fps = (parsed or {}).get("focus_points") if isinstance(parsed, dict) else None
     if isinstance(fps, list) and fps:
         out: list[dict[str, str]] = []
@@ -839,12 +469,13 @@ def _get_focus_points() -> list[dict[str, str]]:
 
 
 def _get_focus_presets() -> list[dict[str, Any]]:
-    parsed, _ = _read_settings_from_rules_md()
-    tips = _read_focus_combo_tips_from_rules_md()
+    tips = _read_focus_combo_tips_from_review_domain()
     focus_defs = _get_focus_points()
-    derived = _derive_focus_presets_from_combo_tips(tips, focus_defs)
-    # If future rules.md adds explicit presets, prefer that. For now derived is authoritative.
-    return derived
+    return derive_focus_presets_from_combo_tips(tips, focus_defs)
+
+
+def _write_settings_to_review_domain(payload: dict[str, Any]) -> None:
+    write_review_domain_file(_active_review_domain_path(), payload, DEFAULT_FOCUS_POINTS)
 
 
 def _get_chunk_limit() -> int:
@@ -1014,9 +645,9 @@ def pick_directory(request: Request) -> JSONResponse:
 @app.get("/api/v1/settings")
 def get_app_settings() -> JSONResponse:
     conn = _conn()
-    _, parse_error = _read_settings_from_rules_md()
+    _, parse_error = _read_settings_from_review_domain()
     payload = _build_settings_payload(conn)
-    payload["rules_md_error"] = parse_error
+    payload["review_domain_error"] = parse_error
     app_cfg, app_err, app_src = _read_app_settings_md_debug()
     payload["app_settings_error"] = app_err
     payload["app_settings_source"] = app_src
@@ -1067,6 +698,17 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
         mode = _normalize_md_index_mode(raw_m if isinstance(raw_m, str) else MD_INDEX_MODE_INCREMENTAL)
         current["md_index_mode"] = mode
         app_cfg["md_index_mode"] = mode
+    if "active_skill_package_id" in payload:
+        raw_id = payload.get("active_skill_package_id")
+        if not isinstance(raw_id, str) or not raw_id.strip():
+            return JSONResponse(err("active_skill_package_id must be a non-empty string"), status_code=400)
+        spid = raw_id.strip()
+        rr = repository_root()
+        ensure_default_skill_package(rr)
+        if not domain_path(rr, spid).is_file():
+            return JSONResponse(err(f"审查技能包不存在或未包含 review_domain.md：{spid}"), status_code=400)
+        app_cfg["active_skill_package_id"] = spid
+        current["active_skill_package_id"] = spid
     if "focus_points" in payload:
         raw_fp = payload.get("focus_points")
         if not isinstance(raw_fp, list):
@@ -1113,8 +755,12 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
                 row: dict[str, Any] = {"id": pid, "name": name, "focus_points": focus_points}
                 for k in ("review_role", "review_goals_principles", "output_requirements"):
                     v = it.get(k)
-                    if isinstance(v, str) and v.strip():
-                        row[k] = v.strip()
+                    if not isinstance(v, str) or not v.strip():
+                        return JSONResponse(
+                            err(f"focus_presets[{pid}].{k} must be a non-empty string"),
+                            status_code=400,
+                        )
+                    row[k] = v.strip()
                 cleaned.append(row)
                 seen.add(pid)
             current["focus_presets"] = cleaned
@@ -1146,7 +792,7 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
             "vl_base_url": vl_base_url,
         }
 
-    # API Key: 保存到 rules.md（不再写数据库）
+    # API Key: 随 app_settings.md 等持久化（不再写数据库业务表）
     text_key = None
     vl_key = None
     if "llm_api_key" in payload:
@@ -1185,63 +831,94 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
         app_cfg["focus_preset_review_overlay"] = slim
 
     try:
-        _write_settings_to_rules_md(current)
+        _write_settings_to_review_domain(current)
     except ValueError as e:
         return JSONResponse(err(str(e)), status_code=400)
     _write_app_settings_md(app_cfg)
-    current["rules_md_error"] = None
-    # 与 GET /settings 对齐：保存后从 rules.md 再读一遍，避免前端拿不到 Tips/预设
-    current["focus_combo_tips"] = _read_focus_combo_tips_from_rules_md()
+    current = _build_settings_payload(conn)
+    current["review_domain_error"] = None
+    current["focus_combo_tips"] = _read_focus_combo_tips_from_review_domain()
     derived_presets = _get_focus_presets()
     if presets_style_overlay is not None:
-        current["focus_presets"] = _merge_preset_review_into_derived(derived_presets, presets_style_overlay)
+        current["focus_presets"] = merge_preset_review_into_derived(derived_presets, presets_style_overlay)
     else:
         current["focus_presets"] = derived_presets
     return JSONResponse(ok(current))
 
 
-@app.post("/api/v1/settings/rules-md/validate")
-def validate_rules_md_payload(payload: dict[str, Any]) -> JSONResponse:
+@app.post("/api/v1/settings/review-domain/validate")
+def validate_review_domain_payload(payload: dict[str, Any]) -> JSONResponse:
     text = str(payload.get("text") or "")
-    parsed, parse_error = _read_settings_from_rules_text(text)
+    parsed, parse_error = read_settings_from_domain_text(text)
     if parse_error:
         return JSONResponse(err(parse_error), status_code=400)
     fps = (parsed or {}).get("focus_points", [])
     return JSONResponse(ok({"focus_points": fps, "count": len(fps)}))
 
 
-@app.post("/api/v1/settings/rules-md/import")
-def import_rules_md_payload(payload: dict[str, Any]) -> JSONResponse:
+@app.post("/api/v1/settings/review-domain/import")
+def import_review_domain_payload(payload: dict[str, Any]) -> JSONResponse:
     text = str(payload.get("text") or "")
-    parsed, parse_error = _read_settings_from_rules_text(text)
+    parsed, parse_error = read_settings_from_domain_text(text)
     if parse_error:
         return JSONResponse(err(parse_error), status_code=400)
     focus_points = (parsed or {}).get("focus_points")
     if not isinstance(focus_points, list) or not focus_points:
-        return JSONResponse(err("rules.md 中未解析到有效关注点"), status_code=400)
+        return JSONResponse(err("review_domain.md 中未解析到有效关注点"), status_code=400)
 
     conn = _conn()
-    _rules_md_path().write_text(text, encoding="utf-8")
+    dest = _active_review_domain_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dest.write_text(text, encoding="utf-8")
+    except OSError as e:
+        return JSONResponse(err(f"写入 review_domain.md 失败：{e}"), status_code=500)
     current = _build_settings_payload(conn)
-    current["rules_md_error"] = None
+    current["review_domain_error"] = None
     return JSONResponse(ok(current))
 
 
-@app.post("/api/v1/settings/rules-md/restore-default-template")
-def restore_default_rules_template() -> JSONResponse:
-    """将 default_rules.md 复制为当前活动规则文件；仅用于手动重置/恢复，不会在读取失败时自动执行。"""
-    src = _default_rules_md_path()
+@app.post("/api/v1/skill-packages/migrate-legacy-file")
+def migrate_legacy_markdown_file_to_active_package(payload: dict[str, Any]) -> JSONResponse:
+    """将仓库根目录下指定的 .md 解析并写入当前活动审查技能包的 review_domain.md（默认 default_skills.md）。"""
+    bn = str(payload.get("filename") or "default_skills.md").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]+\.md", bn):
+        return JSONResponse(err("filename must be a basename like default_skills.md"), status_code=400)
+    src = repository_root() / bn
     if not src.is_file():
-        return JSONResponse(err("仓库内不存在 default_rules.md，无法从模板恢复"), status_code=404)
-    dst = _rules_md_path()
+        return JSONResponse(err(f"源文件不存在：{src}"), status_code=404)
+    text = src.read_text(encoding="utf-8", errors="replace")
+    _, parse_error = read_settings_from_domain_text(text)
+    if parse_error:
+        return JSONResponse(err(parse_error), status_code=400)
+    dest = _active_review_domain_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dest.write_text(text, encoding="utf-8")
+    except OSError as e:
+        return JSONResponse(err(f"写入失败：{e}"), status_code=500)
+    conn = _conn()
+    out = _build_settings_payload(conn)
+    out["review_domain_error"] = None
+    return JSONResponse(ok(out))
+
+
+@app.post("/api/v1/settings/review-domain/restore-default-skills-template")
+def restore_default_skills_template() -> JSONResponse:
+    """将 default_skills.md 复制为当前活动审查技能包的 review_domain.md。"""
+    src = _default_skills_template_path()
+    if not src.is_file():
+        return JSONResponse(err("仓库内不存在 default_skills.md，无法从模板恢复"), status_code=404)
+    dst = _active_review_domain_path()
+    dst.parent.mkdir(parents=True, exist_ok=True)
     try:
         dst.write_text(src.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
     except OSError as e:
-        return JSONResponse(err(f"写入规则文件失败：{e}"), status_code=500)
+        return JSONResponse(err(f"写入 review_domain.md 失败：{e}"), status_code=500)
     conn = _conn()
     current = _build_settings_payload(conn)
-    _, parse_error = _read_settings_from_rules_md()
-    current["rules_md_error"] = parse_error
+    _, parse_error = _read_settings_from_review_domain()
+    current["review_domain_error"] = parse_error
     return JSONResponse(ok(current))
 
 
@@ -1363,6 +1040,55 @@ def get_project(project_id: int) -> JSONResponse:
     )
 
 
+@app.get("/api/v1/projects/{project_id}/ingest-status")
+def get_project_ingest_status(project_id: int) -> JSONResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    md_out = project_md_out_dir(prj.id)
+    md_out_exists = md_out.exists() and md_out.is_dir()
+    chunk_count = int(dbm.count_project_chunks(conn, project_id=prj.id))
+    review_runs_count = int(dbm.count_project_completed_outputs(conn, project_id=prj.id))
+    return JSONResponse(
+        ok(
+            {
+                "project_id": prj.id,
+                "md_out": str(md_out),
+                "md_out_exists": bool(md_out_exists),
+                "chunk_count": int(chunk_count),
+                "initialized": bool(md_out_exists and chunk_count > 0),
+                "has_review_records": bool(review_runs_count > 0),
+            }
+        )
+    )
+
+
+@app.delete("/api/v1/projects/{project_id}")
+def delete_project(project_id: int) -> JSONResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    # 只允许删除“已初始化但没有审查记录”的项目
+    if int(dbm.count_project_completed_outputs(conn, project_id=prj.id)) > 0:
+        return JSONResponse(
+            err("项目已有已完成审查产物（conversation_outputs），为保护历史不可删除"),
+            status_code=409,
+        )
+    # 先清理文件系统产物（失败不阻断 DB 删除）
+    try:
+        shutil.rmtree(project_md_out_dir(project_id), ignore_errors=True)
+    except Exception:
+        pass
+    try:
+        shutil.rmtree(project_export_dir(project_id), ignore_errors=True)
+    except Exception:
+        pass
+    ok_del = dbm.delete_project(conn, project_id=project_id)
+    return JSONResponse(ok({"deleted": bool(ok_del)}))
+
+
 class CreateConversationBody(BaseModel):
     analysis_type: str = Field(min_length=1)
     title: str | None = None
@@ -1448,20 +1174,27 @@ def get_conversation_detail(project_id: int, conversation_id: int) -> JSONRespon
             last_focus = [str(x).strip() for x in raw if str(x).strip()]
         else:
             last_focus = []
-    return JSONResponse(
-        ok(
-            {
-                "id": conv.id,
-                "analysis_type": conv.analysis_type,
-                "title": conv.title,
-                "created_at": conv.created_at,
-                "updated_at": conv.updated_at,
-                "preset_id": conv.preset_id,
-                "has_analysis_run": has_analysis_run,
-                "last_analysis_focus_points": last_focus,
-            }
-        )
-    )
+    last_run_meta: dict[str, Any] | None = None
+    if last_run is not None and getattr(last_run, "run_metadata_json", None):
+        try:
+            parsed_m = json.loads(str(last_run.run_metadata_json))
+            if isinstance(parsed_m, dict):
+                last_run_meta = parsed_m
+        except json.JSONDecodeError:
+            last_run_meta = None
+    payload_detail: dict[str, Any] = {
+        "id": conv.id,
+        "analysis_type": conv.analysis_type,
+        "title": conv.title,
+        "created_at": conv.created_at,
+        "updated_at": conv.updated_at,
+        "preset_id": conv.preset_id,
+        "has_analysis_run": has_analysis_run,
+        "last_analysis_focus_points": last_focus,
+    }
+    if last_run_meta is not None:
+        payload_detail["last_run_metadata"] = last_run_meta
+    return JSONResponse(ok(payload_detail))
 
 
 @app.get("/api/v1/projects/{project_id}/conversations/{conversation_id}/messages")
@@ -1579,10 +1312,57 @@ class AnalyzeStreamBody(BaseModel):
     review_role: str | None = Field(default=None)
     review_goals_principles: str | None = Field(default=None)
     output_requirements: str | None = Field(default=None)
+    skill_id: str | None = Field(default=None)
+    skill_version: str | None = Field(default=None)
+    memory_snippets: list[dict[str, Any]] | None = Field(default=None)
+    skill_meta: dict[str, Any] | None = Field(default=None)
+    memory_query: str | None = Field(default=None)
+    already_surfaced: list[str] | None = Field(default=None)
 
 
 class FollowupStreamBody(BaseModel):
     question: str = Field(min_length=1)
+
+
+class AgentStreamBody(BaseModel):
+    message: str = Field(min_length=1)
+
+
+def _extract_first_json_object(text: str) -> dict[str, Any] | None:
+    s = (text or "").strip()
+    if not s:
+        return None
+    # 常见情况：模型输出前后夹杂解释；尽量提取第一个 JSON 对象
+    start = s.find("{")
+    if start < 0:
+        return None
+    # 简单括号配对
+    depth = 0
+    end = -1
+    for i in range(start, len(s)):
+        ch = s[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end <= start:
+        return None
+    raw = s[start:end]
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _agent_event(kind: str, data: dict[str, Any] | None = None) -> str:
+    payload: dict[str, Any] = {"type": kind}
+    if data:
+        payload.update(data)
+    return _sse_line(payload)
 
 
 def _resolve_focus_definitions_for_subset(conn: Any, focus_names: list[str]) -> tuple[list[dict[str, str]], str | None]:
@@ -1700,6 +1480,77 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
     if not entries:
         raise HTTPException(status_code=400, detail="no chunks; run index-md after convert-md")
 
+    rules_hash, rules_fn = _review_domain_file_hash_and_name()
+    rr_meta = repository_root()
+    sp_active = _get_active_skill_package_id()
+    pkg_ver = package_version_for_hash(rr_meta, sp_active)
+    mem_root = memory_root_under_repo(repository_root())
+    snippets: list[dict[str, Any]] = []
+    if payload.memory_snippets:
+        for x in payload.memory_snippets:
+            if isinstance(x, dict):
+                snippets.append(
+                    {
+                        "id": str(x.get("id") or "").strip(),
+                        "title": str(x.get("title") or "").strip(),
+                        "body": str(x.get("body") or ""),
+                    }
+                )
+    surf: set[str] = set(payload.already_surfaced or [])
+    for s in snippets:
+        sid = str(s.get("id") or "").strip()
+        if sid:
+            surf.add(sid)
+    fq = " ".join(str(x) for x in payload.focus_points)
+    mq = (payload.memory_query or fq).strip()
+    recalled = recall_memory_snippets(
+        memory_root=mem_root,
+        project_id=project_id,
+        query=mq,
+        already_surfaced=surf,
+        limit=5,
+    )
+    snippets.extend(recalled)
+    _recalled_meta = [
+        {
+            "id": str(s.get("id") or ""),
+            "title": str(s.get("title") or ""),
+            "score": int(s.get("score") or 0),
+            "excerpt": str(s.get("body") or "")[:240],
+        }
+        for s in recalled
+        if isinstance(s, dict) and str(s.get("id") or "").strip()
+    ]
+
+    skill_meta_payload: dict[str, Any] = dict(payload.skill_meta or {})
+    skill_meta_payload.setdefault("skill_id", (payload.skill_id or "").strip())
+    skill_meta_payload.setdefault("skill_version", (payload.skill_version or "").strip())
+    skill_meta_payload.setdefault("active_skill_package_id", sp_active)
+    skill_meta_payload.setdefault("package_manifest_version", pkg_ver)
+    skill_meta_payload.setdefault("review_domain_ref", rules_fn)
+    skill_meta_payload.setdefault("package_version_hash", rules_hash)
+    skill_meta_payload.setdefault("rules_hash", rules_hash)
+
+    hook_ctx: dict[str, Any] = {
+        "project_id": project_id,
+        "conversation_id": conversation_id,
+        "focus_points": list(payload.focus_points),
+        "chunk_limit": int(payload.chunk_limit),
+        "extra_memory_snippets": [],
+    }
+    run_before_analyze_hooks(hook_ctx)
+    _hook_extra_count = 0
+    for extra in hook_ctx.get("extra_memory_snippets") or []:
+        if isinstance(extra, dict) and (extra.get("body") or "").strip():
+            _hook_extra_count += 1
+            snippets.append(
+                {
+                    "id": str(extra.get("id") or "").strip() or "hook",
+                    "title": str(extra.get("title") or "").strip(),
+                    "body": str(extra.get("body") or ""),
+                }
+            )
+
     cfg = _build_text_llm_config(conn, timeout_s=300.0)
     system = build_system_prompt(
         None,
@@ -1707,6 +1558,8 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
         review_role=payload.review_role,
         review_goals_principles=payload.review_goals_principles,
         output_requirements=payload.output_requirements,
+        memory_snippets=snippets or None,
+        skill_meta=skill_meta_payload or None,
     )
     user, used_entries = build_user_prompt_from_entries(entries)
     idx_lines_md = format_chunk_index_lines_markdown(used_entries)
@@ -1747,6 +1600,47 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
 
     def gen():
         try:
+            # Explainability: skills/tools/hooks/memory used (persist to milestones + stream to UI)
+            explain_stage = {"type": "stage", "stage": "评审策略", "status": "start"}
+            append_milestone_event(milestones_path, explain_stage)
+            yield _sse_stage("评审策略", "start")
+
+            focus_sel = [{"id": str(d.get("id") or ""), "name": str(d.get("name") or "")} for d in resolved]
+            tools_available = []
+            try:
+                from backend.tools.registry import list_tool_names as _list_tool_names
+
+                tools_available = _list_tool_names()
+            except Exception:
+                tools_available = []
+            hooks_available = list_hook_names()
+
+            payload_skill = {
+                "type": "explain_skills",
+                "active_skill_package_id": sp_active,
+                "review_domain_ref": rules_fn,
+                "package_version_hash": rules_hash,
+                "focus_points": focus_sel,
+            }
+            payload_tools = {"type": "explain_tools", "tools": tools_available}
+            payload_hooks = {
+                "type": "explain_hooks",
+                "hooks": hooks_available,
+                "extra_memory_snippets_count": int(_hook_extra_count),
+            }
+            payload_mem = {
+                "type": "explain_memory",
+                "query": mq,
+                "items": _recalled_meta,
+            }
+            for p in (payload_skill, payload_tools, payload_hooks, payload_mem):
+                append_milestone_event(milestones_path, p)
+                yield _sse_line(p)
+
+            explain_end = {"type": "stage", "stage": "评审策略", "status": "end"}
+            append_milestone_event(milestones_path, explain_end)
+            yield _sse_stage("评审策略", "end")
+
             ev = {"type": "stage", "stage": "解析文档", "status": "start", "detail": f"chunks={len(used_entries)}"}
             append_milestone_event(milestones_path, ev)
             yield _sse_stage("解析文档", "start", detail=f"chunks={len(used_entries)}")
@@ -1757,12 +1651,12 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
                 ev = {"type": "stage", "stage": "片段与来源索引", "status": "start"}
                 append_milestone_event(milestones_path, ev)
                 yield _sse_stage("片段与来源索引", "start")
-                payload = {
+                chunk_idx_payload = {
                     "type": "chunk_index",
                     "markdown": idx_lines_md,
                     "index_file_path": str(fragments_index_path) if fragments_index_path is not None else None,
                 }
-                append_milestone_event(milestones_path, payload)
+                append_milestone_event(milestones_path, chunk_idx_payload)
                 yield _sse_line(
                     {
                         "type": "chunk_index",
@@ -1786,11 +1680,30 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
             ev = {"type": "stage", "stage": "思考分析", "status": "end"}
             append_milestone_event(milestones_path, ev)
             yield _sse_stage("思考分析", "end")
+            _mem_milestone_items = [{"id": s.get("id"), "title": s.get("title")} for s in snippets]
+            if _mem_milestone_items:
+                append_milestone_event(
+                    milestones_path,
+                    {"type": "memory_injected", "items": _mem_milestone_items},
+                )
             ev = {"type": "stage", "stage": "呈现结果", "status": "start"}
             append_milestone_event(milestones_path, ev)
             yield _sse_stage("呈现结果", "start")
             body = _normalize_model_markdown("".join(acc))
             out_path.write_text(body, encoding="utf-8")
+            run_meta = build_run_metadata(
+                skill_id=payload.skill_id,
+                skill_version=payload.skill_version,
+                rules_hash=rules_hash,
+                memory_injected=[{"id": s.get("id"), "title": s.get("title")} for s in snippets],
+                rules_filename="review_domain.md",
+                extra={
+                    "active_skill_package_id": sp_active,
+                    "package_manifest_version": pkg_ver,
+                    "review_domain_ref": rules_fn,
+                    "package_version_hash": rules_hash,
+                },
+            )
             dbm.insert_analysis_run(
                 conn,
                 conversation_id=conversation_id,
@@ -1800,6 +1713,16 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
                 chunk_strategy=_get_chunk_strategy(),
                 used_entries=list(used_entries),
                 output_markdown_path=str(out_path),
+                run_metadata=run_meta,
+            )
+            run_after_analyze_hooks(
+                {
+                    "project_id": project_id,
+                    "conversation_id": conversation_id,
+                    "focus_points": list(payload.focus_points),
+                    "run_metadata": run_meta,
+                    "output_markdown_path": str(out_path),
+                }
             )
             dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=body)
             dbm.insert_conversation_output(
@@ -1828,6 +1751,7 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
                     "output_fragments_index_path": (
                         str(fragments_index_path) if fragments_index_path is not None else None
                     ),
+                    "memory_files_injected": run_meta.get("memory_files_injected") or [],
                 }
             )
             ev = {"type": "stage", "stage": "呈现结果", "status": "end"}
@@ -2015,6 +1939,286 @@ def followup_conversation_stream(project_id: int, conversation_id: int, payload:
                 finalize_milestones_file(milestones_path)
             except Exception:
                 pass
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.post("/api/v1/projects/{project_id}/conversations/{conversation_id}/agent/stream")
+def agent_conversation_stream(project_id: int, conversation_id: int, payload: AgentStreamBody) -> StreamingResponse:
+    """
+    自动编排（模式 C）：后端统一入口。模型先做路由决策（analyze/followup/clarify/need_ingest），
+    不自动执行 convert/index；若语料不可用则提示用户去项目初始化页。
+    """
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    conv = dbm.get_conversation(conn, conversation_id)
+    if conv is None or conv.project_id != project_id:
+        raise HTTPException(status_code=404, detail="conversation not found")
+
+    msg = str(payload.message or "").strip()
+    if not msg:
+        raise HTTPException(status_code=400, detail="message is empty")
+
+    # 先写入用户消息，确保历史可回放
+    dbm.insert_message(conn, conversation_id=conversation_id, role="user", content=msg)
+
+    # 语料就绪检查：不自动补语料
+    md_out = project_md_out_dir(project_id)
+    md_out_exists = md_out.exists() and md_out.is_dir()
+    chunk_count = int(dbm.count_project_chunks(conn, project_id=project_id))
+    initialized = bool(md_out_exists and chunk_count > 0)
+
+    cfg = _build_text_llm_config(conn, timeout_s=180.0)
+    provider = get_provider(cfg.provider)
+
+    # 路由候选：来自当前活动技能包（focus defs）
+    focus_defs = _get_focus_points()
+    focus_brief = [
+        {"id": str(d.get("id") or ""), "name": str(d.get("name") or ""), "prompt": str(d.get("prompt") or "")}
+        for d in focus_defs
+        if str(d.get("id") or "").strip() and str(d.get("name") or "").strip()
+    ]
+
+    routing_system = (
+        "你是审查编排助手。你的任务是根据用户输入，在不要求用户选择预设的前提下，"
+        "从候选关注点中自动选择合适的关注点组合，并决定本轮应该执行：analyze（全文审查）、"
+        "followup（基于已有结论追问）、clarify（需要用户澄清）、need_ingest（语料未初始化/已过期）。\n"
+        "约束：\n"
+        "- 你只能输出一个 JSON 对象，不要输出任何解释文字，不要使用代码围栏。\n"
+        "- focus_ids 必须来自候选关注点的 id。\n"
+        "- 如果发现用户问题缺少关键信息，应优先 intent=clarify，并给出 1-5 条澄清问题。\n"
+        "- 如果语料不可用（索引缺失/过期）且用户要求基于文档审查，应 intent=need_ingest。\n"
+        "输出 JSON 结构：\n"
+        "{\n"
+        '  \"intent\": \"analyze|followup|clarify|need_ingest\",\n'
+        '  \"focus_ids\": [\"...\"] ,\n'
+        '  \"memory_query\": \"\" ,\n'
+        '  \"output_artifacts\": [\"review_md\",\"fragments_index_md\"],\n'
+        '  \"clarify_questions\": [\"...\"]\n'
+        "}\n"
+    )
+    routing_user = json.dumps(
+        {
+            "user_message": msg,
+            "project_initialized": initialized,
+            "candidate_focus_points": focus_brief,
+        },
+        ensure_ascii=False,
+    )
+
+    prior_rows = dbm.list_recent_messages(conn, conversation_id=conversation_id, limit=_MULTITURN_RECENT_LIMIT)
+    prior_tuples = _message_rows_to_prior_tuples(prior_rows)
+
+    def gen():
+        # 1) routing
+        yield _agent_event("agent_stage", {"stage": "routing", "state": "start"})
+        acc: list[str] = []
+        try:
+            for piece in provider.chat_stream(system=routing_system, user=routing_user, config=cfg, prior_messages=prior_tuples or None):
+                acc.append(piece)
+        except LLMError as e:
+            yield _agent_event("agent_stage", {"stage": "routing", "state": "end"})
+            yield _agent_event("assistant_delta", {"text": f"路由失败：{str(e)}\n请尝试换一种表述，或先完成项目初始化。"})
+            yield _agent_event("final", {"ok": False})
+            return
+        yield _agent_event("agent_stage", {"stage": "routing", "state": "end"})
+
+        routing_raw = _strip_think_blocks("".join(acc))
+        decision = _extract_first_json_object(routing_raw) or {}
+        yield _agent_event("agent_decision", {"decision": decision})
+        intent = str(decision.get("intent") or "").strip()
+        focus_ids = decision.get("focus_ids")
+        if not isinstance(focus_ids, list):
+            focus_ids = []
+        focus_ids = [str(x).strip() for x in focus_ids if str(x).strip()]
+        memory_query = str(decision.get("memory_query") or "").strip()
+        artifacts = decision.get("output_artifacts")
+        if not isinstance(artifacts, list):
+            artifacts = []
+        artifacts = [str(x).strip() for x in artifacts if str(x).strip()]
+        clarify_questions = decision.get("clarify_questions")
+        if not isinstance(clarify_questions, list):
+            clarify_questions = []
+        clarify_questions = [str(x).strip() for x in clarify_questions if str(x).strip()]
+
+        # 写入审计 system message（可复现）
+        try:
+            rules_hash, rules_fn = _review_domain_file_hash_and_name()
+        except Exception:
+            rules_hash, rules_fn = "", None
+        skill_meta_payload = {
+            "active_skill_package_id": _get_active_skill_package_id(),
+            "review_domain_ref": rules_fn,
+            "rules_hash": rules_hash,
+            "agent_decision": decision,
+        }
+        dbm.insert_message(conn, conversation_id=conversation_id, role="system", content="agent_decision=" + json.dumps(skill_meta_payload, ensure_ascii=False))
+
+        # 2) need_ingest / clarify
+        if intent == "need_ingest" or (not initialized and intent in {"analyze", "followup"}):
+            yield _agent_event(
+                "need_ingest",
+                {
+                    "project_id": project_id,
+                    "message": "语料未初始化或已过期：请先进入「项目初始化」完成转换与索引，然后再发起审查/追问。",
+                },
+            )
+            dbm.insert_message(
+                conn,
+                conversation_id=conversation_id,
+                role="assistant",
+                content="语料未初始化或已过期：请先进入「项目初始化」完成转换与索引，然后再发起审查/追问。",
+            )
+            yield _agent_event("final", {"ok": True})
+            return
+
+        if intent == "clarify" or (not focus_ids and intent == "analyze"):
+            qs = clarify_questions[:5]
+            if not qs:
+                qs = ["你希望我重点审查哪些方面？（例如：需求完整性、风险、接口与集成、里程碑/进度等）"]
+            text = "为避免误审查，请先澄清以下问题：\n" + "\n".join([f"- {q}" for q in qs])
+            yield _agent_event("agent_stage", {"stage": "clarifying", "state": "start"})
+            yield _agent_event("assistant_delta", {"text": text})
+            yield _agent_event("agent_stage", {"stage": "clarifying", "state": "end"})
+            dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=text)
+            yield _agent_event("final", {"ok": True})
+            return
+
+        # 3) execute analyze/followup（第一版：默认 analyze；followup 需要存在 last_run）
+        last_run = dbm.get_latest_analysis_run(conn, conversation_id=conversation_id)
+        if intent == "followup" and last_run is not None:
+            # 复用 followup：直接调用现有 followup 逻辑太重，这里先用“追问”系统提示+上次结论片段
+            q = msg
+            try:
+                used_entries = json.loads(last_run.used_entries_json or "[]")
+            except json.JSONDecodeError:
+                used_entries = []
+            if not isinstance(used_entries, list):
+                used_entries = []
+            prev_md = ""
+            try:
+                p = Path(str(last_run.output_markdown_path))
+                if p.is_file():
+                    prev_md = p.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                prev_md = ""
+            prev_excerpt = prev_md.strip()
+            if len(prev_excerpt) > 6000:
+                prev_excerpt = prev_excerpt[:6000] + "\n\n（上次结果已截断）\n"
+            system = "你是资深 IT 实施与项目评审顾问。用户将基于既有审查结论进行追问，请直接回答，并引用必要的证据。"
+            user = f"【上次审查结论摘要】\n{prev_excerpt}\n\n【用户追问】\n{q}\n"
+            yield _agent_event("agent_stage", {"stage": "executing", "state": "start", "kind": "followup"})
+            acc2: list[str] = []
+            for piece in provider.chat_stream(system=system, user=user, config=cfg, prior_messages=prior_tuples or None):
+                acc2.append(piece)
+                yield _agent_event("assistant_delta", {"text": piece})
+            body = _normalize_model_markdown("".join(acc2))
+            dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=body)
+            yield _agent_event("agent_stage", {"stage": "executing", "state": "end", "kind": "followup"})
+            yield _agent_event("final", {"ok": True, "markdown": body})
+            return
+
+        # analyze
+        resolved, err = _resolve_focus_definitions_for_subset(conn, focus_ids)
+        if err:
+            text = f"无法解析关注点：{err}\n请换一种表述，或在设置中检查当前审查技能包。"
+            yield _agent_event("assistant_delta", {"text": text})
+            dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=text)
+            yield _agent_event("final", {"ok": False})
+            return
+
+        entries = dbm.list_chunk_entries(conn, project_id=project_id, limit=_get_chunk_limit())
+        if not entries:
+            yield _agent_event(
+                "need_ingest",
+                {
+                    "project_id": project_id,
+                    "message": "未检测到可用分块：请先进入「项目初始化」执行索引，然后再审查。",
+                },
+            )
+            yield _agent_event("final", {"ok": True})
+            return
+
+        # 记忆召回：若路由给了 memory_query，用它；否则用关注点 id 拼接
+        fq = " ".join(focus_ids)
+        mq = (memory_query or fq).strip()
+        mem_root = memory_root_under_repo(repository_root())
+        recalled = recall_memory_snippets(memory_root=mem_root, project_id=project_id, query=mq, already_surfaced=set(), limit=5)
+
+        system = build_system_prompt(None, focus_definitions=resolved, memory_snippets=recalled or None, skill_meta=skill_meta_payload)
+        user, used_entries = build_user_prompt_from_entries(entries)
+
+        exp_dir = project_export_dir(project_id)
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        base = _safe_slug(conv.title)
+        files = make_outputs_filenames(kind="analyze", safe_base=base, ts=ts, include_fragments_index=True)
+        out_path = exp_dir / files.final_filename
+        milestones_path = exp_dir / files.milestones_filename
+        fragments_index_path = (exp_dir / files.fragments_index_filename) if files.fragments_index_filename else None
+        init_milestones_file(milestones_path)
+
+        idx_lines_md = format_chunk_index_lines_markdown(used_entries)
+        if idx_lines_md.strip() and fragments_index_path is not None:
+            fragments_index_path.write_text(idx_lines_md, encoding="utf-8")
+
+        yield _agent_event("agent_stage", {"stage": "executing", "state": "start", "kind": "analyze"})
+        if idx_lines_md.strip():
+            yield _agent_event(
+                "artifact_ready",
+                {
+                    "label": "片段索引.md",
+                    "download_path": f"/api/v1/files/{project_id}/{files.fragments_index_filename}",
+                    "placement_hint": "left",
+                },
+            )
+        acc3: list[str] = []
+        for piece in provider.chat_stream(system=system, user=user, config=cfg, prior_messages=prior_tuples or None):
+            acc3.append(piece)
+            yield _agent_event("assistant_delta", {"text": piece})
+        body = _normalize_model_markdown("".join(acc3))
+        out_path.write_text(body, encoding="utf-8")
+        dbm.insert_analysis_run(
+            conn,
+            conversation_id=conversation_id,
+            job_id=None,
+            focus_points=list(focus_ids),
+            chunk_limit=int(_get_chunk_limit()),
+            chunk_strategy=_get_chunk_strategy(),
+            used_entries=list(used_entries),
+            output_markdown_path=str(out_path),
+            run_metadata=build_run_metadata(
+                skill_id=None,
+                skill_version=None,
+                rules_hash=skill_meta_payload.get("rules_hash") or "",
+                memory_injected=[{"id": s.get("id"), "title": s.get("title")} for s in recalled],
+                rules_filename="review_domain.md",
+                extra={"active_skill_package_id": skill_meta_payload.get("active_skill_package_id")},
+            ),
+        )
+        dbm.insert_conversation_output(
+            conn,
+            conversation_id=conversation_id,
+            kind="analyze",
+            final_filename=files.final_filename,
+            milestones_filename=files.milestones_filename,
+            fragments_index_filename=files.fragments_index_filename,
+        )
+        dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=body)
+        finalize_milestones_file(milestones_path)
+
+        yield _agent_event(
+            "artifact_ready",
+            {
+                "label": "审查结果.md",
+                "download_path": f"/api/v1/files/{project_id}/{files.final_filename}",
+                "placement_hint": "left",
+            },
+        )
+        yield _agent_event("agent_stage", {"stage": "executing", "state": "end", "kind": "analyze"})
+        yield _agent_event("final", {"ok": True, "markdown": body})
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 

@@ -48,9 +48,11 @@ def build_system_prompt(
     review_role: str | None = None,
     review_goals_principles: str | None = None,
     output_requirements: str | None = None,
+    memory_snippets: list[dict[str, Any]] | None = None,
+    skill_meta: dict[str, Any] | None = None,
 ) -> str:
     """
-    主流程：传入 focus_definitions（来自 rules.md/设置中的 name+prompt，并按本次勾选子集过滤），
+    主流程：传入 focus_definitions（来自 review_domain.md/设置中的 name+prompt，并按本次勾选子集过滤），
     驱动文档审查。
 
     review_role / review_goals_principles / output_requirements 来自「预设组合」；
@@ -66,8 +68,22 @@ def build_system_prompt(
             role + "\n\n",
             "【审查目标与原则】\n",
             goals + "\n\n",
-            "关注点审查清单（名称与审查要点来自 rules.md / 应用设置）：\n",
         ]
+        if skill_meta:
+            lines.append("【审查技能包元数据（可复现）】\n")
+            try:
+                lines.append(json.dumps(skill_meta, ensure_ascii=False, indent=2) + "\n\n")
+            except (TypeError, ValueError):
+                lines.append(str(skill_meta) + "\n\n")
+        if memory_snippets:
+            lines.append("【注入记忆片段】\n")
+            for sn in memory_snippets:
+                sid = str(sn.get("id") or "").strip() or "memory"
+                title = str(sn.get("title") or "").strip()
+                body = str(sn.get("body") or "").strip()
+                head = f"- id={sid}" + (f" title={title}" if title else "") + "\n"
+                lines.append(head + body + "\n\n")
+        lines.append("关注点审查清单（名称与审查要点来自当前审查技能包 review_domain / 应用设置）：\n")
         for i, fd in enumerate(focus_definitions, 1):
             name = str(fd.get("name") or "").strip()
             pid = str(fd.get("id") or name).strip()

@@ -22,7 +22,7 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert "chunk_limit" in body["data"]
     assert body["data"].get("chunk_strategy") == "blank"
     assert "disable_image_parse" in body["data"]
-    assert "rules_md_error" in body["data"]
+    assert "review_domain_error" in body["data"]
     assert body["data"]["llm_settings"]["text_model"] == "qwen3"
     assert body["data"]["llm_settings"]["vl_model"] == "qwen3-vl-plus"
     assert body["data"]["llm_settings"]["vl_base_url"] == ""
@@ -30,7 +30,9 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert body["data"]["llm_settings"]["text_base_url"] == ""
     assert body["data"]["llm_settings"]["has_text_api_key"] is False
     assert body["data"]["llm_settings"]["has_vl_api_key"] is False
-    assert body["data"]["focus_combo_tips"] == []
+    assert isinstance(body["data"]["focus_combo_tips"], list)
+    assert body["data"]["active_skill_package_id"] == "package-general"
+    assert "review_skill_packages" in body["data"].get("review_domain_path", "")
     assert body["data"]["disable_image_parse"] is True
 
     payload = {
@@ -56,7 +58,7 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     b2 = s.json()["data"]
     assert b2["chunk_limit"] == 55
     assert len(b2["focus_points"]) == 2
-    assert b2["rules_md_error"] is None
+    assert b2["review_domain_error"] is None
     assert b2["llm_settings"]["text_provider"] == "openai_compatible"
     assert b2["llm_settings"]["text_base_url"] == "https://api.minimax.chat"
     assert b2["llm_settings"]["text_model"] == "MiniMax-M2.5"
@@ -69,9 +71,9 @@ def test_settings_get_and_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     app_md = tmp_path / "app_settings.md"
     assert app_md.is_file()
     assert '"chunk_strategy"' in app_md.read_text(encoding="utf-8")
-    rules_md = tmp_path / "rules.md"
-    assert rules_md.is_file()
-    txt = rules_md.read_text(encoding="utf-8")
+    rd = tmp_path / "review_skill_packages" / "package-general" / "review_domain.md"
+    assert rd.is_file()
+    txt = rd.read_text(encoding="utf-8")
     assert "## 关注点块" in txt
     assert "### focus:fp1 | 关注A" in txt
     assert "chunk_limit" not in txt
@@ -91,19 +93,21 @@ def test_settings_rejects_invalid_chunk_strategy(monkeypatch: pytest.MonkeyPatch
     assert r.status_code == 400
 
 
-def test_settings_reports_rules_md_parse_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_settings_reports_review_domain_parse_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
-    (tmp_path / "rules.md").write_text("# broken rules\n\nno table here\n", encoding="utf-8")
+    pkg = tmp_path / "review_skill_packages" / "package-general"
+    pkg.mkdir(parents=True)
+    (pkg / "review_domain.md").write_text("# broken rules\n\nno table here\n", encoding="utf-8")
     client = TestClient(app)
     r = client.get("/api/v1/settings")
     assert r.status_code == 200
     body = r.json()["data"]
-    assert isinstance(body.get("rules_md_error"), str)
-    assert "关注点块" in body["rules_md_error"]
+    assert isinstance(body.get("review_domain_error"), str)
+    assert "关注点块" in body["review_domain_error"]
 
 
 def test_trim_accidental_combo_section_in_prompt_unit() -> None:
-    from backend.main import _trim_accidental_combo_section_in_prompt
+    from backend.skills.review_domain_io import trim_accidental_combo_section_in_prompt as _trim_accidental_combo_section_in_prompt
 
     p = "正文\n\n## 组合使用建议\n\n| 评审节点 | x |\n|---|---|"
     assert "组合使用建议" not in _trim_accidental_combo_section_in_prompt(p)
@@ -111,7 +115,7 @@ def test_trim_accidental_combo_section_in_prompt_unit() -> None:
 
 
 def test_trim_accidental_combo_section_h3_heading_unit() -> None:
-    from backend.main import _trim_accidental_combo_section_in_prompt
+    from backend.skills.review_domain_io import trim_accidental_combo_section_in_prompt as _trim_accidental_combo_section_in_prompt
 
     p = "正文\n\n### 组合使用建议\n\n| 评审节点 | x |\n|---|---|"
     assert "组合使用建议" not in _trim_accidental_combo_section_in_prompt(p)
@@ -133,7 +137,7 @@ def test_focus_prompt_stops_before_combo_section_heading(monkeypatch: pytest.Mon
         "| 阶段1 | `focus:a` | | | |\n"
     )
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
-    (tmp_path / "rules.md").write_text(text, encoding="utf-8")
+    (tmp_path / "default_skills.md").write_text(text, encoding="utf-8")
     client = TestClient(app)
     r = client.get("/api/v1/settings")
     assert r.status_code == 200
@@ -146,7 +150,7 @@ def test_focus_prompt_stops_before_combo_section_heading(monkeypatch: pytest.Mon
     assert tips[0]["stage"] == "阶段1"
 
 
-def test_rules_md_rejects_h3_combo_suggestions_heading(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_review_domain_rejects_h3_combo_suggestions_heading(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """「组合使用建议」须用 ##；禁止 ### 组合使用建议（强校验仅允许 ### focus:）。"""
     text = (
         "# x\n\n"
@@ -161,11 +165,11 @@ def test_rules_md_rejects_h3_combo_suggestions_heading(monkeypatch: pytest.Monke
         "| 阶段1 | `focus:a` | | | |\n"
     )
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
-    (tmp_path / "rules.md").write_text(text, encoding="utf-8")
+    (tmp_path / "default_skills.md").write_text(text, encoding="utf-8")
     client = TestClient(app)
     r = client.get("/api/v1/settings")
     assert r.status_code == 200
-    err = r.json()["data"]["rules_md_error"]
+    err = r.json()["data"]["review_domain_error"]
     assert isinstance(err, str)
     assert "focus:" in err
     assert "###" in err or "三级" in err
@@ -184,11 +188,11 @@ def test_validate_and_import_reject_h3_combo_suggestions_heading(
         "| --- | --- | --- | --- | --- |\n"
         "| n | `focus:a` | | | |\n"
     )
-    v = client.post("/api/v1/settings/rules-md/validate", json={"text": text})
+    v = client.post("/api/v1/settings/review-domain/validate", json={"text": text})
     assert v.status_code == 400
     assert "focus:" in v.json()["message"]
 
-    i = client.post("/api/v1/settings/rules-md/import", json={"text": text})
+    i = client.post("/api/v1/settings/review-domain/import", json={"text": text})
     assert i.status_code == 400
     assert "focus:" in i.json()["message"]
 
@@ -220,7 +224,7 @@ def test_settings_clear_llm_api_key(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert s2.json()["data"]["llm_settings"]["has_vl_api_key"] is False
 
 
-def test_import_rules_md(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_import_review_domain(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
     client = TestClient(app)
     text = (
@@ -231,16 +235,18 @@ def test_import_rules_md(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
         "### focus:riskx | 风险扩展\n"
         "这是扩展风险关注点。\n"
     )
-    v = client.post("/api/v1/settings/rules-md/validate", json={"text": text})
+    v = client.post("/api/v1/settings/review-domain/validate", json={"text": text})
     assert v.status_code == 200
     assert v.json()["data"]["count"] == 2
 
-    i = client.post("/api/v1/settings/rules-md/import", json={"text": text})
+    i = client.post("/api/v1/settings/review-domain/import", json={"text": text})
     assert i.status_code == 200
     data = i.json()["data"]
     assert len(data["focus_points"]) == 2
     assert data["focus_points"][0]["id"] == "reqx"
-    saved = (tmp_path / "rules.md").read_text(encoding="utf-8")
+    saved = (tmp_path / "review_skill_packages" / "package-general" / "review_domain.md").read_text(
+        encoding="utf-8"
+    )
     assert "focus:reqx" in saved
 
 
@@ -248,7 +254,7 @@ def test_settings_reads_focus_combo_tips_alt_heading_and_fullwidth_pipe(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
-    (tmp_path / "rules.md").write_text(
+    (tmp_path / "default_skills.md").write_text(
         (
             "# r\n\n"
             "## 关注点块\n\n"
@@ -278,7 +284,7 @@ def test_focus_presets_parse_chinese_ids_five_column_combo_table(
 ) -> None:
     """中文 focus id + 五列表（说明类内容放在审查目标与原则列）。"""
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
-    (tmp_path / "rules.md").write_text(
+    (tmp_path / "default_skills.md").write_text(
         (
             "# r\n\n"
             "## 关注点块\n\n"
@@ -315,7 +321,14 @@ def test_settings_post_returns_focus_combo_tips_and_presets(monkeypatch: pytest.
             {"id": "fp2", "name": "关注B", "prompt": "请重点分析B"},
         ],
         "focus_presets": [
-            {"id": "preset_x", "name": "双关注方案", "focus_points": ["关注A", "关注B"]},
+            {
+                "id": "preset_x",
+                "name": "双关注方案",
+                "focus_points": ["关注A", "关注B"],
+                "review_role": "审查角色不为空",
+                "review_goals_principles": "审查目标与原则不为空",
+                "output_requirements": "输出要求不为空",
+            },
         ],
         "llm_settings": {
             "text_provider": "openai_compatible",
@@ -336,9 +349,40 @@ def test_settings_post_returns_focus_combo_tips_and_presets(monkeypatch: pytest.
     assert set(data["focus_presets"][0]["focus_points"]) == {"关注A", "关注B"}
 
 
-def test_settings_reads_focus_combo_tips_from_rules_md(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_settings_rejects_empty_preset_review_fields(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
-    (tmp_path / "rules.md").write_text(
+    client = TestClient(app)
+    payload = {
+        "focus_points": [
+            {"id": "fp1", "name": "关注A", "prompt": "请重点分析A"},
+            {"id": "fp2", "name": "关注B", "prompt": "请重点分析B"},
+        ],
+        "focus_presets": [
+            {
+                "id": "preset_x",
+                "name": "双关注方案",
+                "focus_points": ["关注A", "关注B"],
+                "review_role": "",
+                "review_goals_principles": "x",
+                "output_requirements": "x",
+            },
+        ],
+        "llm_settings": {
+            "text_provider": "openai_compatible",
+            "text_base_url": "",
+            "text_model": "qwen3",
+            "vl_model": "qwen3-vl-plus",
+            "vl_base_url": "",
+        },
+    }
+    s = client.post("/api/v1/settings", json=payload)
+    assert s.status_code == 400
+    assert "must be a non-empty string" in (s.json().get("message") or "")
+
+
+def test_settings_reads_focus_combo_tips_from_review_domain(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
+    (tmp_path / "default_skills.md").write_text(
         (
             "# r\n\n"
             "## 关注点块\n\n"
@@ -361,16 +405,18 @@ def test_settings_reads_focus_combo_tips_from_rules_md(monkeypatch: pytest.Monke
     assert "focus:req" in tips[0]["recommended"]
 
 
-def test_no_auto_fallback_to_default_rules_when_rules_md_invalid(
+def test_no_auto_fallback_to_default_skills_when_review_domain_invalid(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """损坏的 rules.md 不会触发读取 default_rules.md；应报错且关注点/组合表为空。"""
+    """损坏的 review_domain.md 不会自动被根目录 default_skills.md 替换；应报错且关注点/组合表为空。"""
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
-    (tmp_path / "rules.md").write_text(
+    pkg = tmp_path / "review_skill_packages" / "package-general"
+    pkg.mkdir(parents=True)
+    (pkg / "review_domain.md").write_text(
         "# broken\n\n## 组合使用建议\n| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |\n| --- | --- | --- | --- | --- |\n| 假行 | `focus:ghost` | | | |\n",
         encoding="utf-8",
     )
-    (tmp_path / "default_rules.md").write_text(
+    (tmp_path / "default_skills.md").write_text(
         (
             "# d\n\n"
             "## 关注点块\n\n"
@@ -387,18 +433,18 @@ def test_no_auto_fallback_to_default_rules_when_rules_md_invalid(
     r = client.get("/api/v1/settings")
     assert r.status_code == 200
     data = r.json()["data"]
-    assert isinstance(data.get("rules_md_error"), str) and data["rules_md_error"]
-    assert "解析失败" in data["rules_md_error"]
+    assert isinstance(data.get("review_domain_error"), str) and data["review_domain_error"]
+    assert "解析失败" in data["review_domain_error"]
     assert data["focus_points"] == []
     assert data["focus_combo_tips"] == []
     assert data["focus_presets"] == []
 
 
-def test_restore_default_rules_template_endpoint(
+def test_restore_default_skills_template_endpoint(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
-    (tmp_path / "default_rules.md").write_text(
+    (tmp_path / "default_skills.md").write_text(
         (
             "# d\n\n"
             "## 关注点块\n\n"
@@ -412,45 +458,12 @@ def test_restore_default_rules_template_endpoint(
         encoding="utf-8",
     )
     client = TestClient(app)
-    r = client.post("/api/v1/settings/rules-md/restore-default-template")
+    r = client.post("/api/v1/settings/review-domain/restore-default-skills-template")
     assert r.status_code == 200
     data = r.json()["data"]
-    assert data.get("rules_md_error") in (None, "")
+    assert data.get("review_domain_error") in (None, "")
     assert len(data["focus_points"]) >= 1
-    assert (tmp_path / "rules.md").is_file()
-
-
-def test_combo_tips_respects_ai_ka_rules_filename_only(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
-) -> None:
-    """AIKA_RULES_FILENAME=rules_new2.md 时只读该文件，不合并其它规则文件。"""
-    monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
-    monkeypatch.setenv("AIKA_RULES_FILENAME", "rules_new2.md")
-    (tmp_path / "rules.md").write_text(
-        "# r\n\n### focus:x | X\n旧表\n## 组合使用建议\n| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |\n| --- | --- | --- | --- | --- |\n| 错 | `focus:x` | | | |\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "rules_new2.md").write_text(
-        (
-            "# r\n\n"
-            "## 关注点块\n\n"
-            "### focus:req | 需求\n"
-            "p\n\n"
-            "## 组合使用建议\n"
-            "| 评审节点 | 推荐组合的关注点 | 审查角色 | 审查目标与原则 | 输出要求 |\n"
-            "| --- | --- | --- | --- | --- |\n"
-            "| 节点A | `focus:req` | | | |\n"
-        ),
-        encoding="utf-8",
-    )
-    client = TestClient(app)
-    r = client.get("/api/v1/settings")
-    assert r.status_code == 200
-    data = r.json()["data"]
-    assert data.get("rules_filename") == "rules_new2.md"
-    tips = data["focus_combo_tips"]
-    assert len(tips) == 1
-    assert tips[0]["stage"] == "节点A"
+    assert (tmp_path / "review_skill_packages" / "package-general" / "review_domain.md").is_file()
 
 
 def test_combo_tips_uses_last_combo_heading_when_two_exist(
@@ -458,7 +471,7 @@ def test_combo_tips_uses_last_combo_heading_when_two_exist(
 ) -> None:
     """两处「组合*建议」标题时取最后一处（避免正文误匹配抢先）。"""
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
-    (tmp_path / "rules.md").write_text(
+    (tmp_path / "default_skills.md").write_text(
         (
             "# r\n\n"
             "## 关注点块\n\n"

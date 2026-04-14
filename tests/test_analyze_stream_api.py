@@ -49,7 +49,7 @@ def test_analyze_stream_post_rejects_unknown_focus(monkeypatch: pytest.MonkeyPat
 
 def test_analyze_stream_post_streams_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
-    (tmp_path / "rules.md").write_text(
+    (tmp_path / "default_skills.md").write_text(
         "# r\n\n## 关注点块\n\n### focus:req | 需求\n关注点提示\n",
         encoding="utf-8",
     )

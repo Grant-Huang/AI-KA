@@ -1,0 +1,7 @@
+{
+  "schema_version": "1",
+  "id": "package-general",
+  "name": "通用交付审查（默认）",
+  "version": "1.0.0",
+  "description": "默认关注点与组合表，源自 default_skills.md；可增删包目录切换审查域。"
+}

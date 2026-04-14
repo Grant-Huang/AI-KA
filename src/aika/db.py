@@ -241,6 +241,7 @@ class AnalysisRunRow:
     chunk_strategy: str
     used_entries_json: str
     output_markdown_path: str
+    run_metadata_json: str | None = None
 
 
 @dataclass(frozen=True)
@@ -266,6 +267,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
     _migrate_projects_web_columns(conn)
     _migrate_conversations_preset_id(conn)
+    _migrate_analysis_runs_metadata(conn)
 
 
 def _table_column_names(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -305,6 +307,13 @@ def _migrate_conversations_preset_id(conn: sqlite3.Connection) -> None:
         conn.commit()
     except sqlite3.OperationalError:
         pass
+
+
+def _migrate_analysis_runs_metadata(conn: sqlite3.Connection) -> None:
+    cols = _table_column_names(conn, "analysis_runs")
+    if "run_metadata_json" not in cols:
+        conn.execute("ALTER TABLE analysis_runs ADD COLUMN run_metadata_json TEXT")
+        conn.commit()
 
 
 def now_touch_project(conn: sqlite3.Connection, project_id: int) -> None:
@@ -398,6 +407,18 @@ def update_project_name(conn: sqlite3.Connection, project_id: int, name: str) ->
 def delete_project_documents(conn: sqlite3.Connection, project_id: int) -> None:
     conn.execute("DELETE FROM documents WHERE project_id=?", (project_id,))
     conn.commit()
+
+
+def delete_project(conn: sqlite3.Connection, *, project_id: int) -> bool:
+    """
+    Delete project row. Related rows are deleted by FK ON DELETE CASCADE:
+    - documents -> document_chunks
+    - conversations -> messages / analysis_runs / conversation_outputs
+    - analysis_jobs / annotations
+    """
+    cur = conn.execute("DELETE FROM projects WHERE id=?", (int(project_id),))
+    conn.commit()
+    return bool(cur.rowcount and cur.rowcount > 0)
 
 
 def list_projects(conn: sqlite3.Connection) -> list[ProjectRow]:
@@ -552,6 +573,71 @@ def list_chunk_texts(
     limit: int | None = None,
 ) -> list[str]:
     return [e["text"] for e in list_chunk_entries(conn, project_id=project_id, limit=limit)]
+
+
+def count_project_chunks(conn: sqlite3.Connection, *, project_id: int) -> int:
+    r = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM document_chunks c
+        JOIN documents d ON d.id = c.document_id
+        WHERE d.project_id=?
+        """,
+        (int(project_id),),
+    ).fetchone()
+    if r is None:
+        return 0
+    try:
+        return int(r["n"])
+    except Exception:
+        return int(r[0] or 0)
+
+
+def count_project_analysis_runs(conn: sqlite3.Connection, *, project_id: int) -> int:
+    """
+    Count analysis run records under a project.
+
+    We treat existence of analysis_runs as "审查记录" for deletion protection.
+    """
+    r = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM analysis_runs ar
+        JOIN conversations c ON c.id = ar.conversation_id
+        WHERE c.project_id=?
+        """,
+        (int(project_id),),
+    ).fetchone()
+    if r is None:
+        return 0
+    try:
+        return int(r["n"])
+    except Exception:
+        return int(r[0] or 0)
+
+
+def count_project_completed_outputs(conn: sqlite3.Connection, *, project_id: int) -> int:
+    """
+    Count completed output records under a project.
+
+    We treat existence of conversation_outputs as \"已完成审查记录\" for deletion protection.
+    Aborted runs that did not finish should not create conversation_outputs rows.
+    """
+    r = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM conversation_outputs co
+        JOIN conversations c ON c.id = co.conversation_id
+        WHERE c.project_id=?
+        """,
+        (int(project_id),),
+    ).fetchone()
+    if r is None:
+        return 0
+    try:
+        return int(r["n"])
+    except Exception:
+        return int(r[0] or 0)
 
 
 def search_chunks(
@@ -901,7 +987,7 @@ def list_recent_messages(
     lim = max(1, int(limit))
     rows = conn.execute(
         """
-        SELECT id, conversation_id, role, content
+        SELECT id, conversation_id, role, content, created_at
         FROM messages
         WHERE conversation_id=? AND role IN ('user', 'assistant')
         ORDER BY id DESC
@@ -916,6 +1002,7 @@ def list_recent_messages(
             conversation_id=int(r["conversation_id"]),
             role=str(r["role"]),
             content=str(r["content"]),
+            created_at=str(r["created_at"]),
         )
         for r in ordered
     ]
@@ -931,14 +1018,20 @@ def insert_analysis_run(
     chunk_strategy: str,
     used_entries: list[dict[str, Any]],
     output_markdown_path: str,
+    run_metadata: dict[str, Any] | None = None,
 ) -> AnalysisRunRow:
+    meta_s: str | None
+    if run_metadata is None:
+        meta_s = None
+    else:
+        meta_s = json.dumps(run_metadata, ensure_ascii=False)
     cur = conn.execute(
         """
         INSERT INTO analysis_runs(
           conversation_id, job_id, focus_points_json, chunk_limit, chunk_strategy,
-          used_entries_json, output_markdown_path
+          used_entries_json, output_markdown_path, run_metadata_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             conversation_id,
@@ -948,6 +1041,7 @@ def insert_analysis_run(
             str(chunk_strategy),
             json.dumps(list(used_entries), ensure_ascii=False),
             str(output_markdown_path),
+            meta_s,
         ),
     )
     conn.execute("UPDATE conversations SET updated_at=datetime('now') WHERE id=?", (conversation_id,))
@@ -962,6 +1056,7 @@ def insert_analysis_run(
         chunk_strategy=str(chunk_strategy),
         used_entries_json=json.dumps(list(used_entries), ensure_ascii=False),
         output_markdown_path=str(output_markdown_path),
+        run_metadata_json=meta_s,
     )
 
 
@@ -969,7 +1064,7 @@ def get_latest_analysis_run(conn: sqlite3.Connection, *, conversation_id: int) -
     r = conn.execute(
         """
         SELECT id, conversation_id, job_id, focus_points_json, chunk_limit, chunk_strategy,
-               used_entries_json, output_markdown_path
+               used_entries_json, output_markdown_path, run_metadata_json
         FROM analysis_runs
         WHERE conversation_id=?
         ORDER BY id DESC
@@ -979,6 +1074,7 @@ def get_latest_analysis_run(conn: sqlite3.Connection, *, conversation_id: int) -
     ).fetchone()
     if r is None:
         return None
+    rm = r["run_metadata_json"] if "run_metadata_json" in r.keys() else None
     return AnalysisRunRow(
         id=int(r["id"]),
         conversation_id=int(r["conversation_id"]),
@@ -988,6 +1084,7 @@ def get_latest_analysis_run(conn: sqlite3.Connection, *, conversation_id: int) -
         chunk_strategy=str(r["chunk_strategy"]),
         used_entries_json=str(r["used_entries_json"]),
         output_markdown_path=str(r["output_markdown_path"]),
+        run_metadata_json=(str(rm) if rm is not None else None),
     )
 
 

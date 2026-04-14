@@ -11,7 +11,6 @@ import {
   Radio,
   Select,
   Space,
-  Spin,
   Tabs,
   Tooltip,
   Typography,
@@ -26,6 +25,7 @@ import {
   ArrowUpOutlined,
   QuestionCircleOutlined,
   SettingOutlined,
+  FileSearchOutlined,
   StopOutlined,
   PlusOutlined,
   CheckOutlined,
@@ -34,23 +34,26 @@ import {
   CommentOutlined,
   UserOutlined,
   SearchOutlined,
+  FolderOpenOutlined,
 } from "@ant-design/icons";
 import {
   apiJson,
   deleteConversation,
+  deleteProject,
   fetchTextFile,
   getConversationsGlobal,
   getConversationDetail,
   getConversationMessages,
   getConversationsByPair,
+  getProjectIngestStatus,
   getPresetHistory,
   getConversationOutputsIndex,
   openConvertStream,
+  postAgentConversationStream,
   postAnalyzeConversationStream,
   postFollowupConversationStream,
 } from "./api";
-import { useConversationReplay } from "./hooks/useConversationReplay";
-import { parseHelpmeMarkdown } from "./helpTabs";
+import { parseMemoryInjectedItemsFromMilestonesRaw, useConversationReplay } from "./hooks/useConversationReplay";
 import SimpleMarkdown from "./SimpleMarkdown";
 import HelpPage from "./pages/help";
 import SystemSettingPage from "./pages/system_setting";
@@ -200,15 +203,18 @@ type SettingsData = {
   /** md_out 索引：incremental 仅新文件或内容变化；full 清空后全量重建 */
   md_index_mode?: MdIndexMode;
   llm_settings: LlmSettings;
-  rules_md_error?: string | null;
-  /** 后端实际解析 rules 的路径（用于排查「预设不显示」是否读错目录） */
+  review_domain_error?: string | null;
+  /** 后端实际解析审查域的路径（用于排查「预设不显示」是否读错目录） */
   repo_root?: string;
-  /** 当前唯一使用的规则文件名，由环境变量 AIKA_RULES_FILENAME 指定，默认 rules.md */
-  rules_filename?: string;
-  rules_md_path?: string;
+  /** 活动审查技能包 id（默认 package-general） */
+  active_skill_package_id?: string;
+  skill_packages?: Array<{ id: string; name: string; version?: string; path?: string; description?: string }>;
+  skill_packages_root?: string;
+  /** 当前活动包的 review_domain.md 绝对路径 */
+  review_domain_path?: string;
   focus_combo_tips?: FocusComboTipRow[];
-  /** rules.md 中「目的：」行解析出的主输入框功能提示（无则前端用默认占位） */
-  rules_composer_hint?: string | null;
+  /** review_domain 前言中「目的：」解析出的主输入框功能提示 */
+  composer_hint?: string | null;
 };
 
 type LogGroupKind = "system" | "business" | "error";
@@ -337,6 +343,13 @@ const REDACTED_THINK_CLOSE = /<\/(think|thinking|redacted_thinking)>/i;
 
 const STAGE_FRAGMENT_INDEX = "stage:片段与来源索引";
 
+/** 与本地流程里程碑用语对齐（后端 JSONL 仍可能写「解析文档」） */
+function milestoneDisplayName(name: string): string {
+  const n = String(name || "").trim();
+  if (n === "解析文档") return "文档转换";
+  return n;
+}
+
 /** 拆分模型输出中的 thinking 围栏；闭合后 thinkComplete 为 true，用于折叠态 */
 function splitRedactedThinkingBlock(md: string): {
   before: string;
@@ -387,20 +400,34 @@ function splitReportFromAnalysis(md: string): { analysisPart: string; reportPart
   return { analysisPart: "", reportPart: t };
 }
 
-/** 「思考分析」里程碑正文：有围栏则只显示围栏内；正文已在下方 final-report 时本小节不再重复提示 */
+/**
+ * 历史回放用：从单次运行落盘的完整 Markdown 中尽量抽出「思考」展示段。
+ * 优先与实时态相同的 fence 拆分；若无闭合 fence 则尝试 redacted_thinking 围栏内文本。
+ */
+function extractHistoryThinkMarkdown(md: string): string {
+  const t = String(md || "");
+  const sr = splitReportFromAnalysis(t);
+  if (sr.analysisPart.trim()) return sr.analysisPart.trim();
+  const rb = splitRedactedThinkingBlock(t);
+  if (rb.think.trim()) return rb.think.trim();
+  return "";
+}
+
+/**
+ * 「思考分析」里程碑正文：优先展示流式阶段写入的 detail（含 thinking / 工具日志等），
+ * 其次为落盘内容按 fence 拆出的 analysis 段；不再使用「合并到下方」类占位。
+ */
 function effectiveMilestoneBody(
   m: Milestone,
   reportSplit: { analysisPart: string; reportPart: string },
 ): string {
-  const isAnalysis = m.id === "stage:思考分析";
-  if (!isAnalysis) return m.detailText || "";
-  if (!reportSplit.reportPart.trim()) {
-    return m.detailText || "";
-  }
+  const isAnalysisStage = m.id === "stage:思考分析" || m.name === "思考分析";
+  if (!isAnalysisStage) return m.detailText || "";
+  const detail = (m.detailText || "").trim();
+  if (detail) return m.detailText || "";
   const ap = reportSplit.analysisPart.trim();
-  if (ap) return ap;
-  /* 无 thinking 围栏时全文作为报告在下方展示；仍保留占位，避免折叠/刷新后本小节“消失” */
-  return "（思考分析已合并到下方最终报告，此处不再重复显示）";
+  if (ap) return reportSplit.analysisPart;
+  return "";
 }
 
 /** 业务里程碑 Markdown：支持将围栏内 thinking 作为可折叠段展示（折叠开关由外部标题控制） */
@@ -418,6 +445,11 @@ function BusinessMilestoneMarkdown({ markdown, thinkingOpen }: { markdown: strin
   );
 }
 
+function toFencedCodeBlock(lang: string, content: string): string {
+  const body = String(content ?? "").replace(/\s+$/, "");
+  return `\`\`\`${lang}\n${body}\n\`\`\``;
+}
+
 export default function App() {
   const TEXT_MODEL_OPTIONS = ["qwen3", "MiniMax-M2.5"];
   const VL_MODEL_OPTIONS = ["qwen3-vl-plus"];
@@ -430,6 +462,13 @@ export default function App() {
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain">("analyze");
+  const [projectIngest, setProjectIngest] = useState<
+    Record<number, { initialized: boolean; chunk_count: number; md_out_exists: boolean; has_review_records?: boolean }>
+  >(
+    {},
+  );
+  const [corpusStaleReason, setCorpusStaleReason] = useState<string>("");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<number | null>(null);
   const [projectViewOnlyReason, setProjectViewOnlyReason] = useState<string>("");
@@ -439,7 +478,7 @@ export default function App() {
   const [chatSearchQuery, setChatSearchQuery] = useState("");
   const [analysisTypeDraft, setAnalysisTypeDraft] = useState("KA");
   const [draftText, setDraftText] = useState("");
-  /** 为 true 后不再显示 rules「目的：」占位，直至 rules_composer_hint 从服务端变化 */
+  /** 为 true 后不再显示「目的：」占位，直至 composer_hint 从服务端变化 */
   const [composerHintDismissed, setComposerHintDismissed] = useState(false);
   const prevRulesComposerHintRef = useRef<string | undefined>(undefined);
   const warnedNoPresetsRef = useRef(false);
@@ -452,12 +491,18 @@ export default function App() {
   const [conversationMessages, setConversationMessages] = useState<
     Array<{ id: number; role: string; content: string; created_at?: string }>
   >([]);
+  /** 后端会为每次分析写入 role=system 的审计行（分析请求参数），不应与对话混排 */
+  const visibleConversationMessages = useMemo(
+    () => conversationMessages.filter((m) => m.role === "user" || m.role === "assistant"),
+    [conversationMessages],
+  );
   const [conversationDownloads, setConversationDownloads] = useState<ConversationOutputsIndexItem[]>([]);
   const [historyRuns, setHistoryRuns] = useState<
     Array<{
       item: ConversationOutputsIndexItem;
       finalMarkdown: string;
       split: { analysisPart: string; reportPart: string };
+      memoryInjectedItems: Array<{ id: string; title?: string }>;
     }>
   >([]);
   const reportSplit = useMemo(() => splitReportFromAnalysis(finalMarkdown), [finalMarkdown]);
@@ -511,12 +556,44 @@ export default function App() {
         }
         continue;
       }
+      if (obj?.type === "agent_decision") {
+        const key = "stage:Agent:routing";
+        ensureMilestone(key, "Agent:routing", "system");
+        const pretty = (() => {
+          try {
+            return JSON.stringify(obj.decision, null, 2);
+          } catch {
+            return String(obj.decision);
+          }
+        })();
+        appendMilestoneDetail(key, `\n\n[agent_decision]\n${toFencedCodeBlock("json", pretty)}\n`);
+        continue;
+      }
       if (obj?.type === "chunk_index" && typeof obj.markdown === "string") {
         const md = String(obj.markdown);
         setFragmentIndexMd(md);
         const key = STAGE_FRAGMENT_INDEX;
         ensureMilestone(key, "片段与来源索引", "business");
         setMilestones((prev) => prev.map((mm) => (mm.id === key ? { ...mm, detailText: md } : mm)));
+        continue;
+      }
+      if (obj?.type === "memory_injected" && Array.isArray(obj.items)) {
+        const thinkKey = "stage:思考分析";
+        ensureMilestone(thinkKey, "思考分析", "business");
+        const parsed: Array<{ id: string; title?: string }> = [];
+        for (const x of obj.items) {
+          if (x && typeof x === "object" && "id" in x) {
+            const id = String((x as { id?: unknown }).id ?? "").trim();
+            if (id) parsed.push({ id, title: String((x as { title?: unknown }).title ?? "").trim() || undefined });
+          }
+        }
+        if (parsed.length) {
+          const lines = parsed.map((m) => {
+            const tit = m.title ? ` — ${m.title}` : "";
+            return `- ${m.id}${tit}`;
+          });
+          appendMilestoneDetail(thinkKey, `\n\n【加载的记忆】\n${lines.join("\n")}\n`);
+        }
         continue;
       }
       if (obj?.type === "error" && typeof obj.message === "string") {
@@ -544,6 +621,7 @@ export default function App() {
     let alive = true;
     setConversationMessages([]);
     setConversationDownloads([]);
+    setCorpusStaleReason("");
     void (async () => {
       if (selectedId == null || selectedConversationId == null) return;
       try {
@@ -563,6 +641,25 @@ export default function App() {
         const idx = await getConversationOutputsIndex(selectedId, selectedConversationId, 50);
         if (!alive) return;
         setConversationDownloads(Array.isArray(idx.items) ? idx.items : []);
+
+        // 语料就绪检查：若索引被清空/删除，历史会话仅供参考
+        try {
+          const st = await getProjectIngestStatus(selectedId);
+          if (!alive) return;
+          setProjectIngest((prev) => ({
+            ...prev,
+            [selectedId]: {
+              initialized: !!st.initialized,
+              chunk_count: Number(st.chunk_count) || 0,
+              md_out_exists: !!st.md_out_exists,
+              has_review_records: !!(st as any)?.has_review_records,
+            },
+          }));
+          setCorpusStaleReason(st.initialized ? "" : "语料已过期，历史会话仅供参考。");
+        } catch {
+          if (!alive) return;
+          setCorpusStaleReason("语料已过期，历史会话仅供参考。");
+        }
       } catch (e) {
         if (!alive) return;
         message.error(String((e as Error).message || e));
@@ -583,7 +680,12 @@ export default function App() {
       if (!items.length) return;
       // 避免一次会话输出过多导致页面卡顿：先限制到最近 30 组
       const take = items.slice(0, 30);
-      const rebuilt: Array<{ item: ConversationOutputsIndexItem; finalMarkdown: string; split: { analysisPart: string; reportPart: string } }> = [];
+      const rebuilt: Array<{
+        item: ConversationOutputsIndexItem;
+        finalMarkdown: string;
+        split: { analysisPart: string; reportPart: string };
+        memoryInjectedItems: Array<{ id: string; title?: string }>;
+      }> = [];
       for (const it of take) {
         if (!alive) return;
         let md = "";
@@ -592,7 +694,22 @@ export default function App() {
         } catch {
           md = "";
         }
-        rebuilt.push({ item: it, finalMarkdown: md, split: splitReportFromAnalysis(md) });
+        let memoryInjectedItems: Array<{ id: string; title?: string }> = [];
+        const mp = it.milestones_download_path;
+        if (mp) {
+          try {
+            const rawMs = await fetchTextFile(mp);
+            memoryInjectedItems = parseMemoryInjectedItemsFromMilestonesRaw(rawMs);
+          } catch {
+            memoryInjectedItems = [];
+          }
+        }
+        rebuilt.push({
+          item: it,
+          finalMarkdown: md,
+          split: splitReportFromAnalysis(md),
+          memoryInjectedItems,
+        });
       }
       if (!alive) return;
       setHistoryRuns(rebuilt);
@@ -602,7 +719,17 @@ export default function App() {
     };
   }, [conversationDownloads, selectedConversationId]);
   const [pipelineRunning, setPipelineRunning] = useState(false);
+  /** 历史会话：里程碑与报告拆分与「最后一条助手消息」对齐；实时跑批用当前 finalMarkdown */
+  const activeReportSplit = useMemo(() => {
+    if (!pipelineRunning && selectedConversationId != null) return historySplit;
+    return reportSplit;
+  }, [pipelineRunning, selectedConversationId, historySplit, reportSplit]);
   const [pipelineTaskBrief, setPipelineTaskBrief] = useState("");
+  const [lastSubmittedUserMessage, setLastSubmittedUserMessage] = useState<{ text: string; created_at: string } | null>(null);
+  const [problemAnalysis, setProblemAnalysis] = useState<string>("");
+  const userExpandedMilestonesRef = useRef<Set<string>>(new Set());
+  /** 可选：覆盖默认记忆检索词（默认后端用关注点拼接） */
+  const [memoryQueryDraft, setMemoryQueryDraft] = useState("");
   const [pipelineFailModal, setPipelineFailModal] = useState<{ step: PipelineStep; message: string } | null>(null);
   const [presetGate, setPresetGate] = useState<PresetGateState | null>(null);
   const [resultFeedback, setResultFeedback] = useState<"like" | "dislike" | null>(null);
@@ -627,16 +754,16 @@ export default function App() {
       has_vl_api_key: false,
     },
   });
-  const [rulesMdError, setRulesMdError] = useState<string | null>(null);
+  const [reviewDomainError, setReviewDomainError] = useState<string | null>(null);
   const [textApiKeyDraft, setTextApiKeyDraft] = useState("");
   const [textApiKeyTouched, setTextApiKeyTouched] = useState(false);
   const [vlApiKeyDraft, setVlApiKeyDraft] = useState("");
   const [vlApiKeyTouched, setVlApiKeyTouched] = useState(false);
   const [focusSelectedIndex, setFocusSelectedIndex] = useState(0);
   const [presetSelectedIndex, setPresetSelectedIndex] = useState(0);
-  /** 设置弹窗主 Tab：用于页脚仅在「规则」时显示加载/路径 */
-  const [settingsTabKey, setSettingsTabKey] = useState<"doc" | "rules" | "models">("doc");
-  /** 规则内子 Tab：切换离开「预设组合」时取消「新增预设」草稿 */
+  /** 设置弹窗主 Tab：用于页脚仅在「审查域」时显示加载/路径 */
+  const [settingsTabKey, setSettingsTabKey] = useState<"doc" | "models">("doc");
+  /** 审查域内子 Tab：切换离开「预设组合」时取消「新增预设」草稿 */
   const [rulesInnerTabKey, setRulesInnerTabKey] = useState<"focus_points" | "presets">("focus_points");
   /** 正在新建预设：名称/关注点/三文案来自 presetCreateDraft，直至确认或取消 */
   const [presetCreating, setPresetCreating] = useState(false);
@@ -687,7 +814,33 @@ export default function App() {
 
   const loadProjects = useCallback(async () => {
     const data = await apiJson<{ projects: Project[] }>("/api/v1/projects");
-    setProjects(data.projects || []);
+    const items = data.projects || [];
+    setProjects(items);
+    // 仅用于 UI 过滤与提示：按项目获取初始化状态（md_out/chunks 是否就绪）
+    const pairs = await Promise.all(
+      items.map(async (p) => {
+        try {
+          const st = await getProjectIngestStatus(p.id);
+          return [
+            p.id,
+            {
+              initialized: !!st.initialized,
+              chunk_count: Number(st.chunk_count) || 0,
+              md_out_exists: !!st.md_out_exists,
+              has_review_records: !!(st as any)?.has_review_records,
+            },
+          ] as const;
+        } catch {
+          return [p.id, { initialized: false, chunk_count: 0, md_out_exists: false }] as const;
+        }
+      }),
+    );
+    const next: Record<
+      number,
+      { initialized: boolean; chunk_count: number; md_out_exists: boolean; has_review_records?: boolean }
+    > = {};
+    for (const [pid, st] of pairs) next[pid] = st;
+    setProjectIngest(next);
   }, []);
 
   const loadConversations = useCallback(async (opts?: { q?: string }) => {
@@ -727,14 +880,16 @@ export default function App() {
     setSettingsDraft(merged);
     setFocusSelectedIndex(0);
     setPresetSelectedIndex(0);
-    setRulesMdError(merged.rules_md_error || null);
+    setReviewDomainError(merged.review_domain_error || null);
     setTextApiKeyDraft("");
     setTextApiKeyTouched(false);
     setVlApiKeyDraft("");
     setVlApiKeyTouched(false);
     if (!warnedNoPresetsRef.current && !(merged.focus_presets || []).length) {
       warnedNoPresetsRef.current = true;
-      message.warning("未加载到预设（focus_presets 为空）。请检查 rules.md 是否包含「组合使用建议」表格，或在设置中手工创建预设。");
+      message.warning(
+        "未加载到预设（focus_presets 为空）。请检查当前审查技能包的 review_domain.md 是否包含「组合使用建议」表格，或在设置中手工创建预设。",
+      );
     }
   }, []);
 
@@ -745,12 +900,12 @@ export default function App() {
 
   /** rules 中的「目的：」文案变化时，重新显示为输入框占位提示 */
   useEffect(() => {
-    const h = (settingsDraft.rules_composer_hint ?? "").trim();
+    const h = (settingsDraft.composer_hint ?? "").trim();
     if (prevRulesComposerHintRef.current !== h) {
       prevRulesComposerHintRef.current = h;
       setComposerHintDismissed(false);
     }
-  }, [settingsDraft.rules_composer_hint]);
+  }, [settingsDraft.composer_hint]);
 
   /** 主输入框一旦有内容，不再使用「目的：」占位 */
   useEffect(() => {
@@ -810,14 +965,12 @@ export default function App() {
       .finally(() => setHelpLoading(false));
   }, [helpOpen, isStandaloneHelp]);
 
-  // Standalone 页面：直接全屏渲染，不使用弹框
+  // Standalone 页面：直接全屏渲染，不使用弹框（布局与独立设置页一致）
   if (isStandaloneHelp) {
     return (
-      <HelpPage
-        loading={helpLoading}
-        markdown={helpMarkdown}
-        onClose={closeStandaloneView}
-      />
+      <div className="app-layout app-layout--standalone">
+        <HelpPage loading={helpLoading} markdown={helpMarkdown} onClose={closeStandaloneView} />
+      </div>
     );
   }
 
@@ -826,8 +979,6 @@ export default function App() {
   }, [chatsOpen]);
 
   const selected = useMemo(() => projects.find((p) => p.id === selectedId) || null, [projects, selectedId]);
-
-  const helpTabsParsed = useMemo(() => parseHelpmeMarkdown(helpMarkdown), [helpMarkdown]);
 
   const createConversation = useCallback(
     async (analysisType: string, title?: string, presetId?: string | null) => {
@@ -890,84 +1041,30 @@ export default function App() {
     const projectId = selectedId;
     const presetId = selectedPresetId;
 
-    // 配对查询：只要 count>0 就弹出，让用户选择已有会话或确认新建
+    // 配对查询：仅提示存在历史，不再强制选择/切换（弱化 count>0 逻辑）
     try {
       const pair = await getConversationsByPair(projectId, presetId);
       if (pair.count > 0) {
-        const items = [...(pair.conversations || [])].sort((a, b) => {
-          const ta = String(a.updated_at || "");
-          const tb = String(b.updated_at || "");
-          // desc
-          if (ta < tb) return 1;
-          if (ta > tb) return -1;
-          return Number(b.id) - Number(a.id);
+        const okProceed = await new Promise<boolean>((resolve) => {
+          Modal.confirm({
+            title: "发现该审查组合的历史会话",
+            okText: "继续",
+            cancelText: "取消",
+            content: (
+              <Space direction="vertical" style={{ width: "100%" }} size={10}>
+                <Text type="secondary">
+                  当前项目在该审查组合下已有历史会话。此提示仅用于提醒你可在会话历史中回看；本次不会自动切换会话。
+                </Text>
+                <Button type="link" onClick={() => setChatsOpen(true)}>
+                  打开会话历史
+                </Button>
+              </Space>
+            ),
+            onOk: () => resolve(true),
+            onCancel: () => resolve(false),
+          });
         });
-        const chosen = await new Promise<{ kind: "pick"; id: number } | { kind: "new" } | { kind: "cancel" }>(
-          (resolve) => {
-            let picked: number | "new" | null = items[0]?.id ?? null;
-            Modal.confirm({
-              title: "发现该项目的历史审查会话",
-              okText: "确认",
-              cancelText: "取消",
-              width: 1120,
-              content: (
-                <Space direction="vertical" style={{ width: "100%" }} size={12}>
-                  <Text type="secondary">
-                    当前项目在该审查组合下已有历史会话。建议优先查看/复用之前的审查；如项目文件或规则有变化，也可选择新建会话重新审查。
-                  </Text>
-                  <Radio.Group
-                    defaultValue={picked ?? undefined}
-                    style={{ width: "100%" }}
-                    onChange={(e) => {
-                      const v = e?.target?.value;
-                      if (v === "new") {
-                        picked = "new";
-                        return;
-                      }
-                      const n = Number(v);
-                      picked = Number.isFinite(n) ? n : null;
-                    }}
-                  >
-                    <Space direction="vertical" style={{ width: "100%" }} size={8}>
-                      {items.map((c) => (
-                        <Radio key={c.id} value={c.id} style={{ width: "100%" }}>
-                          <div style={{ fontWeight: 600 }}>{String(c.title || `会话 #${c.id}`)}</div>
-                          <div style={{ opacity: 0.75, marginTop: 2 }}>
-                            {c.updated_at ? `更新时间：${formatConversationTime(String(c.updated_at))}` : ""}
-                          </div>
-                        </Radio>
-                      ))}
-                      <Radio value="new" style={{ width: "100%" }}>
-                        <div style={{ fontWeight: 600 }}>创建新会话</div>
-                        <div style={{ opacity: 0.75, marginTop: 2 }}>不复用历史内容，从新会话开始重新审查。</div>
-                      </Radio>
-                    </Space>
-                  </Radio.Group>
-                  <Button type="link" onClick={() => setChatsOpen(true)}>
-                    打开会话历史（可删除多余会话）
-                  </Button>
-                </Space>
-              ),
-              onOk: async () => {
-                if (picked === "new") {
-                  resolve({ kind: "new" });
-                  return;
-                }
-                if (picked == null) {
-                  resolve({ kind: "cancel" });
-                  return;
-                }
-                resolve({ kind: "pick", id: picked });
-              },
-              onCancel: () => resolve({ kind: "cancel" }),
-            });
-          },
-        );
-        if (chosen.kind === "cancel") return null;
-        if (chosen.kind === "new") {
-          return await createFreshConversationForPreset();
-        }
-        return chosen.id;
+        if (!okProceed) return null;
       }
     } catch {
       // ignore: 失败时不阻断主流程（仍可走后续逻辑）
@@ -1119,7 +1216,7 @@ export default function App() {
       setFocusPresets(data.focus_presets || []);
       setSettingsDraft(data);
       setPresetSelectedIndex(0);
-      setRulesMdError(data.rules_md_error || null);
+      setReviewDomainError(data.review_domain_error || null);
       setTextApiKeyDraft("");
       setTextApiKeyTouched(false);
       setVlApiKeyDraft("");
@@ -1256,17 +1353,17 @@ export default function App() {
     if (!f) return;
     try {
       const text = await f.text();
-      const check = await apiJson<{ focus_points: FocusPoint[]; count: number }>("/api/v1/settings/rules-md/validate", {
+      const check = await apiJson<{ focus_points: FocusPoint[]; count: number }>("/api/v1/settings/review-domain/validate", {
         method: "POST",
         body: JSON.stringify({ text }),
       });
       Modal.confirm({
-        title: "确认加载 rules.md",
-        content: `检测通过：共 ${check.count} 个关注点。确认后将覆盖当前关注点并保存 rules.md。`,
+        title: "确认导入审查域",
+        content: `检测通过：共 ${check.count} 个关注点。确认后将写入当前活动审查技能包的 review_domain.md。`,
         okText: "确认加载",
         cancelText: "取消",
         onOk: async () => {
-          const data = await apiJson<SettingsData>("/api/v1/settings/rules-md/import", {
+          const data = await apiJson<SettingsData>("/api/v1/settings/review-domain/import", {
             method: "POST",
             body: JSON.stringify({ text }),
           });
@@ -1276,10 +1373,10 @@ export default function App() {
           setSettingsDraft(data);
           setFocusSelectedIndex(0);
           setPresetSelectedIndex(0);
-          setRulesMdError(data.rules_md_error || null);
+          setReviewDomainError(data.review_domain_error || null);
           setSelectedPresetId("");
           setFocusPoints([]);
-          message.success("rules.md 已加载并保存");
+          message.success("审查域已导入并保存");
         },
       });
     } catch (err) {
@@ -1322,7 +1419,7 @@ export default function App() {
 
   const renderMilestoneDetail = useCallback(
     (m: Milestone, opts?: { thinkingOpen?: boolean }) => {
-      const t = effectiveMilestoneBody(m, reportSplit);
+      const t = effectiveMilestoneBody(m, activeReportSplit);
       if (m.detailKind === "system") {
         return (
           <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}>
@@ -1346,7 +1443,7 @@ export default function App() {
       }
       return <BusinessMilestoneMarkdown markdown={t} thinkingOpen={opts?.thinkingOpen} />;
     },
-    [reportSplit],
+    [activeReportSplit],
   );
 
   const stopPipeline = () => {
@@ -1365,6 +1462,162 @@ export default function App() {
     appendMilestoneDetail("sys:control", "[info] 用户已终止流程。\n");
     setMilestoneStatus("sys:control", "done");
     message.info("流程已终止");
+  };
+
+  const runAgentMessage = async () => {
+    if (selectedId == null) {
+      message.warning("请先选择已初始化项目（如需注册目录与建立索引，请先进入项目初始化）");
+      return;
+    }
+    const st = projectIngest[selectedId];
+    if (!st?.initialized) {
+      message.warning("当前项目尚未完成初始化（索引未就绪）。请先进入「项目初始化」完成转换与索引。");
+      setMainPanel("ingest");
+      return;
+    }
+    const text = draftText.trim();
+    if (!text) {
+      message.warning("请输入内容");
+      return;
+    }
+    const convId =
+      selectedConversationId ??
+      (await createConversation(analysisTypeDraft, undefined, null));
+    if (convId == null) {
+      message.error("创建会话失败");
+      return;
+    }
+    setSelectedConversationId(convId);
+    setPipelineFailModal(null);
+    setComposerHintDismissed(true);
+    setPipelineRunning(true);
+    terminatedRef.current = false;
+    deltaAccRef.current = "";
+    currentStageKeyRef.current = "";
+    setMilestones([]);
+    setMilestoneOpenOverrides({});
+    setFinalMarkdown("");
+    setFragmentIndexMd("");
+    setResultFeedback(null);
+    setLastSubmittedUserMessage({ text, created_at: new Date().toISOString() });
+    const analysisText =
+      `目标：已收到你的请求（见上方用户输入）。\n\n` +
+      `计划：我会先做 routing（选择关注点/产物/是否需要澄清问题），然后进入 executing，按步骤输出过程与结果。`;
+    setProblemAnalysis(analysisText);
+    setDraftText("");
+    setPipelineTaskBrief("");
+    userExpandedMilestonesRef.current = new Set();
+
+    // 链式里程碑：问题分析作为第一步（可折叠，后续 routing/executing 在其后串联）
+    ensureMilestone("stage:问题分析", "问题分析", "system");
+    appendMilestoneDetail("stage:问题分析", analysisText);
+    setMilestoneStatus("stage:问题分析", "done");
+
+    const ac = new AbortController();
+    analyzeAbortRef.current = ac;
+    stopAnalyzeRef.current = () => {
+      ac.abort();
+      setPipelineRunning(false);
+    };
+
+    await runPipelineTryCatch(async () => {
+      await postAgentConversationStream(
+        selectedId,
+        convId,
+        { message: text },
+        (ev) => {
+          if (ev.type === "assistant_delta" && typeof (ev as any).text === "string") {
+            appendAnalyzeDelta(String((ev as any).text));
+          }
+          if (ev.type === "agent_stage" && typeof (ev as any).stage === "string") {
+            const name = `Agent:${String((ev as any).stage)}`;
+            const state = String((ev as any).state || "");
+            const key = `stage:${name}`;
+            const prev = currentStageKeyRef.current;
+            if (prev && prev !== key && !userExpandedMilestonesRef.current.has(prev)) {
+              setMilestoneOpenOverrides((o) => ({ ...o, [prev]: false }));
+            }
+            ensureMilestone(key, name, "system");
+            currentStageKeyRef.current = key;
+            if (state === "end") setMilestoneStatus(key, "done");
+          }
+          if (ev.type === "agent_decision") {
+            const d = (ev as any).decision;
+            const pretty = (() => {
+              try {
+                return JSON.stringify(d, null, 2);
+              } catch {
+                return String(d);
+              }
+            })();
+            const target = currentStageKeyRef.current || "stage:Agent:routing";
+            appendMilestoneDetail(target, `\n\n[agent_decision]\n${toFencedCodeBlock("json", pretty)}\n`);
+            // 动态更新「问题分析」：不重复回显用户输入正文，避免出现“两次回显”
+            try {
+              const intent = String((d as any)?.intent || "").trim();
+              const focusIds = Array.isArray((d as any)?.focus_ids) ? (d as any).focus_ids.map(String) : [];
+              const artifacts = Array.isArray((d as any)?.output_artifacts) ? (d as any).output_artifacts.map(String) : [];
+              const qs = Array.isArray((d as any)?.clarify_questions) ? (d as any).clarify_questions : [];
+              const planLines: string[] = [];
+              if (intent) planLines.push(`- 意图：${intent}`);
+              if (focusIds.length) planLines.push(`- 关注点：${focusIds.join("、")}`);
+              if (artifacts.length) planLines.push(`- 产物：${artifacts.join("、")}`);
+              if (Array.isArray(qs) && qs.length) planLines.push(`- 需要澄清：${qs.length} 条`);
+              const nextText =
+                `目标：已收到你的请求（见上方用户输入）。\n\n` +
+                `计划：\n${planLines.length ? planLines.join("\n") : "- 先做 routing→executing，按阶段输出过程与结果"}`;
+              setProblemAnalysis(nextText);
+              setMilestones((prev) =>
+                prev.map((m) => (m.id === "stage:问题分析" ? { ...m, detailText: nextText } : m)),
+              );
+            } catch {
+              // ignore
+            }
+          }
+          if (ev.type === "explain_skills" || ev.type === "explain_tools" || ev.type === "explain_hooks" || ev.type === "explain_memory") {
+            const target = currentStageKeyRef.current || "stage:Agent:executing";
+            const pretty = (() => {
+              try {
+                return JSON.stringify(ev, null, 2);
+              } catch {
+                return String(ev);
+              }
+            })();
+            appendMilestoneDetail(
+              target,
+              `\n\n[${String((ev as any).type)}]\n${toFencedCodeBlock("json", pretty)}\n`,
+            );
+          }
+          if (ev.type === "need_ingest" && typeof (ev as any).message === "string") {
+            const m = String((ev as any).message);
+            ensureMilestone("sys:need_ingest", "需要项目初始化", "system");
+            appendMilestoneDetail("sys:need_ingest", m + "\n");
+            setMilestoneStatus("sys:need_ingest", "done");
+            setCorpusStaleReason("语料已过期，历史会话仅供参考。");
+          }
+          if (ev.type === "artifact_ready" && typeof (ev as any).download_path === "string") {
+            const label = typeof (ev as any).label === "string" ? String((ev as any).label) : "下载";
+            const p = String((ev as any).download_path);
+            const key = `sys:artifact:${label}`;
+            ensureMilestone(key, `产物：${label}`, "business");
+            appendMilestoneDetail(key, `下载：${p}\n`);
+            setMilestoneStatus(key, "done");
+          }
+          if (ev.type === "final") {
+            const md = typeof (ev as any).markdown === "string" ? String((ev as any).markdown) : "";
+            if (md.trim()) {
+              setFinalMarkdown(md);
+              pushOutputEntry({ kind: "analyze", convId, title: "审查结果", markdown: md });
+            }
+          }
+          if (ev.type === "error") {
+            throw new Error(String((ev as any).message || "agent error"));
+          }
+        },
+        ac.signal,
+      );
+      message.success("完成");
+    });
   };
 
   const runConvertPhase = async () => {
@@ -1463,11 +1716,14 @@ export default function App() {
       review_role?: string;
       review_goals_principles?: string;
       output_requirements?: string;
+      memory_query?: string;
     } = {
       chunk_limit: chunkLimit,
       focus_points,
     };
     if (inc) analyzeBody.incremental_user_notes = inc;
+    const mq = memoryQueryDraft.trim();
+    if (mq) analyzeBody.memory_query = mq;
     const pr = (preset?.review_role ?? "").trim();
     if (pr) analyzeBody.review_role = pr;
     const pg = (preset?.review_goals_principles ?? "").trim();
@@ -1503,6 +1759,18 @@ export default function App() {
           if (ev.type === "delta" && typeof ev.text === "string") {
             appendAnalyzeDelta(ev.text);
           }
+          if (ev.type === "explain_skills" || ev.type === "explain_tools" || ev.type === "explain_hooks" || ev.type === "explain_memory") {
+            const key = "stage:评审策略";
+            ensureMilestone(key, "评审策略", "system");
+            const pretty = (() => {
+              try {
+                return JSON.stringify(ev, null, 2);
+              } catch {
+                return String(ev);
+              }
+            })();
+            appendMilestoneDetail(key, `\n\n[${String((ev as any).type)}]\n${pretty}\n`);
+          }
           if (ev.type === "chunk_index" && typeof (ev as { markdown?: string }).markdown === "string") {
             const md = String((ev as { markdown: string }).markdown);
             setFragmentIndexMd(md);
@@ -1537,6 +1805,23 @@ export default function App() {
           }
           if (ev.type === "final") {
             const md = typeof (ev as any).markdown === "string" ? String((ev as any).markdown) : "";
+            const rawMem = (ev as { memory_files_injected?: unknown }).memory_files_injected;
+            if (Array.isArray(rawMem) && rawMem.length) {
+              const parsed: Array<{ id: string; title?: string }> = [];
+              for (const x of rawMem) {
+                if (x && typeof x === "object" && "id" in x) {
+                  const id = String((x as { id?: unknown }).id ?? "").trim();
+                  if (id) parsed.push({ id, title: String((x as { title?: unknown }).title ?? "").trim() || undefined });
+                }
+              }
+              if (parsed.length) {
+                const lines = parsed.map((m) => {
+                  const tit = m.title ? ` — ${m.title}` : "";
+                  return `- ${m.id}${tit}`;
+                });
+                appendMilestoneDetail("stage:思考分析", `\n\n【加载的记忆】\n${lines.join("\n")}\n`);
+              }
+            }
             safeResolve({ markdown: md });
           }
           if (ev.type === "error") {
@@ -1697,7 +1982,7 @@ export default function App() {
 
   const runFullPipeline = async () => {
     if (selectedId == null) {
-      message.warning("请先选择或创建项目");
+      message.warning("请先选择已初始化项目（如需注册目录与建立索引，请先进入项目初始化）");
       return;
     }
     if (!selectedPresetId) {
@@ -1707,7 +1992,7 @@ export default function App() {
     const preset = focusPresets.find((p) => p.id === selectedPresetId);
     const presetFocusPoints = preset?.focus_points || [];
     if (!preset || presetFocusPoints.length === 0) {
-      message.warning("预设无可用关注点，请检查 rules.md 预设配置");
+      message.warning("预设无可用关注点，请检查审查技能包内预设配置");
       return;
     }
     setFocusPoints(presetFocusPoints);
@@ -1801,6 +2086,14 @@ export default function App() {
       return;
     }
 
+    // 首次审查：分析视图不再负责转换/索引。必须确保语料已初始化（chunks 就绪）。
+    const st = projectIngest[selectedId];
+    if (!st?.initialized) {
+      message.warning("当前项目尚未完成初始化（索引未就绪）。请先进入「项目初始化」完成转换与索引。");
+      setMainPanel("ingest");
+      return;
+    }
+
     setPipelineFailModal(null);
     setComposerHintDismissed(true);
     setPipelineRunning(true);
@@ -1815,15 +2108,9 @@ export default function App() {
     const projName = displayProjectSubject(selected);
     const fpSample = presetFocusPoints.slice(0, 3).join("、");
     const fpRest = presetFocusPoints.length > 3 ? "等" : "";
-    const taskBrief = `本次针对项目「${projName}」，将围绕${fpSample}${fpRest}共 ${presetFocusPoints.length} 项关注点开展关联审查。流程将顺序执行：① 文档转换（docs2md 将源文档转为 Markdown）；② 索引与分块（按设置中的分块策略建立可检索片段）；③ 模型分析（结合关注点生成结构化审查结论）。请关注下方各步骤日志；若您刚在设置中修改过分块策略，请务必重新执行索引后再解读分析结果，以免结论仍基于旧分块边界。`;
+    const taskBrief = `本次针对项目「${projName}」，将围绕${fpSample}${fpRest}共 ${presetFocusPoints.length} 项关注点开展关联审查。语料已完成初始化（转换与索引），本次将直接进入模型分析（并按需生成片段索引与审查结论）。若您刚在设置中修改过分块策略，请务必回到「项目初始化」重新执行索引，否则结论可能仍基于旧分块边界。`;
     setPipelineTaskBrief(taskBrief);
     await runPipelineTryCatch(async () => {
-      pipelineStepRef.current = "convert";
-      await runConvertPhase();
-      if (terminatedRef.current) return;
-      pipelineStepRef.current = "index";
-      await runIndexPhase();
-      if (terminatedRef.current) return;
       pipelineStepRef.current = "analyze";
       await runAnalyzePhase(presetFocusPoints, { convId });
       if (terminatedRef.current) return;
@@ -1843,7 +2130,7 @@ export default function App() {
     const preset = focusPresets.find((p) => p.id === selectedPresetId);
     const presetFocusPoints = preset?.focus_points || [];
     if (!preset || presetFocusPoints.length === 0) {
-      message.warning("预设无可用关注点，请检查 rules.md 预设配置");
+      message.warning("预设无可用关注点，请检查审查技能包内预设配置");
       return;
     }
     setFocusPoints(presetFocusPoints);
@@ -2020,6 +2307,7 @@ export default function App() {
     // 不弹窗、不强制选预设：进入“空白会话页”，由用户在该页选择预设与加载项目
     setChatsOpen(false);
     setNewConversationOpen(false);
+    setMainPanel("analyze");
     setSelectedConversationId(null);
     setSelectedPresetId("");
     setFocusPoints([]);
@@ -2031,14 +2319,25 @@ export default function App() {
     setPipelineTaskBrief("");
     // 让用户在新会话页自行加载项目；避免误将旧项目上下文带入新会话
     setSelectedId(null);
+    setCorpusStaleReason("");
   }, []);
 
   const composerTextPlaceholder = useMemo(() => {
     if (projectViewOnlyReason.trim()) return projectViewOnlyReason.trim();
+    if (corpusStaleReason.trim()) return corpusStaleReason.trim();
     if (composerHintDismissed) return DEFAULT_COMPOSER_PLACEHOLDER;
-    const h = (settingsDraft.rules_composer_hint ?? "").trim();
+    const h = (settingsDraft.composer_hint ?? "").trim();
     return h || DEFAULT_COMPOSER_PLACEHOLDER;
-  }, [projectViewOnlyReason, composerHintDismissed, settingsDraft.rules_composer_hint]);
+  }, [projectViewOnlyReason, corpusStaleReason, composerHintDismissed, settingsDraft.composer_hint]);
+
+  const canStartAgentMessage = useMemo(() => {
+    if (pipelineRunning) return false;
+    if (selectedId == null) return false;
+    if (!!projectViewOnlyReason.trim()) return false;
+    if (!!corpusStaleReason.trim()) return false;
+    if (!draftText.trim()) return false;
+    return true;
+  }, [pipelineRunning, selectedId, projectViewOnlyReason, corpusStaleReason, draftText]);
 
   const filteredConversations = useMemo(() => {
     const q = chatSearchQuery.trim().toLowerCase();
@@ -2050,707 +2349,21 @@ export default function App() {
     });
   }, [conversations, chatSearchQuery]);
 
-  const settingsBody = (
-    <Tabs
-      activeKey={settingsTabKey}
-      onChange={(k) => setSettingsTabKey(k as "doc" | "rules" | "models")}
-      items={[
-        {
-          key: "doc",
-          label: "文档",
-          children: (
-            <div style={{ fontSize: 12, paddingTop: 4 }}>
-              <Text strong style={{ display: "block", marginBottom: 8 }}>
-                文档分块
-              </Text>
-              <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                <div>
-                  <Text type="secondary" style={{ display: "block", marginBottom: 6 }}>
-                    chunk 上限（全局）
-                  </Text>
-                  <InputNumber
-                    min={1}
-                    max={500}
-                    value={settingsDraft.chunk_limit}
-                    onChange={(v) =>
-                      setSettingsDraft((s) => ({
-                        ...s,
-                        chunk_limit: Math.max(1, Math.min(500, Number(v) || 40)),
-                      }))
-                    }
-                  />
-                </div>
-                <div>
-                  <Text type="secondary" style={{ display: "block", marginBottom: 6 }}>
-                    分块模式
-                  </Text>
-                  <Radio.Group
-                    value={settingsDraft.chunk_strategy === "structured" ? "structured" : "blank"}
-                    onChange={(e) => setSettingsDraft((s) => ({ ...s, chunk_strategy: e.target.value as ChunkStrategy }))}
-                  >
-                    <Space direction="vertical" size={4}>
-                      <Radio value="blank">简单模式（空行分块）</Radio>
-                      <Radio value="structured">标题与结构感知模式（按标题/代码围栏）</Radio>
-                    </Space>
-                  </Radio.Group>
-                </div>
-              </Space>
-              <Text type="secondary" style={{ display: "block", marginTop: 10 }}>
-                修改分块策略后须重新执行索引，否则分析仍基于旧分块。
-              </Text>
+  const initializedProjects = useMemo(() => {
+    const items = projects.filter((p) => !!projectIngest[p.id]?.initialized);
+    // 多项目时：先按 chunk_count 降序，再按名称
+    return [...items].sort((a, b) => {
+      const ca = Number(projectIngest[a.id]?.chunk_count) || 0;
+      const cb = Number(projectIngest[b.id]?.chunk_count) || 0;
+      if (cb !== ca) return cb - ca;
+      return String(a.name || "").localeCompare(String(b.name || ""), "zh-Hans-CN");
+    });
+  }, [projects, projectIngest]);
 
-              <Divider style={{ margin: "14px 0" }} />
-
-              <Text strong style={{ display: "block", marginBottom: 8 }}>
-                图片解析
-              </Text>
-              {/* 下面的大段 settings 内容复用原 Modal JSX（保持不变），为避免重复拷贝，这里在 standalone 仍走原 Modal 的 Tabs 内容。 */}
-            </div>
-          ),
-        },
-        // 其余 tab 内容仍由原 Modal JSX 提供（保持原结构）
-        // NOTE: 这里会在下面的 Modal 中继续渲染完整 Tabs；standalone 只需要把 Modal 变成页面容器。
-      ]}
-    />
-  );
-
-  if (isStandaloneSettings) {
-    return (
-      <SystemSettingPage
-        content={settingsBody}
-        onSave={() => void saveSettings()}
-        onClose={closeStandaloneView}
-      />
-    );
-  }
-
-  return (
-    <div className={`app-layout${isStandalone ? " app-layout--standalone" : ""}`}>
-      <div className="side-nav">
-        <Button
-          type="text"
-          className="side-nav-btn"
-          icon={<PlusOutlined />}
-          title="新对话"
-          onClick={startNewConversationPage}
-        />
-        <Button
-          type="text"
-          className="side-nav-btn"
-          icon={<CommentOutlined />}
-          title="Chats"
-          onClick={() => setChatsOpen(true)}
-        />
-        <div className="side-nav-spacer" />
-        <div className="side-nav-bottom">
-          <Button
-            type="text"
-            className="side-nav-btn"
-            icon={<QuestionCircleOutlined />}
-            title="帮助（新窗口）"
-            onClick={() => openStandaloneWindow("help")}
-          />
-          <Button
-            type="text"
-            className="side-nav-btn"
-            icon={<SettingOutlined />}
-            title="设置（新窗口）"
-            onClick={() => openStandaloneWindow("settings")}
-          />
-          <Button type="text" className="side-nav-btn" icon={<UserOutlined />} title="用户" onClick={() => message.info("用户中心：占位")} />
-        </div>
-      </div>
-
-      <div className="app-shell">
-        <div className="main-surface">
-          {rulesMdError ? (
-            <Alert
-              type="error"
-              showIcon
-              message="规则文件无法加载"
-              description={
-                <>
-                  <div>{rulesMdError}</div>
-                  <div style={{ marginTop: 8 }}>
-                    不会自动读取 default_rules.md。可将仓库根目录的 default_rules.md 复制为当前活动规则文件，或调用 POST
-                    /api/v1/settings/rules-md/restore-default-template 从模板恢复后刷新。
-                  </div>
-                </>
-              }
-              style={{ marginBottom: 10 }}
-            />
-          ) : null}
-
-          {chatsOpen ? (
-            <div className="chat-history-page">
-              <div className="chat-history-toolbar">
-                <Title level={4} className="chat-history-title">
-                  会话历史
-                </Title>
-                <Button type="default" icon={<PlusOutlined />} onClick={startNewConversationPage}>
-                  新对话
-                </Button>
-              </div>
-              <Input
-                allowClear
-                className="chat-history-search"
-                placeholder="搜索会话…"
-                prefix={<SearchOutlined />}
-                value={chatSearchQuery}
-                onChange={(e) => setChatSearchQuery(e.target.value)}
-              />
-              {selected ? (
-                <Text type="secondary" className="chat-history-project-hint">
-                  当前项目：{displayProjectSubject(selected)}
-                </Text>
-              ) : (
-                <Text type="secondary" className="chat-history-project-hint">
-                  全局会话历史：可直接选择会话打开。
-                </Text>
-              )}
-              <div className="chat-history-list" role="list">
-                {filteredConversations.length ? (
-                  filteredConversations.map((c) => {
-                    const { headline, subline } = conversationListDisplay(c);
-                    const active = c.id === selectedConversationId;
-                    return (
-                      <div key={c.id} className="chat-history-item-row" role="listitem">
-                        <button
-                          type="button"
-                          className={`chat-history-item${active ? " chat-history-item--active" : ""}`}
-                          onClick={() => {
-                            const pid = c.project_id;
-                            if (typeof pid === "number") setSelectedId(pid);
-                            if (c.project_available === false) {
-                              setProjectViewOnlyReason("项目不可用或已删除：仅可查看历史会话，无法继续审查/追问。");
-                            } else {
-                              setProjectViewOnlyReason("");
-                            }
-                            setSelectedConversationId(c.id);
-                            setChatsOpen(false);
-                          }}
-                        >
-                          <div className="chat-history-item-title">{headline}</div>
-                          {subline ? <div className="chat-history-item-time">{subline}</div> : null}
-                          {c.project_name ? (
-                            <div className="chat-history-item-time">项目：{String(c.project_name)}</div>
-                          ) : null}
-                          {c.preset_id ? (
-                            <div className="chat-history-item-time">组合：{String(c.preset_id)}</div>
-                          ) : null}
-                          {c.project_available === false ? (
-                            <div className="chat-history-item-time">（项目不可用：仅可回看）</div>
-                          ) : null}
-                        </button>
-                        <div className="chat-history-item-delete">
-                          <Button
-                            type="text"
-                            icon={<CloseOutlined />}
-                            title="删除会话"
-                            onClick={(ev) => {
-                              ev.preventDefault();
-                              ev.stopPropagation();
-                              const pid = c.project_id;
-                              if (typeof pid !== "number") return;
-                              Modal.confirm({
-                                title: "确认删除会话",
-                                content: `将删除会话「${headline}」。此操作不可撤销。`,
-                                okText: "删除",
-                                okButtonProps: { danger: true },
-                                cancelText: "取消",
-                                onOk: async () => {
-                                  await deleteConversation(pid, c.id);
-                                  message.success("会话已删除");
-                                  // 若删的是当前会话，回到空白会话页
-                                  setSelectedConversationId((prev) => (prev === c.id ? null : prev));
-                                  // 刷新全局会话列表
-                                  await loadConversations({ q: chatSearchQuery });
-                                },
-                              });
-                            }}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <Text type="secondary">{conversations.length ? "无匹配会话" : "暂无历史对话"}</Text>
-                )}
-              </div>
-            </div>
-          ) : null}
-
-          {!chatsOpen && showMainOutput ? (
-            <>
-              <div className="pipeline-output-panel pipeline-output-panel--footer-clear">
-                {pipelineTaskBrief ? (
-                  <div className="pipeline-output-intro">
-                    <div className="pipeline-task-brief">{pipelineTaskBrief}</div>
-                  </div>
-                ) : null}
-                <div className="raw-stream stream-log process-stream">
-                  {!pipelineRunning && selectedConversationId != null && historyRuns.length ? (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                      {historyRuns.map((run) => {
-                        const it = run.item;
-                        const isRereview = it.kind === "rereview";
-                        const isFollowup = it.kind === "followup";
-                        const isAnalyze = it.kind === "analyze";
-                        const title = `${formatConversationTime(it.created_at)} · ${
-                          isAnalyze ? "审查" : isFollowup ? "追问" : isRereview ? "重新审查" : it.kind
-                        }`;
-
-                        const thinkText = (run.split.analysisPart || "").trim();
-                        const hasThink = Boolean(thinkText);
-
-                        return (
-                          <div key={`run-${it.id}`} style={{ fontSize: 12 }}>
-                            <div style={{ color: "#374151", fontWeight: 650, marginBottom: 6 }}>{title}</div>
-
-                            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                              <div style={{ color: "#374151", fontWeight: 550 }}>✓ 解析文档 &gt;</div>
-                              {it.fragments_index_download_path ? (
-                                <>
-                                  <div style={{ color: "#374151", fontWeight: 550 }}>✓ 片段与来源索引 &gt;</div>
-                                  <div className="fragment-index-download-bar">
-                                    <Button
-                                      type="default"
-                                      size="small"
-                                      icon={<DownloadOutlined />}
-                                      onClick={() =>
-                                        window.open(String(it.fragments_index_download_path), "_blank", "noopener,noreferrer")
-                                      }
-                                    >
-                                      片段索引.md
-                                    </Button>
-                                  </div>
-                                </>
-                              ) : null}
-
-                              {(() => {
-                                const key = `run-think:${it.id}`;
-                                const open = !!milestoneOpenOverrides[key];
-                                const sym = open ? "～" : ">";
-                                return (
-                                  <>
-                                    <button
-                                      type="button"
-                                      style={{
-                                        padding: 0,
-                                        margin: 0,
-                                        border: "none",
-                                        background: "transparent",
-                                        cursor: hasThink ? "pointer" : "default",
-                                        color: "#374151",
-                                        fontWeight: 550,
-                                        textAlign: "left",
-                                      }}
-                                      onClick={() => {
-                                        if (!hasThink) return;
-                                        setMilestoneOpenOverrides((prev) => ({ ...prev, [key]: !prev[key] }));
-                                      }}
-                                    >
-                                      ✓ 思考分析 {sym}
-                                    </button>
-                                    {hasThink && open ? (
-                                      <div style={{ marginTop: 0, color: "#6b7280" }}>
-                                        <div className="stream-render-text milestone-analysis-think-stream">{thinkText}</div>
-                                      </div>
-                                    ) : null}
-                                  </>
-                                );
-                              })()}
-
-                              <div style={{ color: "#374151", fontWeight: 550 }}>✓ 呈现结果 &gt;</div>
-                              <div className="result-actions-below-stream" style={{ paddingLeft: 0, paddingRight: 0 }}>
-                                <div className="result-export-row">
-                                  <Button
-                                    type="default"
-                                    size="small"
-                                    className="result-export-md-btn"
-                                    icon={<DownloadOutlined />}
-                                    onClick={() => window.open(it.final_download_path, "_blank", "noopener,noreferrer")}
-                                  >
-                                    审查结果.md
-                                  </Button>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : milestones.length ? (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                      {milestones
-                        .filter((m) => m.id !== "sys:complete")
-                        .flatMap((m) => {
-                          const isAnalysisMilestone = m.id === "stage:思考分析";
-                          const isHistoryView = !pipelineRunning && selectedConversationId != null;
-                          const effectiveText = effectiveMilestoneBody(m, isHistoryView ? historySplit : reportSplit);
-                          const showDetails = effectiveText.trim().length > 0;
-                          const done = m.status === "done";
-                          const running = m.status === "running";
-                          const lead = done ? "✓ " : running ? "→ " : "　";
-                          const displayName = m.name;
-                          const titleColor = m.status === "error" ? "#cf1322" : "#374151";
-                          const isThinkingStage = m.id === "stage:思考分析" || m.name === "思考分析";
-                          const defaultOpen = m.status === "running";
-                          const o = milestoneOpenOverrides[m.id];
-                          const expanded = o !== undefined ? o : defaultOpen;
-                          const expandedThinking = isThinkingStage ? (o !== undefined ? o : false) : expanded;
-                          const sym = isThinkingStage ? (expandedThinking ? "～" : ">") : ">";
-                          const title = `${lead}${displayName} ${sym}`;
-
-                          const milestoneBlock = (
-                            <div key={m.id} style={{ fontSize: 12 }}>
-                              {isAnalysisMilestone ? (
-                                showDetails ? (
-                                  <>
-                                    <button
-                                      type="button"
-                                      style={{
-                                        padding: 0,
-                                        margin: 0,
-                                        border: "none",
-                                        background: "transparent",
-                                        cursor: isThinkingStage ? "pointer" : "default",
-                                        color: titleColor,
-                                        fontWeight: 550,
-                                        marginBottom: 4,
-                                        textAlign: "left",
-                                      }}
-                                      onClick={() => {
-                                        if (!isThinkingStage) return;
-                                        setMilestoneOpenOverrides((prev) => ({ ...prev, [m.id]: !prev[m.id] }));
-                                      }}
-                                    >
-                                      {title}
-                                    </button>
-                                    <div style={{ marginTop: 0, color: "#6b7280" }}>
-                                      {renderMilestoneDetail(m, { thinkingOpen: isThinkingStage ? expandedThinking : undefined })}
-                                    </div>
-                                  </>
-                                ) : null
-                              ) : isHistoryView && !isThinkingStage ? (
-                                // 历史回放：除「思考分析」外只保留标题（但保留 ✓ 状态）
-                                <div style={{ color: titleColor, fontWeight: 550 }}>{title}</div>
-                              ) : showDetails ? (
-                                <details
-                                  style={{ marginTop: 0 }}
-                                  open={expanded}
-                                  onToggle={(ev) => {
-                                    const el = ev.currentTarget;
-                                    setMilestoneOpenOverrides((prev) => ({ ...prev, [m.id]: el.open }));
-                                  }}
-                                >
-                                  <summary style={{ cursor: "pointer", listStyle: "none", color: titleColor }}>{title}</summary>
-                                  <div style={{ marginTop: 6, color: "#6b7280" }}>{renderMilestoneDetail(m)}</div>
-                                </details>
-                              ) : null}
-                            </div>
-                          );
-
-                          if (m.id === STAGE_FRAGMENT_INDEX && fragmentIndexMd.trim()) {
-                            return [
-                              milestoneBlock,
-                              <div key={`${m.id}-frag-md-btn`} className="fragment-index-download-bar">
-                                <Button type="default" size="small" icon={<DownloadOutlined />} onClick={downloadFragmentIndexMd}>
-                                  片段索引.md
-                                </Button>
-                              </div>,
-                            ];
-                          }
-                          return [milestoneBlock];
-                        })}
-                    </div>
-                  ) : null}
-                </div>
-                {/* 会话历史：以消息流为准（同一会话多轮对话合并展示）。replay.entries 仅保留作兼容兜底。 */}
-                {!pipelineRunning && selectedConversationId != null && conversationMessages.length ? (
-                  <div className="conv-thread" aria-label="会话消息">
-                    {conversationMessages.map((m) => (
-                      <div key={m.id} className="conv-msg">
-                        <div className="conv-msg-role">{m.role}</div>
-                        <div className={`conv-msg-body${m.role === "user" ? " conv-msg-body--user" : ""}`}>
-                          {m.created_at ? <div className="conv-msg-meta">{formatConversationTime(m.created_at)}</div> : null}
-                          {m.role === "assistant" ? (
-                            <SimpleMarkdown markdown={String(m.content || "")} />
-                          ) : (
-                            <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{String(m.content || "")}</div>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : !pipelineRunning && replay.entries.length ? (
-                  <div className="pipeline-final-report">
-                    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-                      {replay.entries.map((e) => (
-                        <div key={e.id}>
-                          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6 }}>
-                            {formatConversationTime(e.createdAt)} · {e.kind}
-                          </div>
-                          <SimpleMarkdown markdown={e.markdown} />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-
-                {/* 会话历史下载：已改为在每个 run 的原位置展示（见上方 historyRuns 回放区域） */}
-                {!pipelineRunning && visibleOutputEntries.length ? (
-                  <div className="pipeline-final-report">
-                    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-                      {visibleOutputEntries.map((e) => (
-                        <div key={e.id}>
-                          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6 }}>
-                            {formatLocalDateTime(new Date(e.at))} · {e.title}
-                          </div>
-                          <SimpleMarkdown markdown={e.markdown} />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-                {!pipelineRunning && reportSplit.reportPart.trim() ? (
-                  <div className="pipeline-final-report">
-                    <SimpleMarkdown markdown={reportSplit.reportPart} />
-                  </div>
-                ) : null}
-                {!pipelineRunning && finalMarkdown.trim() ? (
-                  <div className="result-actions-below-stream" aria-label="结果操作">
-                    <div className="result-export-row">
-                      <Button
-                        type="default"
-                        size="small"
-                        className="result-export-md-btn"
-                        icon={<DownloadOutlined />}
-                        onClick={exportMarkdown}
-                      >
-                        审查结果.md
-                      </Button>
-                    </div>
-                    <div className="result-actions-bar-divider" aria-hidden="true" />
-                    <div className="result-output-actions">
-                      <Space size={4}>
-                        <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => void copyFinalMarkdown()} title="复制" />
-                        <Button
-                          type="text"
-                          size="small"
-                          icon={<LikeOutlined />}
-                          className={resultFeedback === "like" ? "result-feedback-like" : undefined}
-                          onClick={() => setResultFeedback((f) => (f === "like" ? null : "like"))}
-                          title="有用"
-                        />
-                        <Button
-                          type="text"
-                          size="small"
-                          icon={<DislikeOutlined />}
-                          className={resultFeedback === "dislike" ? "result-feedback-dislike" : undefined}
-                          onClick={() => setResultFeedback((f) => (f === "dislike" ? null : "dislike"))}
-                          title="无用"
-                        />
-                        <Button
-                          type="text"
-                          size="small"
-                          icon={<RedoOutlined />}
-                          onClick={() => void runFullPipeline()}
-                          disabled={
-                            pipelineRunning ||
-                            selectedId == null ||
-                            !selectedPresetId ||
-                            !!projectViewOnlyReason.trim()
-                          }
-                          title="重新执行全流程"
-                        />
-                      </Space>
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            </>
-          ) : null}
-
-      <Modal
-        title="该预设已有审查历史"
-        open={presetGate?.kind === "history"}
-        onCancel={() => {
-          if (presetGate?.kind !== "history") return;
-          presetGate.resolve({ kind: "cancel" });
-          setPresetGate(null);
-        }}
-        footer={null}
-        width={560}
-        destroyOnClose
-      >
-        {presetGate?.kind === "history" ? (
-          <Space direction="vertical" style={{ width: "100%" }} size={12}>
-            <Text type="secondary">
-              因为你选择了与当前会话不同的审查组合，所以系统检测到该预设在历史中已存在审查记录。
-              但是为了避免在同一会话里混用不同预设导致历史难以解释，请在下方选择要继续使用的会话：
-              <br />
-              - 最近审查会话：「{presetGate.latest.title}」
-              {presetGate.latest.updated_at ? `（${formatConversationTime(presetGate.latest.updated_at)}）` : ""}
-            </Text>
-            <Space wrap>
-              <Button
-                type="primary"
-                onClick={() => {
-                  if (presetGate?.kind !== "history") return;
-                  const id = presetGate.latest.id;
-                  setSelectedConversationId(id);
-                  presetGate.resolve({ kind: "ok", convId: id });
-                  setPresetGate(null);
-                }}
-              >
-                切换到该会话
-              </Button>
-              {presetGate.canReuseCurrent && presetGate.currentConvId != null ? (
-                <Button
-                  onClick={() => {
-                    if (presetGate?.kind !== "history" || presetGate.currentConvId == null) return;
-                    presetGate.resolve({ kind: "ok", convId: presetGate.currentConvId });
-                    setPresetGate(null);
-                  }}
-                >
-                  仍使用当前会话
-                </Button>
-              ) : null}
-              <Button
-                onClick={() => {
-                  if (presetGate?.kind !== "history") return;
-                  presetGate.resolve({ kind: "cancel" });
-                  setPresetGate(null);
-                }}
-              >
-                取消
-              </Button>
-            </Space>
-          </Space>
-        ) : null}
-      </Modal>
-
-      <Modal
-        title="流程中断"
-        open={pipelineFailModal != null}
-        onCancel={() => setPipelineFailModal(null)}
-        footer={null}
-        width={560}
-        destroyOnClose
-      >
-        {pipelineFailModal ? (
-          <Space direction="vertical" style={{ width: "100%" }} size={12}>
-            <Text strong>
-              失败阶段：
-              {pipelineFailModal.step === "convert"
-                ? "文档转换"
-                : pipelineFailModal.step === "index"
-                  ? "索引与分块"
-                  : "模型分析"}
-            </Text>
-            <Text type="danger" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-              {pipelineFailModal.message}
-            </Text>
-            <Text type="secondary">排除故障后，可选择从哪一步继续：</Text>
-            <Space wrap>
-              {pipelineFailModal.step === "convert" ? (
-                <>
-                  <Button type="primary" onClick={() => void resumePipelineAfterFailure("convert_chain")}>
-                    重试转换并继续（索引→分析）
-                  </Button>
-                  <Button onClick={() => void resumePipelineAfterFailure("full")}>全流程重来</Button>
-                </>
-              ) : null}
-              {pipelineFailModal.step === "index" ? (
-                <>
-                  <Button type="primary" onClick={() => void resumePipelineAfterFailure("index_chain")}>
-                    重试索引并继续分析
-                  </Button>
-                  <Button onClick={() => void resumePipelineAfterFailure("full")}>全流程重来</Button>
-                </>
-              ) : null}
-              {pipelineFailModal.step === "analyze" ? (
-                <>
-                  <Button type="primary" onClick={() => void resumePipelineAfterFailure("analyze_only")}>
-                    仅重试模型分析
-                  </Button>
-                  <Button onClick={() => void resumePipelineAfterFailure("index_chain")}>重试索引后再分析</Button>
-                  <Button onClick={() => void resumePipelineAfterFailure("full")}>全流程重来</Button>
-                </>
-              ) : null}
-            </Space>
-          </Space>
-        ) : null}
-      </Modal>
-
-      <Modal
-        title="设置"
-        open={isStandaloneSettings ? true : settingsOpen}
-        onOk={saveSettings}
-        onCancel={() => (isStandaloneSettings ? closeStandaloneView() : setSettingsOpen(false))}
-        width={960}
-        centered
-        okText="保存"
-        mask={!isStandaloneSettings}
-        getContainer={undefined}
-        styles={{
-          body: {
-            maxHeight: isStandaloneSettings ? "calc(100dvh - 180px)" : "min(580px, calc(100vh - 200px))",
-            overflowY: "auto",
-            paddingBlock: 12,
-          },
-        }}
-        footer={(_, { OkBtn, CancelBtn }) => (
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              gap: 12,
-              width: "100%",
-              flexWrap: "wrap",
-            }}
-          >
-            <div
-              style={{
-                flex: "1 1 200px",
-                minWidth: 0,
-                textAlign: "left",
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                flexWrap: "wrap",
-              }}
-            >
-              {settingsTabKey === "rules" ? (
-                <>
-                  <Button size="small" onClick={onPickRulesFile}>
-                    加载 rules
-                  </Button>
-                  {settingsDraft.rules_md_path ? (
-                    <Text type="secondary" style={{ fontSize: 11 }}>
-                      当前规则文件：
-                      <Text code style={{ fontSize: 11, wordBreak: "break-all" }}>
-                        {settingsDraft.rules_md_path}
-                      </Text>
-                    </Text>
-                  ) : null}
-                </>
-              ) : (
-                <span />
-              )}
-            </div>
-            <Space>
-              {isStandaloneSettings ? <Button onClick={closeStandaloneView}>关闭</Button> : <CancelBtn />}
-              <OkBtn />
-            </Space>
-          </div>
-        )}
-      >
+  const settingsTabsNode = (
         <Tabs
           activeKey={settingsTabKey}
-          onChange={(k) => setSettingsTabKey(k as "doc" | "rules" | "models")}
+          onChange={(k) => setSettingsTabKey(k as "doc" | "models")}
           items={[
             {
               key: "doc",
@@ -2824,333 +2437,7 @@ export default function App() {
                 </div>
               ),
             },
-            {
-              key: "rules",
-              label: "规则",
-              children: (
-                <div style={{ fontSize: 12, paddingTop: 4 }}>
-                  {(settingsDraft.focus_presets || []).length === 0 ? (
-                    <Alert
-                      type={
-                        (settingsDraft.focus_combo_tips || []).length > 0
-                          ? "warning"
-                          : rulesMdError
-                            ? "error"
-                            : "info"
-                      }
-                      showIcon
-                      style={{ marginBottom: 10 }}
-                      message={
-                        (settingsDraft.focus_combo_tips || []).length > 0
-                          ? "已解析「组合使用建议」表格，但未能生成预设"
-                          : rulesMdError
-                            ? "规则文件解析异常（关注点也可能不完整）；请查看页顶错误条"
-                            : "未识别到「组合使用建议」表格"
-                      }
-                      description={
-                        (settingsDraft.focus_combo_tips || []).length > 0
-                          ? "通常是因为表格中的 `focus:id` 与关注点 id 不一致（含全角符号差异）。请与 `### focus:…` 中 id 完全一致。若规则文件能解析关注点却仍报错，请重启后端以加载最新选源逻辑。"
-                          : "请在活动规则文件内包含「组合使用建议」：须为固定五列表（评审节点、推荐组合的关注点、审查角色、审查目标与原则、输出要求），二级标题须含「组合使用建议」。"
-                      }
-                    />
-                  ) : null}
-                  <input ref={rulesFileInputRef} type="file" accept=".md,text/markdown" style={{ display: "none" }} onChange={onRulesFileChosen} />
-                  <Tabs
-                    size="small"
-                    activeKey={rulesInnerTabKey}
-                    onChange={(k) => {
-                      const key = k as "focus_points" | "presets";
-                      setRulesInnerTabKey(key);
-                      if (key !== "presets") setPresetCreating(false);
-                    }}
-                    items={[
-                      {
-                        key: "focus_points",
-                        label: "关注点",
-                        children: (
-                          <div style={{ display: "flex", gap: 12, marginTop: 4, alignItems: "stretch" }}>
-                            <div
-                              style={{
-                                width: 280,
-                                border: "1px solid #d9dfd7",
-                                borderRadius: 8,
-                                padding: 8,
-                                minHeight: 200,
-                                maxHeight: 240,
-                                overflow: "auto",
-                                background: "#f7f9f6",
-                              }}
-                            >
-                              <Space direction="vertical" style={{ width: "100%" }} size={6}>
-                                {settingsDraft.focus_points.map((fp, idx) => (
-                                  <Button
-                                    key={fp.id}
-                                    type="text"
-                                    className={idx === focusSelectedIndex ? "focus-chip focus-chip-active" : "focus-chip"}
-                                    style={{
-                                      textAlign: "left",
-                                      justifyContent: "flex-start",
-                                      width: "100%",
-                                      borderRadius: 14,
-                                      border: idx === focusSelectedIndex ? "1px solid #4f7f67" : "1px solid #d9dfd7",
-                                      background: idx === focusSelectedIndex ? "#dbeadf" : "#eef3ed",
-                                      color: idx === focusSelectedIndex ? "#2e5f49" : "#3e4a40",
-                                      fontWeight: idx === focusSelectedIndex ? 600 : 500,
-                                      boxShadow: idx === focusSelectedIndex ? "0 0 0 1px rgba(79,127,103,0.15)" : "none",
-                                    }}
-                                    onClick={() => setFocusSelectedIndex(idx)}
-                                  >
-                                    {fp.name || fp.id}
-                                  </Button>
-                                ))}
-                              </Space>
-                            </div>
-                            <div style={{ flex: 1, border: "1px solid #d9dfd7", padding: 10, borderRadius: 8, minHeight: 200, maxHeight: 240, background: "#f7f9f6" }}>
-                              {settingsDraft.focus_points.length ? (
-                                <Space direction="vertical" style={{ width: "100%" }}>
-                                  <Input.TextArea
-                                    rows={8}
-                                    placeholder="该关注点对应的提示词（prompt）"
-                                    value={settingsDraft.focus_points[focusSelectedIndex]?.prompt}
-                                    onChange={(e) => updateSelectedFocusPrompt(e.target.value)}
-                                    style={{ minHeight: 180, maxHeight: 200, resize: "none" }}
-                                  />
-                                </Space>
-                              ) : (
-                                <Text type="secondary">rules.md 未提供可用关注点</Text>
-                              )}
-                            </div>
-                          </div>
-                        ),
-                      },
-                      {
-                        key: "presets",
-                        label: "预设组合",
-                        children: (() => {
-                          const presetsArr = settingsDraft.focus_presets || [];
-                          const n = presetsArr.length;
-                          const idxSafe = n > 0 ? Math.min(Math.max(0, presetSelectedIndex), n - 1) : 0;
-                          const editing = presetCreating;
-                          const nameVal = editing ? presetCreateDraft.name : presetsArr[idxSafe]?.name ?? "";
-                          const focusVal = editing ? presetCreateDraft.focus_points : presetsArr[idxSafe]?.focus_points ?? [];
-                          const roleVal = editing ? presetCreateDraft.review_role : presetsArr[idxSafe]?.review_role ?? "";
-                          const goalsVal = editing ? presetCreateDraft.review_goals_principles : presetsArr[idxSafe]?.review_goals_principles ?? "";
-                          const outVal = editing ? presetCreateDraft.output_requirements : presetsArr[idxSafe]?.output_requirements ?? "";
-                          const showRightFields = editing || n > 0;
-                          const activeRow = (i: number) => i === idxSafe && !presetCreating;
-
-                          return (
-                            <div style={{ marginTop: 4 }}>
-                              <div style={{ display: "flex", gap: 12, alignItems: "stretch" }}>
-                                <div
-                                  style={{
-                                    width: 300,
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: 8,
-                                    minHeight: 0,
-                                  }}
-                                >
-                                  <div
-                                    style={{
-                                      border: "1px solid #d9dfd7",
-                                      borderRadius: 8,
-                                      padding: 8,
-                                      maxHeight: 260,
-                                      overflow: "auto",
-                                      background: "#f7f9f6",
-                                      flexShrink: 0,
-                                    }}
-                                  >
-                                    <Space direction="vertical" style={{ width: "100%" }} size={6}>
-                                      {presetsArr.map((p, idx) => (
-                                        <div
-                                          key={p.id}
-                                          style={{
-                                            display: "flex",
-                                            alignItems: "center",
-                                            gap: 4,
-                                            width: "100%",
-                                          }}
-                                        >
-                                          <Button
-                                            type="text"
-                                            className={activeRow(idx) ? "focus-chip focus-chip-active" : "focus-chip"}
-                                            style={{
-                                              textAlign: "left",
-                                              justifyContent: "flex-start",
-                                              flex: 1,
-                                              minWidth: 0,
-                                              borderRadius: 14,
-                                              border: activeRow(idx) ? "1px solid #4f7f67" : "1px solid #d9dfd7",
-                                              background: activeRow(idx) ? "#dbeadf" : "#eef3ed",
-                                              color: activeRow(idx) ? "#2e5f49" : "#3e4a40",
-                                              fontWeight: activeRow(idx) ? 600 : 500,
-                                            }}
-                                            onClick={() => {
-                                              setPresetCreating(false);
-                                              setPresetSelectedIndex(idx);
-                                            }}
-                                          >
-                                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name || p.id}</span>
-                                          </Button>
-                                          <Button
-                                            type="text"
-                                            size="small"
-                                            danger
-                                            icon={<CloseOutlined />}
-                                            aria-label={`删除预设 ${p.name || p.id}`}
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              confirmDeletePresetAt(idx);
-                                            }}
-                                          />
-                                        </div>
-                                      ))}
-                                      {presetsArr.length === 0 ? (
-                                        <Text type="secondary">暂无预设（若 rules 含五列表「组合使用建议」，导入或保存后将生成）</Text>
-                                      ) : null}
-                                    </Space>
-                                  </div>
-
-                                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                    <Text type="secondary" style={{ flexShrink: 0, fontSize: 12 }}>
-                                      名称
-                                    </Text>
-                                    <Input
-                                      placeholder={presetCreating ? "新预设名称" : "选中预设名称"}
-                                      value={nameVal}
-                                      onChange={(e) => {
-                                        const v = e.target.value;
-                                        if (presetCreating) {
-                                          setPresetCreateDraft((d) => ({ ...d, name: v }));
-                                        } else if (n > 0) {
-                                          updatePresetAt(idxSafe, { name: v });
-                                        }
-                                      }}
-                                      disabled={!presetCreating && n === 0}
-                                      style={{ flex: 1, minWidth: 0 }}
-                                    />
-                                    {!presetCreating ? (
-                                      <Tooltip title="新增预设：点击后清空名称与右侧三字段，填写后点勾确认">
-                                        <Button type="default" size="small" icon={<PlusOutlined />} aria-label="新增预设" onClick={startCreatePreset} />
-                                      </Tooltip>
-                                    ) : (
-                                      <Space size={0}>
-                                        <Tooltip title="取消新增，不保存草稿">
-                                          <Button size="small" icon={<MinusOutlined />} aria-label="取消新增" onClick={cancelCreatePreset} />
-                                        </Tooltip>
-                                        <Tooltip title="确认新增（需名称与非空关注点）">
-                                          <Button
-                                            type="primary"
-                                            size="small"
-                                            icon={<CheckOutlined />}
-                                            aria-label="确认新增"
-                                            disabled={!presetCreateDraft.name.trim()}
-                                            onClick={commitCreatePreset}
-                                          />
-                                        </Tooltip>
-                                      </Space>
-                                    )}
-                                  </div>
-
-                                  {presetCreating || n > 0 ? (
-                                    <Select
-                                      mode="multiple"
-                                      allowClear
-                                      placeholder="选择该预设包含的关注点"
-                                      style={{ width: "100%" }}
-                                      value={focusVal}
-                                      options={(settingsDraft.focus_points || []).map((x) => ({ value: x.name, label: x.name }))}
-                                      onChange={(vals) => {
-                                        const v = vals as string[];
-                                        if (presetCreating) {
-                                          setPresetCreateDraft((d) => ({ ...d, focus_points: v }));
-                                        } else if (n > 0) {
-                                          updatePresetAt(idxSafe, { focus_points: v });
-                                        }
-                                      }}
-                                    />
-                                  ) : null}
-                                </div>
-
-                                <div
-                                  style={{
-                                    flex: 1,
-                                    border: "1px solid #d9dfd7",
-                                    padding: 10,
-                                    borderRadius: 8,
-                                    minHeight: 260,
-                                    background: "#f7f9f6",
-                                    display: "flex",
-                                    flexDirection: "column",
-                                  }}
-                                >
-                                  {showRightFields ? (
-                                    <Space direction="vertical" style={{ width: "100%" }} size={8}>
-                                      <div>
-                                        <Text type="secondary" style={{ display: "block", marginBottom: 4 }}>
-                                          审查角色
-                                        </Text>
-                                        <Input.TextArea
-                                          rows={2}
-                                          placeholder="例如：有丰富经验的 MOM/ERP 实施负责人"
-                                          value={roleVal}
-                                          onChange={(e) => {
-                                            const v = e.target.value;
-                                            if (presetCreating) setPresetCreateDraft((d) => ({ ...d, review_role: v }));
-                                            else if (n > 0) updatePresetAt(idxSafe, { review_role: v });
-                                          }}
-                                          style={{ resize: "none" }}
-                                        />
-                                      </div>
-                                      <div>
-                                        <Text type="secondary" style={{ display: "block", marginBottom: 4 }}>
-                                          审查目标与原则
-                                        </Text>
-                                        <Input.TextArea
-                                          rows={4}
-                                          placeholder="目标、原则、分级与重点识别要求等"
-                                          value={goalsVal}
-                                          onChange={(e) => {
-                                            const v = e.target.value;
-                                            if (presetCreating) setPresetCreateDraft((d) => ({ ...d, review_goals_principles: v }));
-                                            else if (n > 0) updatePresetAt(idxSafe, { review_goals_principles: v });
-                                          }}
-                                          style={{ resize: "none" }}
-                                        />
-                                      </div>
-                                      <div>
-                                        <Text type="secondary" style={{ display: "block", marginBottom: 4 }}>
-                                          输出要求
-                                        </Text>
-                                        <Input.TextArea
-                                          rows={4}
-                                          placeholder="输出章节结构、约束与禁止项（将完整替代默认输出格式说明）"
-                                          value={outVal}
-                                          onChange={(e) => {
-                                            const v = e.target.value;
-                                            if (presetCreating) setPresetCreateDraft((d) => ({ ...d, output_requirements: v }));
-                                            else if (n > 0) updatePresetAt(idxSafe, { output_requirements: v });
-                                          }}
-                                          style={{ resize: "none" }}
-                                        />
-                                      </div>
-                                    </Space>
-                                  ) : (
-                                    <Text type="secondary">点击「名称」右侧 + 新建预设：先点 + 清空并填写，再选关注点，右侧填写三列文案后点勾确认。</Text>
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })(),
-                      },
-                    ]}
-                  />
-                </div>
-              ),
-            },
+            // 审查域已独立为主页面入口（左侧栏）；设置弹窗仅保留文档与模型配置
             {
               key: "models",
               label: "模型",
@@ -3329,56 +2616,1268 @@ export default function App() {
             },
           ]}
         />
+  );
+
+  const reviewDomainPageNode = (
+    <div style={{ maxWidth: 1080, margin: "0 auto", padding: "10px 10px 18px" }}>
+      <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12 }}>
+        <div>
+          <Title level={4} style={{ margin: "6px 0 6px" }}>
+            审查域设定
+          </Title>
+          <Text type="secondary">
+            管理当前活动审查技能包的关注点与组合。
+          </Text>
+        </div>
+        <Space wrap>
+          <Button type="primary" onClick={() => void saveSettings()}>
+            保存
+          </Button>
+        </Space>
+      </div>
+
+      <Divider style={{ margin: "14px 0" }} />
+
+      <Space direction="vertical" style={{ width: "100%" }} size={12}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+          <div>
+            <Text type="secondary" style={{ display: "block", marginBottom: 6 }}>
+              当前审查技能包
+            </Text>
+            <Select
+              style={{ minWidth: 320 }}
+              value={settingsDraft.active_skill_package_id || "package-general"}
+              options={(settingsDraft.skill_packages || []).map((p) => ({
+                value: p.id,
+                label: p.version ? `${p.name} (${p.version})` : p.name,
+              }))}
+              onChange={(v) => setSettingsDraft((s) => ({ ...s, active_skill_package_id: String(v || "") }))}
+              disabled={!(settingsDraft.skill_packages || []).length}
+            />
+          </div>
+          <div style={{ flex: 1 }} />
+          <div className="settings-tab-rules-file">
+            <Button size="small" onClick={onPickRulesFile}>
+              导入审查域
+            </Button>
+          </div>
+        </div>
+
+        {settingsDraft.skill_packages_root ? (
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            包根目录：
+            <Text code style={{ fontSize: 11, wordBreak: "break-all" }}>
+              {settingsDraft.skill_packages_root}
+            </Text>
+          </Text>
+        ) : null}
+        {settingsDraft.review_domain_path ? (
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            当前审查域文件：
+            <Text code style={{ fontSize: 11, wordBreak: "break-all" }}>
+              {settingsDraft.review_domain_path}
+            </Text>
+          </Text>
+        ) : null}
+
+        {(settingsDraft.focus_presets || []).length === 0 ? (
+          <Alert
+            type={(settingsDraft.focus_combo_tips || []).length > 0 ? "warning" : reviewDomainError ? "error" : "info"}
+            showIcon
+            message={
+              (settingsDraft.focus_combo_tips || []).length > 0
+                ? "已解析「组合使用建议」表格，但未能生成预设"
+                : reviewDomainError
+                  ? "审查域解析异常（关注点也可能不完整）"
+                  : "未识别到「组合使用建议」表格"
+            }
+            description={
+              (settingsDraft.focus_combo_tips || []).length > 0
+                ? "通常是因为表格中的 `focus:id` 与关注点 id 不一致（含全角符号差异）。请与 `### focus:…` 中 id 完全一致。"
+                : "请在当前活动包的 review_domain.md 内包含「组合使用建议」五列表。"
+            }
+          />
+        ) : null}
+
+        <input
+          ref={rulesFileInputRef}
+          type="file"
+          accept=".md,text/markdown"
+          style={{ display: "none" }}
+          onChange={onRulesFileChosen}
+        />
+
+        <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12, background: "#fff" }}>
+          <Title level={5} style={{ margin: "0 0 10px" }}>
+            关注点
+          </Title>
+          <div style={{ display: "flex", gap: 12, alignItems: "stretch" }}>
+            <div style={{ width: 320, display: "flex", flexDirection: "column", gap: 8 }}>
+              <div
+                style={{
+                  border: "1px solid #d9dfd7",
+                  borderRadius: 10,
+                  padding: 10,
+                  minHeight: 320,
+                  maxHeight: 420,
+                  overflow: "auto",
+                  background: "#f7f9f6",
+                }}
+              >
+                <Space direction="vertical" style={{ width: "100%" }} size={6}>
+                  {settingsDraft.focus_points.map((fp, idx) => (
+                    <Button
+                      key={fp.id}
+                      type="text"
+                      className={idx === focusSelectedIndex ? "focus-chip focus-chip-active" : "focus-chip"}
+                      style={{
+                        textAlign: "left",
+                        justifyContent: "flex-start",
+                        width: "100%",
+                        borderRadius: 14,
+                        border: idx === focusSelectedIndex ? "1px solid #4f7f67" : "1px solid #d9dfd7",
+                        background: idx === focusSelectedIndex ? "#dbeadf" : "#eef3ed",
+                        color: idx === focusSelectedIndex ? "#2e5f49" : "#3e4a40",
+                        fontWeight: idx === focusSelectedIndex ? 600 : 500,
+                        boxShadow: idx === focusSelectedIndex ? "0 0 0 1px rgba(79,127,103,0.15)" : "none",
+                      }}
+                      onClick={() => setFocusSelectedIndex(idx)}
+                    >
+                      {fp.name || fp.id}
+                    </Button>
+                  ))}
+                  {settingsDraft.focus_points.length === 0 ? <Text type="secondary">暂无关注点</Text> : null}
+                </Space>
+              </div>
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                提示：关注点的 id/name/prompt 将写回当前活动包的 <Text code>review_domain.md</Text>。
+              </Text>
+            </div>
+
+            <div style={{ flex: 1, border: "1px solid #d9dfd7", padding: 12, borderRadius: 10, background: "#f7f9f6" }}>
+              {settingsDraft.focus_points.length ? (
+                <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <div style={{ flex: 1 }}>
+                      <Text type="secondary" style={{ display: "block", marginBottom: 4 }}>
+                        id
+                      </Text>
+                      <Input
+                        value={settingsDraft.focus_points[focusSelectedIndex]?.id}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setSettingsDraft((s) => {
+                            const arr = [...(s.focus_points || [])];
+                            const i = Math.min(Math.max(0, focusSelectedIndex), Math.max(0, arr.length - 1));
+                            if (!arr[i]) return s;
+                            arr[i] = { ...arr[i], id: v };
+                            return { ...s, focus_points: arr };
+                          });
+                        }}
+                      />
+                    </div>
+                    <div style={{ flex: 2 }}>
+                      <Text type="secondary" style={{ display: "block", marginBottom: 4 }}>
+                        名称
+                      </Text>
+                      <Input
+                        value={settingsDraft.focus_points[focusSelectedIndex]?.name}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setSettingsDraft((s) => {
+                            const arr = [...(s.focus_points || [])];
+                            const i = Math.min(Math.max(0, focusSelectedIndex), Math.max(0, arr.length - 1));
+                            if (!arr[i]) return s;
+                            arr[i] = { ...arr[i], name: v };
+                            return { ...s, focus_points: arr };
+                          });
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <Text type="secondary" style={{ display: "block", marginBottom: 4 }}>
+                      Prompt
+                    </Text>
+                    <Input.TextArea
+                      rows={16}
+                      placeholder="该关注点对应的提示词（prompt）"
+                      value={settingsDraft.focus_points[focusSelectedIndex]?.prompt}
+                      onChange={(e) => updateSelectedFocusPrompt(e.target.value)}
+                      style={{ minHeight: 300, resize: "vertical" }}
+                    />
+                  </div>
+                </Space>
+              ) : (
+                <Text type="secondary">审查域未提供可用关注点</Text>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12, background: "#fff" }}>
+          <Title level={5} style={{ margin: "0 0 10px" }}>
+            组合（预设）
+          </Title>
+          {(() => {
+            const presetsArr = settingsDraft.focus_presets || [];
+            const n = presetsArr.length;
+            const idxSafe = n > 0 ? Math.min(Math.max(0, presetSelectedIndex), n - 1) : 0;
+            const editing = presetCreating;
+            const nameVal = editing ? presetCreateDraft.name : presetsArr[idxSafe]?.name ?? "";
+            const focusVal = editing ? presetCreateDraft.focus_points : presetsArr[idxSafe]?.focus_points ?? [];
+            const roleVal = editing ? presetCreateDraft.review_role : presetsArr[idxSafe]?.review_role ?? "";
+            const goalsVal = editing ? presetCreateDraft.review_goals_principles : presetsArr[idxSafe]?.review_goals_principles ?? "";
+            const outVal = editing ? presetCreateDraft.output_requirements : presetsArr[idxSafe]?.output_requirements ?? "";
+            const showRightFields = editing || n > 0;
+            const activeRow = (i: number) => i === idxSafe && !presetCreating;
+
+            return (
+              <div>
+                <div style={{ display: "flex", gap: 12, alignItems: "stretch" }}>
+                  <div style={{ width: 320, display: "flex", flexDirection: "column", gap: 8, minHeight: 0 }}>
+                    <div
+                      style={{
+                        border: "1px solid #d9dfd7",
+                        borderRadius: 10,
+                        padding: 10,
+                        maxHeight: 360,
+                        overflow: "auto",
+                        background: "#f7f9f6",
+                        flexShrink: 0,
+                      }}
+                    >
+                      <Space direction="vertical" style={{ width: "100%" }} size={6}>
+                        {presetsArr.map((p, idx) => (
+                          <div
+                            key={p.id}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 4,
+                              width: "100%",
+                            }}
+                          >
+                            <Button
+                              type="text"
+                              className={activeRow(idx) ? "focus-chip focus-chip-active" : "focus-chip"}
+                              style={{
+                                textAlign: "left",
+                                justifyContent: "flex-start",
+                                flex: 1,
+                                minWidth: 0,
+                                borderRadius: 14,
+                                border: activeRow(idx) ? "1px solid #4f7f67" : "1px solid #d9dfd7",
+                                background: activeRow(idx) ? "#dbeadf" : "#eef3ed",
+                                color: activeRow(idx) ? "#2e5f49" : "#3e4a40",
+                                fontWeight: activeRow(idx) ? 600 : 500,
+                              }}
+                              onClick={() => {
+                                setPresetCreating(false);
+                                setPresetSelectedIndex(idx);
+                              }}
+                            >
+                              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {p.name || p.id}
+                              </span>
+                            </Button>
+                            <Button
+                              type="text"
+                              size="small"
+                              danger
+                              icon={<CloseOutlined />}
+                              aria-label={`删除预设 ${p.name || p.id}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                confirmDeletePresetAt(idx);
+                              }}
+                            />
+                          </div>
+                        ))}
+                        {presetsArr.length === 0 ? <Text type="secondary">暂无预设</Text> : null}
+                      </Space>
+                    </div>
+
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <Text type="secondary" style={{ flexShrink: 0, fontSize: 12 }}>
+                        名称
+                      </Text>
+                      <Input
+                        placeholder={presetCreating ? "新预设名称" : "选中预设名称"}
+                        value={nameVal}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (presetCreating) {
+                            setPresetCreateDraft((d) => ({ ...d, name: v }));
+                          } else if (n > 0) {
+                            updatePresetAt(idxSafe, { name: v });
+                          }
+                        }}
+                        disabled={!presetCreating && n === 0}
+                        style={{ flex: 1, minWidth: 0 }}
+                      />
+                      {!presetCreating ? (
+                        <Tooltip title="新增预设">
+                          <Button type="default" size="small" icon={<PlusOutlined />} aria-label="新增预设" onClick={startCreatePreset} />
+                        </Tooltip>
+                      ) : (
+                        <Space size={0}>
+                          <Tooltip title="取消新增">
+                            <Button size="small" icon={<MinusOutlined />} aria-label="取消新增" onClick={cancelCreatePreset} />
+                          </Tooltip>
+                          <Tooltip title="确认新增（需名称）">
+                            <Button
+                              type="primary"
+                              size="small"
+                              icon={<CheckOutlined />}
+                              aria-label="确认新增"
+                              disabled={!presetCreateDraft.name.trim()}
+                              onClick={commitCreatePreset}
+                            />
+                          </Tooltip>
+                        </Space>
+                      )}
+                    </div>
+
+                    {presetCreating || n > 0 ? (
+                      <Select
+                        mode="multiple"
+                        allowClear
+                        placeholder="选择该预设包含的关注点"
+                        style={{ width: "100%" }}
+                        value={focusVal}
+                        options={(settingsDraft.focus_points || []).map((x) => ({ value: x.name, label: x.name }))}
+                        onChange={(vals) => {
+                          const v = vals as string[];
+                          if (presetCreating) {
+                            setPresetCreateDraft((d) => ({ ...d, focus_points: v }));
+                          } else if (n > 0) {
+                            updatePresetAt(idxSafe, { focus_points: v });
+                          }
+                        }}
+                      />
+                    ) : null}
+                  </div>
+
+                  <div
+                    style={{
+                      flex: 1,
+                      border: "1px solid #d9dfd7",
+                      padding: 12,
+                      borderRadius: 10,
+                      minHeight: 360,
+                      background: "#f7f9f6",
+                      display: "flex",
+                      flexDirection: "column",
+                    }}
+                  >
+                    {showRightFields ? (
+                      <Space direction="vertical" style={{ width: "100%" }} size={8}>
+                        <div>
+                          <Text type="secondary" style={{ display: "block", marginBottom: 4 }}>
+                            审查角色
+                          </Text>
+                          <Input.TextArea
+                            rows={2}
+                            placeholder="例如：有丰富经验的 MOM/ERP 实施负责人"
+                            value={roleVal}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              if (presetCreating) setPresetCreateDraft((d) => ({ ...d, review_role: v }));
+                              else if (n > 0) updatePresetAt(idxSafe, { review_role: v });
+                            }}
+                            style={{ resize: "vertical" }}
+                          />
+                        </div>
+                        <div>
+                          <Text type="secondary" style={{ display: "block", marginBottom: 4 }}>
+                            审查目标与原则
+                          </Text>
+                          <Input.TextArea
+                            rows={6}
+                            placeholder="目标、原则、分级与重点识别要求等"
+                            value={goalsVal}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              if (presetCreating) setPresetCreateDraft((d) => ({ ...d, review_goals_principles: v }));
+                              else if (n > 0) updatePresetAt(idxSafe, { review_goals_principles: v });
+                            }}
+                            style={{ resize: "vertical" }}
+                          />
+                        </div>
+                        <div>
+                          <Text type="secondary" style={{ display: "block", marginBottom: 4 }}>
+                            输出要求
+                          </Text>
+                          <Input.TextArea
+                            rows={6}
+                            placeholder="输出章节结构、约束与禁止项"
+                            value={outVal}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              if (presetCreating) setPresetCreateDraft((d) => ({ ...d, output_requirements: v }));
+                              else if (n > 0) updatePresetAt(idxSafe, { output_requirements: v });
+                            }}
+                            style={{ resize: "vertical" }}
+                          />
+                        </div>
+                      </Space>
+                    ) : (
+                      <Text type="secondary">点击名称右侧 + 新建预设，填写后保存。</Text>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      </Space>
+    </div>
+  );
+
+  if (isStandaloneSettings) {
+    return (
+      <div className="app-layout app-layout--standalone">
+        <SystemSettingPage
+          content={settingsTabsNode}
+          onSave={() => void saveSettings()}
+          onClose={closeStandaloneView}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className={`app-layout${isStandalone ? " app-layout--standalone" : ""}`}>
+      <div className="side-nav">
+        <Button
+          type="text"
+          className="side-nav-btn"
+          icon={<PlusOutlined />}
+          title="新对话"
+          onClick={startNewConversationPage}
+        />
+        <Button
+          type="text"
+          className="side-nav-btn"
+          icon={<CommentOutlined />}
+          title="审查历史"
+          onClick={() => setChatsOpen(true)}
+        />
+        <div className="side-nav-separator" aria-hidden="true" />
+        <Button
+          type="text"
+          className="side-nav-btn"
+          icon={<FolderOpenOutlined />}
+          title="项目初始化"
+          onClick={() => {
+            setChatsOpen(false);
+            setMainPanel("ingest");
+          }}
+        />
+        <Button
+          type="text"
+          className="side-nav-btn"
+          icon={<FileSearchOutlined />}
+          title="审查域设定"
+          onClick={() => {
+            setChatsOpen(false);
+            setMainPanel("review_domain");
+            // 进入独立页面时刷新一次，避免显示旧值
+            void loadSettings({ snapshot_chunk_strategy: true });
+          }}
+        />
+        <div className="side-nav-spacer" />
+        <div className="side-nav-bottom">
+          <Button
+            type="text"
+            className="side-nav-btn"
+            icon={<QuestionCircleOutlined />}
+            title="帮助（新窗口）"
+            onClick={() => openStandaloneWindow("help")}
+          />
+          <Button
+            type="text"
+            className="side-nav-btn"
+            icon={<SettingOutlined />}
+            title="设置（新窗口）"
+            onClick={() => openStandaloneWindow("settings")}
+          />
+          <Button type="text" className="side-nav-btn" icon={<UserOutlined />} title="用户" onClick={() => message.info("用户中心：占位")} />
+        </div>
+      </div>
+
+      <div className="app-shell">
+        <div className="main-surface">
+          {reviewDomainError ? (
+            <Alert
+              type="error"
+              showIcon
+              message="审查域无法加载"
+              description={
+                <>
+                  <div>{reviewDomainError}</div>
+                  <div style={{ marginTop: 8 }}>
+                    可将仓库根目录的 default_skills.md 复制到当前活动审查技能包的 review_domain.md，或调用 POST
+                    /api/v1/settings/review-domain/restore-default-skills-template 从模板写入当前活动包后刷新。
+                  </div>
+                </>
+              }
+              style={{ marginBottom: 10 }}
+            />
+          ) : null}
+
+          {chatsOpen ? (
+            <div className="chat-history-page">
+              <div className="chat-history-toolbar">
+                <Title level={4} className="chat-history-title">
+                  会话历史
+                </Title>
+                <Button type="default" icon={<PlusOutlined />} onClick={startNewConversationPage}>
+                  新对话
+                </Button>
+              </div>
+              <Input
+                allowClear
+                className="chat-history-search"
+                placeholder="搜索会话…"
+                prefix={<SearchOutlined />}
+                value={chatSearchQuery}
+                onChange={(e) => setChatSearchQuery(e.target.value)}
+              />
+              {selected ? (
+                <Text type="secondary" className="chat-history-project-hint">
+                  当前项目：{displayProjectSubject(selected)}
+                </Text>
+              ) : (
+                <Text type="secondary" className="chat-history-project-hint">
+                  全局会话历史：可直接选择会话打开。
+                </Text>
+              )}
+              <div className="chat-history-list" role="list">
+                {filteredConversations.length ? (
+                  filteredConversations.map((c) => {
+                    const { headline, subline } = conversationListDisplay(c);
+                    const active = c.id === selectedConversationId;
+                    return (
+                      <div key={c.id} className="chat-history-item-row" role="listitem">
+                        <button
+                          type="button"
+                          className={`chat-history-item${active ? " chat-history-item--active" : ""}`}
+                          onClick={() => {
+                            const pid = c.project_id;
+                            if (typeof pid === "number") setSelectedId(pid);
+                            if (c.project_available === false) {
+                              setProjectViewOnlyReason("项目不可用或已删除：仅可查看历史会话，无法继续审查/追问。");
+                            } else {
+                              setProjectViewOnlyReason("");
+                            }
+                            setMainPanel("analyze");
+                            setSelectedConversationId(c.id);
+                            setChatsOpen(false);
+                          }}
+                        >
+                          <div className="chat-history-item-title">{headline}</div>
+                          {subline ? <div className="chat-history-item-time">{subline}</div> : null}
+                          {c.project_name ? (
+                            <div className="chat-history-item-time">项目：{String(c.project_name)}</div>
+                          ) : null}
+                          {c.preset_id ? (
+                            <div className="chat-history-item-time">组合：{String(c.preset_id)}</div>
+                          ) : null}
+                          {c.project_available === false ? (
+                            <div className="chat-history-item-time">（项目不可用：仅可回看）</div>
+                          ) : null}
+                        </button>
+                        <div className="chat-history-item-delete">
+                          <Button
+                            type="text"
+                            icon={<CloseOutlined />}
+                            title="删除会话"
+                            onClick={(ev) => {
+                              ev.preventDefault();
+                              ev.stopPropagation();
+                              const pid = c.project_id;
+                              if (typeof pid !== "number") return;
+                              Modal.confirm({
+                                title: "确认删除会话",
+                                content: `将删除会话「${headline}」。此操作不可撤销。`,
+                                okText: "删除",
+                                okButtonProps: { danger: true },
+                                cancelText: "取消",
+                                onOk: async () => {
+                                  await deleteConversation(pid, c.id);
+                                  message.success("会话已删除");
+                                  // 若删的是当前会话，回到空白会话页
+                                  setSelectedConversationId((prev) => (prev === c.id ? null : prev));
+                                  // 刷新全局会话列表
+                                  await loadConversations({ q: chatSearchQuery });
+                                },
+                              });
+                            }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <Text type="secondary">{conversations.length ? "无匹配会话" : "暂无历史对话"}</Text>
+                )}
+              </div>
+            </div>
+          ) : null}
+
+          {!chatsOpen && mainPanel === "ingest" ? (
+            <div style={{ maxWidth: 980, margin: "0 auto", padding: "10px 10px 18px" }}>
+              <Title level={4} style={{ margin: "6px 0 10px" }}>
+                项目初始化
+              </Title>
+              <Text type="secondary">
+                这里用于注册项目目录并完成文档转换与索引。初始化完成后，请切回“分析”视图进行流式审查与多轮追问。
+              </Text>
+
+              <Divider style={{ margin: "14px 0" }} />
+
+              <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                <div>
+                  <Text type="secondary" style={{ display: "block", marginBottom: 6 }}>
+                    已注册项目
+                  </Text>
+                  <Select
+                    style={{ minWidth: 380 }}
+                    showSearch
+                    placeholder="选择项目"
+                    value={selectedId ?? undefined}
+                    options={projects.map((p) => ({ value: p.id, label: p.name }))}
+                    filterOption={(input, opt) =>
+                      String(opt?.label || "").toLowerCase().includes(String(input || "").toLowerCase())
+                    }
+                    onChange={(v) => {
+                      const pid = Number(v);
+                      if (!Number.isFinite(pid)) return;
+                      setSelectedId(pid);
+                      setProjectViewOnlyReason("");
+                      setCorpusStaleReason("");
+                    }}
+                  />
+                  <Space style={{ marginLeft: 8 }}>
+                    <Button type="default" loading={pickLoading} onClick={() => void openProjectPicker()}>
+                      选择目录并注册
+                    </Button>
+                    <Button type="default" onClick={() => setManualPickOpen(true)}>
+                      手动输入路径
+                    </Button>
+                    {selectedId != null &&
+                    projectIngest[selectedId]?.initialized &&
+                    !projectIngest[selectedId]?.has_review_records ? (
+                      <Button
+                        danger
+                        type="default"
+                        onClick={() => {
+                          const pid = selectedId;
+                          const p = projects.find((x) => x.id === pid);
+                          const name = p?.name || `项目 #${pid}`;
+                          Modal.confirm({
+                            title: "确认删除项目",
+                            content: `将删除项目「${name}」及其全部数据（索引/分块/会话/输出）。此操作不可撤销。`,
+                            okText: "删除",
+                            okButtonProps: { danger: true },
+                            cancelText: "取消",
+                            onOk: async () => {
+                              await deleteProject(pid);
+                              message.success("项目已删除");
+                              setSelectedId(null);
+                              setSelectedConversationId(null);
+                              setProjectViewOnlyReason("");
+                              setCorpusStaleReason("");
+                              await loadProjects();
+                              await loadConversations({ q: chatSearchQuery });
+                            },
+                          });
+                        }}
+                      >
+                        删除项目
+                      </Button>
+                    ) : selectedId != null && projectIngest[selectedId]?.initialized && projectIngest[selectedId]?.has_review_records ? (
+                      <Text type="secondary">（该项目已有审查记录，不能删除）</Text>
+                    ) : null}
+                  </Space>
+                </div>
+
+                {selected ? (
+                  <div style={{ fontSize: 12 }}>
+                    <Text type="secondary">当前路径：</Text>{" "}
+                    <Text code style={{ wordBreak: "break-all" }}>
+                      {selected.root_path}
+                    </Text>
+                  </div>
+                ) : null}
+
+                <Space wrap>
+                  <Button
+                    type="primary"
+                    disabled={selectedId == null || pipelineRunning}
+                    onClick={() =>
+                      void runPipelineTryCatch(async () => {
+                        setPipelineFailModal(null);
+                        setPipelineRunning(true);
+                        terminatedRef.current = false;
+                        setMilestones([]);
+                        setMilestoneOpenOverrides({});
+                        setFinalMarkdown("");
+                        setFragmentIndexMd("");
+                        setOutputEntries([]);
+                        setPipelineTaskBrief("初始化项目：自动检测状态并补齐缺失步骤（转换→索引）");
+
+                        // 自动续跑：若 md_out 不存在则先转换；之后确保索引就绪
+                        pipelineStepRef.current = "convert";
+                        let st = await getProjectIngestStatus(selectedId as number);
+                        if (!st.md_out_exists) {
+                          await runConvertPhase();
+                        }
+                        if (terminatedRef.current) return;
+
+                        pipelineStepRef.current = "index";
+                        st = await getProjectIngestStatus(selectedId as number);
+                        if (!st.initialized) {
+                          await runIndexPhase();
+                        }
+                        message.success("初始化完成：索引已就绪");
+                        await loadProjects();
+                      })
+                    }
+                  >
+                    初始化
+                  </Button>
+                  {pipelineRunning ? (
+                    <Button danger onClick={stopPipeline}>
+                      停止
+                    </Button>
+                  ) : null}
+                </Space>
+
+                {milestones.length ? (
+                  <div style={{ marginTop: 10 }}>
+                    <Divider style={{ margin: "10px 0" }} />
+                    <Title level={5} style={{ margin: "6px 0 10px" }}>
+                      初始化日志
+                    </Title>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {milestones.map((m) => (
+                        <div key={m.id} style={{ fontSize: 12 }}>
+                          <details open={m.status === "running"}>
+                            <summary className="milestone-stream-summary" style={{ cursor: "pointer" }}>
+                              {(m.status === "done" ? "✓ " : m.status === "error" ? "× " : "→ ") + m.name}
+                            </summary>
+                            <div style={{ marginTop: 6, color: "#6b7280" }}>{renderMilestoneDetail(m)}</div>
+                          </details>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </Space>
+            </div>
+          ) : !chatsOpen && mainPanel === "review_domain" ? (
+            reviewDomainPageNode
+          ) : !chatsOpen && showMainOutput ? (
+            <>
+              <div className="pipeline-output-panel pipeline-output-panel--footer-clear">
+                {pipelineRunning && lastSubmittedUserMessage?.text ? (
+                  <div className="pipeline-output-intro">
+                    <div className="conv-msg">
+                      <div className="conv-msg-role">用户</div>
+                      <div className="conv-msg-body conv-msg-body--user">
+                        <div className="conv-msg-meta">{formatConversationTime(lastSubmittedUserMessage.created_at)}</div>
+                        <div className="conv-msg-plain">{lastSubmittedUserMessage.text}</div>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+
+                {pipelineTaskBrief ? (
+                  <div className="pipeline-output-intro">
+                    <div className="pipeline-task-brief">{pipelineTaskBrief}</div>
+                  </div>
+                ) : null}
+                {!projectViewOnlyReason.trim() && corpusStaleReason.trim() ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message={corpusStaleReason.trim()}
+                    style={{ marginBottom: 10 }}
+                  />
+                ) : null}
+                <div className="raw-stream stream-log process-stream">
+                  {!pipelineRunning && selectedConversationId != null && historyRuns.length ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      {historyRuns.map((run) => {
+                        const it = run.item;
+                        const isRereview = it.kind === "rereview";
+                        const isFollowup = it.kind === "followup";
+                        const isAnalyze = it.kind === "analyze";
+                        const title = `${formatConversationTime(it.created_at)} · ${
+                          isAnalyze ? "审查" : isFollowup ? "追问" : isRereview ? "重新审查" : it.kind
+                        }`;
+
+                        const thinkText = extractHistoryThinkMarkdown(run.finalMarkdown);
+                        const hasThink = Boolean(thinkText);
+                        const thinkPlaceholder =
+                          !hasThink && String(run.split.reportPart || "").trim().length > 0
+                            ? "本轮落盘文件未解析出可单独展示的思考片段（例如未使用 think 围栏），审查结论见下方正文。"
+                            : "";
+
+                        const reportMd = String(run.split.reportPart || "").trim() || String(run.finalMarkdown || "").trim();
+
+                        return (
+                          <div key={`run-${it.id}`} style={{ fontSize: 12 }}>
+                            <div style={{ color: "#374151", fontWeight: 650, marginBottom: 6 }}>{title}</div>
+
+                            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                              {it.fragments_index_download_path ? (
+                                <>
+                                  <div className="milestone-stream-line" style={{ color: "#374151" }}>
+                                    ✓ 片段与来源索引 &gt;
+                                  </div>
+                                  <div className="fragment-index-download-bar">
+                                    <Button
+                                      type="default"
+                                      size="small"
+                                      icon={<DownloadOutlined />}
+                                      onClick={() =>
+                                        window.open(String(it.fragments_index_download_path), "_blank", "noopener,noreferrer")
+                                      }
+                                    >
+                                      片段索引
+                                    </Button>
+                                  </div>
+                                </>
+                              ) : null}
+
+                              {(() => {
+                                const key = `run-think:${it.id}`;
+                                const open = !!milestoneOpenOverrides[key];
+                                const sym = open ? "～" : ">";
+                                return (
+                                  <details
+                                    open={open}
+                                    onToggle={(ev) => {
+                                      setMilestoneOpenOverrides((prev) => ({ ...prev, [key]: ev.currentTarget.open }));
+                                    }}
+                                  >
+                                    <summary className="milestone-stream-summary" style={{ color: "#374151" }}>
+                                      ✓ 思考分析 {sym}
+                                    </summary>
+                                    <div style={{ marginTop: 6, color: "#6b7280" }}>
+                                      {run.memoryInjectedItems.length ? (
+                                        <div
+                                          className="stream-render-text milestone-analysis-think-stream"
+                                          style={{ marginBottom: 8, whiteSpace: "pre-wrap" }}
+                                        >
+                                          {`【加载的记忆】\n${run.memoryInjectedItems
+                                            .map((m) => `- ${m.id}${m.title ? ` — ${m.title}` : ""}`)
+                                            .join("\n")}`}
+                                        </div>
+                                      ) : null}
+                                      {hasThink ? (
+                                        <div className="stream-render-text milestone-analysis-think-stream">{thinkText}</div>
+                                      ) : thinkPlaceholder ? (
+                                        <div style={{ lineHeight: 1.55 }}>{thinkPlaceholder}</div>
+                                      ) : (
+                                        <div style={{ lineHeight: 1.55 }}>（暂无已保存的思考过程文本）</div>
+                                      )}
+                                    </div>
+                                  </details>
+                                );
+                              })()}
+
+                              {reportMd ? (
+                                <div className="pipeline-final-report pipeline-final-report--history-run">
+                                  <SimpleMarkdown markdown={reportMd} />
+                                </div>
+                              ) : null}
+
+                              <div className="result-actions-below-stream" style={{ paddingLeft: 0, paddingRight: 0 }}>
+                                <div className="result-export-row">
+                                  <Button
+                                    type="default"
+                                    size="small"
+                                    className="result-export-md-btn"
+                                    icon={<DownloadOutlined />}
+                                    onClick={() => window.open(it.final_download_path, "_blank", "noopener,noreferrer")}
+                                  >
+                                    审查报告
+                                  </Button>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : milestones.length ? (
+                    <div className="milestone-timeline" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {milestones
+                        .filter(
+                          (m) =>
+                            m.id !== "sys:complete" && m.id !== "stage:呈现结果" && m.name !== "呈现结果",
+                        )
+                        .flatMap((m) => {
+                          const isHistoryView = !pipelineRunning && selectedConversationId != null;
+                          const effectiveText = effectiveMilestoneBody(m, activeReportSplit);
+                          const showDetails = effectiveText.trim().length > 0;
+                          const done = m.status === "done";
+                          const running = m.status === "running";
+                          const lead = done ? "✓ " : running ? "→ " : "　";
+                          const displayName = milestoneDisplayName(m.name);
+                          const titleColor = m.status === "error" ? "#cf1322" : "#374151";
+                          const isThinkingStage = m.id === "stage:思考分析" || m.name === "思考分析";
+                          const defaultOpen = m.status === "running";
+                          const o = milestoneOpenOverrides[m.id];
+                          const expanded = o !== undefined ? o : defaultOpen;
+                          const expandedThinking = isThinkingStage ? (o !== undefined ? o : false) : expanded;
+                          const sym = isThinkingStage ? (expandedThinking ? "～" : ">") : ">";
+                          const title = `${lead}${displayName} ${sym}`;
+
+                          const milestoneBlock = (
+                            <div key={m.id} className="milestone-timeline-item" style={{ fontSize: 12 }}>
+                              {isThinkingStage ? (
+                                <details
+                                  style={{ marginTop: 0 }}
+                                  open={expandedThinking}
+                                  onToggle={(ev) => {
+                                    const el = ev.currentTarget;
+                                    if (el.open) userExpandedMilestonesRef.current.add(m.id);
+                                    setMilestoneOpenOverrides((prev) => ({ ...prev, [m.id]: el.open }));
+                                  }}
+                                >
+                                  <summary className="milestone-stream-summary" style={{ cursor: "pointer", color: titleColor }}>
+                                    {title}
+                                  </summary>
+                                  <div style={{ marginTop: 6, color: "#6b7280" }}>
+                                    {showDetails ? (
+                                      renderMilestoneDetail(m, { thinkingOpen: expandedThinking })
+                                    ) : (
+                                      <span style={{ lineHeight: 1.55 }}>（尚无已保存的思考过程文本）</span>
+                                    )}
+                                  </div>
+                                </details>
+                              ) : showDetails ? (
+                                <details
+                                  style={{ marginTop: 0 }}
+                                  open={expanded}
+                                  onToggle={(ev) => {
+                                    const el = ev.currentTarget;
+                                    if (el.open) userExpandedMilestonesRef.current.add(m.id);
+                                    setMilestoneOpenOverrides((prev) => ({ ...prev, [m.id]: el.open }));
+                                  }}
+                                >
+                                  <summary className="milestone-stream-summary" style={{ cursor: "pointer", listStyle: "none", color: titleColor }}>
+                                    {title}
+                                  </summary>
+                                  <div style={{ marginTop: 6, color: "#6b7280" }}>{renderMilestoneDetail(m)}</div>
+                                </details>
+                              ) : (
+                                <details
+                                  style={{ marginTop: 0 }}
+                                  open={expanded}
+                                  onToggle={(ev) => {
+                                    const el = ev.currentTarget;
+                                    if (el.open) userExpandedMilestonesRef.current.add(m.id);
+                                    setMilestoneOpenOverrides((prev) => ({ ...prev, [m.id]: el.open }));
+                                  }}
+                                >
+                                  <summary className="milestone-stream-summary" style={{ cursor: "pointer", listStyle: "none", color: titleColor }}>
+                                    {title}
+                                  </summary>
+                                  <div style={{ marginTop: 6, color: "#6b7280" }}>
+                                    <span style={{ lineHeight: 1.55 }}>（暂无过程文本）</span>
+                                  </div>
+                                </details>
+                              )}
+                            </div>
+                          );
+
+                          if (m.id === STAGE_FRAGMENT_INDEX && fragmentIndexMd.trim()) {
+                            return [
+                              milestoneBlock,
+                              <div key={`${m.id}-frag-md-btn`} className="fragment-index-download-bar">
+                                <Button type="default" size="small" icon={<DownloadOutlined />} onClick={downloadFragmentIndexMd}>
+                                  片段索引
+                                </Button>
+                              </div>,
+                            ];
+                          }
+                          return [milestoneBlock];
+                        })}
+                    </div>
+                  ) : null}
+                </div>
+                {/* 会话历史：以消息流为准（同一会话多轮对话合并展示）。replay.entries 仅保留作兼容兜底。 */}
+                {!pipelineRunning && selectedConversationId != null && visibleConversationMessages.length ? (
+                  <div className="conv-thread" aria-label="会话消息">
+                    {visibleConversationMessages.map((m) => (
+                      <div key={m.id} className="conv-msg">
+                        <div className="conv-msg-role">{m.role === "user" ? "用户" : "助手"}</div>
+                        <div className={`conv-msg-body${m.role === "user" ? " conv-msg-body--user" : ""}`}>
+                          {m.created_at ? <div className="conv-msg-meta">{formatConversationTime(m.created_at)}</div> : null}
+                          {m.role === "assistant" ? (
+                            <SimpleMarkdown markdown={String(m.content || "")} />
+                          ) : (
+                            <div className="conv-msg-plain">{String(m.content || "")}</div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : !pipelineRunning && replay.entries.length ? (
+                  <div className="pipeline-final-report">
+                    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                      {replay.entries.map((e) => (
+                        <div key={e.id}>
+                          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6 }}>
+                            {formatConversationTime(e.createdAt)} · {e.kind}
+                          </div>
+                          <SimpleMarkdown markdown={e.markdown} />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                {/* 会话历史下载：已改为在每个 run 的原位置展示（见上方 historyRuns 回放区域） */}
+                {!pipelineRunning && visibleOutputEntries.length ? (
+                  <div className="pipeline-final-report">
+                    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                      {visibleOutputEntries.map((e) => (
+                        <div key={e.id}>
+                          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6 }}>
+                            {formatLocalDateTime(new Date(e.at))} · {e.title}
+                          </div>
+                          <SimpleMarkdown markdown={e.markdown} />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {!pipelineRunning && activeReportSplit.reportPart.trim() ? (
+                  <div className="pipeline-final-report">
+                    <SimpleMarkdown markdown={activeReportSplit.reportPart} />
+                  </div>
+                ) : null}
+                {!pipelineRunning && finalMarkdown.trim() ? (
+                  <div className="result-actions-below-stream" aria-label="结果操作">
+                    <div className="result-export-row">
+                      <Button
+                        type="default"
+                        size="small"
+                        className="result-export-md-btn"
+                        icon={<DownloadOutlined />}
+                        onClick={exportMarkdown}
+                      >
+                        审查报告
+                      </Button>
+                    </div>
+                    <div className="result-actions-bar-divider" aria-hidden="true" />
+                    <div className="result-output-actions">
+                      <Space size={4}>
+                        <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => void copyFinalMarkdown()} title="复制" />
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<LikeOutlined />}
+                          className={resultFeedback === "like" ? "result-feedback-like" : undefined}
+                          onClick={() => setResultFeedback((f) => (f === "like" ? null : "like"))}
+                          title="有用"
+                        />
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<DislikeOutlined />}
+                          className={resultFeedback === "dislike" ? "result-feedback-dislike" : undefined}
+                          onClick={() => setResultFeedback((f) => (f === "dislike" ? null : "dislike"))}
+                          title="无用"
+                        />
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<RedoOutlined />}
+                          onClick={() => void runFullPipeline()}
+                          disabled={
+                            pipelineRunning ||
+                            selectedId == null ||
+                            !selectedPresetId ||
+                              !!projectViewOnlyReason.trim() ||
+                              !!corpusStaleReason.trim()
+                          }
+                          title="重新执行全流程"
+                        />
+                      </Space>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </>
+          ) : null}
+
+      <Modal
+        title="该预设已有审查历史"
+        open={presetGate?.kind === "history"}
+        onCancel={() => {
+          if (presetGate?.kind !== "history") return;
+          presetGate.resolve({ kind: "cancel" });
+          setPresetGate(null);
+        }}
+        footer={null}
+        width={560}
+        destroyOnClose
+      >
+        {presetGate?.kind === "history" ? (
+          <Space direction="vertical" style={{ width: "100%" }} size={12}>
+            <Text type="secondary">
+              因为你选择了与当前会话不同的审查组合，所以系统检测到该预设在历史中已存在审查记录。
+              但是此提示仅用于提醒你可回看历史；本次不会自动切换会话。如你确认继续，将在当前会话（或新会话）中按所选预设继续执行。
+              <br />
+              - 最近审查会话：「{presetGate.latest.title}」
+              {presetGate.latest.updated_at ? `（${formatConversationTime(presetGate.latest.updated_at)}）` : ""}
+            </Text>
+            <Space wrap>
+              <Button
+                type="primary"
+                onClick={() => {
+                  if (presetGate?.kind !== "history") return;
+                  // 继续：不切换到历史会话；优先沿用当前会话（若可复用），否则新建
+                  (async () => {
+                    const cid =
+                      presetGate.canReuseCurrent && presetGate.currentConvId != null
+                        ? presetGate.currentConvId
+                        : await createFreshConversationForPreset();
+                    if (cid == null) {
+                      presetGate.resolve({ kind: "cancel" });
+                      setPresetGate(null);
+                      return;
+                    }
+                    setSelectedConversationId(cid);
+                    presetGate.resolve({ kind: "ok", convId: cid });
+                    setPresetGate(null);
+                  })();
+                }}
+              >
+                继续
+              </Button>
+              <Button
+                onClick={() => {
+                  if (presetGate?.kind !== "history") return;
+                  presetGate.resolve({ kind: "cancel" });
+                  setPresetGate(null);
+                }}
+              >
+                取消
+              </Button>
+            </Space>
+          </Space>
+        ) : null}
+      </Modal>
+
+      <Modal
+        title="流程中断"
+        open={pipelineFailModal != null}
+        onCancel={() => setPipelineFailModal(null)}
+        footer={null}
+        width={560}
+        destroyOnClose
+      >
+        {pipelineFailModal ? (
+          <Space direction="vertical" style={{ width: "100%" }} size={12}>
+            <Text strong>
+              失败阶段：
+              {pipelineFailModal.step === "convert"
+                ? "文档转换"
+                : pipelineFailModal.step === "index"
+                  ? "索引与分块"
+                  : "模型分析"}
+            </Text>
+            <Text type="danger" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+              {pipelineFailModal.message}
+            </Text>
+            <Text type="secondary">排除故障后，可选择从哪一步继续：</Text>
+            <Space wrap>
+              {pipelineFailModal.step === "convert" ? (
+                <>
+                  <Button type="primary" onClick={() => void resumePipelineAfterFailure("convert_chain")}>
+                    重试转换并继续（索引→分析）
+                  </Button>
+                  <Button onClick={() => void resumePipelineAfterFailure("full")}>全流程重来</Button>
+                </>
+              ) : null}
+              {pipelineFailModal.step === "index" ? (
+                <>
+                  <Button type="primary" onClick={() => void resumePipelineAfterFailure("index_chain")}>
+                    重试索引并继续分析
+                  </Button>
+                  <Button onClick={() => void resumePipelineAfterFailure("full")}>全流程重来</Button>
+                </>
+              ) : null}
+              {pipelineFailModal.step === "analyze" ? (
+                <>
+                  <Button type="primary" onClick={() => void resumePipelineAfterFailure("analyze_only")}>
+                    仅重试模型分析
+                  </Button>
+                  <Button onClick={() => void resumePipelineAfterFailure("index_chain")}>重试索引后再分析</Button>
+                  <Button onClick={() => void resumePipelineAfterFailure("full")}>全流程重来</Button>
+                </>
+              ) : null}
+            </Space>
+          </Space>
+        ) : null}
+      </Modal>
+
+      <Modal
+        title="设置"
+        open={isStandaloneSettings ? true : settingsOpen}
+        onOk={saveSettings}
+        onCancel={() => (isStandaloneSettings ? closeStandaloneView() : setSettingsOpen(false))}
+        width={960}
+        centered
+        okText="保存"
+        mask={!isStandaloneSettings}
+        getContainer={undefined}
+        styles={{
+          body: {
+            maxHeight: isStandaloneSettings ? "calc(100dvh - 180px)" : "min(580px, calc(100vh - 200px))",
+            overflowY: "auto",
+            paddingBlock: 12,
+          },
+        }}
+        footer={(_, { OkBtn, CancelBtn }) => (
+          <div style={{ display: "flex", justifyContent: "flex-end", width: "100%" }}>
+            <Space>
+              {isStandaloneSettings ? <Button onClick={closeStandaloneView}>关闭</Button> : <CancelBtn />}
+              <OkBtn />
+            </Space>
+          </div>
+        )}
+      >
+        {settingsTabsNode}
       </Modal>
 
       <Modal
         title="帮助"
-        open={isStandaloneHelp ? true : helpOpen}
-        onCancel={() => (isStandaloneHelp ? closeStandaloneView() : setHelpOpen(false))}
-        footer={
-          isStandaloneHelp ? (
-            <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <Button onClick={closeStandaloneView}>关闭</Button>
-            </div>
-          ) : null
-        }
+        open={helpOpen}
+        onCancel={() => setHelpOpen(false)}
+        footer={null}
         width={820}
-        mask={!isStandaloneHelp}
         getContainer={undefined}
         styles={{
           body: {
             fontSize: 12,
             paddingTop: 8,
-            maxHeight: isStandaloneHelp ? "calc(100dvh - 180px)" : undefined,
-            overflowY: isStandaloneHelp ? "auto" : undefined,
+            maxHeight: "min(580px, calc(100vh - 200px))",
+            overflowY: "auto",
           },
         }}
       >
-        {helpLoading ? (
-          <Spin />
-        ) : helpTabsParsed.ok ? (
-          <div className="help-tabs-shell">
-            <Tabs
-              size="small"
-              className="help-modal-tabs"
-              items={helpTabsParsed.tabs.map((t) => ({
-                key: t.label,
-                label: t.label,
-                children: (
-                  <div className="help-tab-body">
-                    <SimpleMarkdown markdown={t.content} />
-                  </div>
-                ),
-              }))}
-            />
-          </div>
-        ) : (
-          <div className="help-tabs-shell help-tabs-shell--fallback">
-            <div className="help-tab-body">
-              <SimpleMarkdown markdown={helpTabsParsed.markdown || "# 帮助\n\n暂无帮助内容。"} />
-            </div>
-          </div>
-        )}
+        <HelpPage compact loading={helpLoading} markdown={helpMarkdown} onClose={() => setHelpOpen(false)} />
       </Modal>
       {/* 新对话：已改为直接进入空白会话页（startNewConversationPage），保留 state 兼容历史但不再使用弹窗 */}
 
@@ -3403,7 +3902,7 @@ export default function App() {
         </div>
       </div>
 
-      {!chatsOpen ? (
+      {!chatsOpen && mainPanel === "analyze" ? (
         <div
           className={`composer-overlay ${
             // 打开会话时输入框固定底部；空白页可居中
@@ -3415,7 +3914,7 @@ export default function App() {
               <div className="welcome">
                 <div className="welcome-title">Welcome</div>
                 <div className="welcome-subtitle">
-                  {selectedId != null ? `，${DEFAULT_USERNAME}` : "，请先加载项目目录"}
+                  {selectedId != null ? `，${DEFAULT_USERNAME}` : "，请选择已初始化项目（左侧可进入项目初始化）"}
                 </div>
               </div>
             ) : null}
@@ -3432,60 +3931,42 @@ export default function App() {
                 <div className="composer-toolbar">
                   <div className="composer-left">
                     <Select
-                      className="composer-preset"
-                      placeholder="选择预设（必选）"
-                      value={selectedPresetId || undefined}
-                      allowClear
-                      options={focusPresets.map((p) => ({ value: p.id, label: p.name }))}
+                      className="composer-project"
+                      placeholder="选择已初始化项目"
+                      showSearch
+                      value={selectedId != null ? String(selectedId) : undefined}
+                      options={[
+                        ...initializedProjects.map((p) => ({ value: String(p.id), label: p.name })),
+                        { value: "__ingest__", label: "加载项目（需初始化）…" },
+                      ]}
+                      filterOption={(input, opt) => String(opt?.label || "").toLowerCase().includes(String(input || "").toLowerCase())}
                       onChange={(v) => {
-                        const id = String(v || "");
-                        const prev = selectedPresetId;
-                        if (!id) {
-                          setSelectedPresetId("");
-                          setFocusPoints([]);
+                        if (v === "__ingest__") {
+                          setChatsOpen(false);
+                          setMainPanel("ingest");
                           return;
                         }
-                        const preset = focusPresets.find((p) => p.id === id);
-                        if (preset) {
-                          setFocusPoints(preset.focus_points || []);
-                        } else {
-                          setFocusPoints([]);
-                        }
-                        setSelectedPresetId(id);
-                        void checkPresetChangeAgainstConversation(id, prev);
+                        const pid = Number(v);
+                        if (!Number.isFinite(pid)) return;
+                        setSelectedId(pid);
+                        setProjectViewOnlyReason("");
+                        setCorpusStaleReason("");
                       }}
                     />
-                    {!focusPresets.length && settingsDraft.rules_md_path ? (
+                    {/* 模式 C：不展示预设；由后端 Agent 自动路由关注点组合 */}
+                    {!focusPresets.length && settingsDraft.review_domain_path ? (
                       <Text type="secondary" style={{ fontSize: 11, maxWidth: 360 }}>
-                        无组合预设：后端正在读取 <Text code>{settingsDraft.rules_md_path}</Text>
-                        。若与预期不符，请检查 <Text code>AIKA_REPO_ROOT</Text> 或在设置 → 规则查看说明。
+                        无组合预设：后端正在读取{" "}
+                        <Text code>{settingsDraft.review_domain_path}</Text>
+                        。若与预期不符，请检查 <Text code>AIKA_REPO_ROOT</Text> 与 <Text code>AIKA_REVIEW_SKILL_PACKAGES_ROOT</Text>{" "}
+                        或在设置 → 审查域中查看说明。
                       </Text>
                     ) : null}
-                    <Tooltip title="加载文件或目录">
-                      <Button shape="circle" icon={<PlusOutlined />} loading={pickLoading} onClick={() => void openProjectPicker()} />
-                    </Tooltip>
-                    {selected?.root_path ? (
-                      <Tooltip title={selected.root_path}>
-                        {(() => {
-                          const { prefix, basename, full } = splitPathPrefixAndBasename(selected.root_path, 52);
-                          return (
-                            <Text className="composer-path-abbrev">
-                              {prefix ? (
-                                <>
-                                  <span className="composer-path-abbrev-prefix">{prefix}</span>
-                                  <span className="composer-path-abbrev-sep">/</span>
-                                </>
-                              ) : null}
-                              <span className="composer-path-abbrev-basename">{basename || full}</span>
-                            </Text>
-                          );
-                        })()}
-                      </Tooltip>
-                    ) : null}
+                    {/* 输入框下方路径提示：按需移除（用户反馈冗余） */}
                   </div>
                   <div className="composer-right composer-run-actions">
                     {pipelineRunning ? (
-                      <Tooltip title="停止">
+                      <Tooltip title="停止" trigger={["hover"]} placement="top">
                         <span className="composer-run-tooltip-wrap">
                           <Button
                             className="composer-run"
@@ -3497,15 +3978,15 @@ export default function App() {
                         </span>
                       </Tooltip>
                     ) : (
-                      <Tooltip title="开始全流程">
+                      <Tooltip title="开始" trigger={["hover"]} placement="top">
                         <span className="composer-run-tooltip-wrap">
                           <Button
                             className="composer-run"
                             shape="circle"
                             type="primary"
                             icon={<ArrowUpOutlined className="composer-run-icon" />}
-                            disabled={selectedId == null || !selectedPresetId || !!projectViewOnlyReason.trim()}
-                            onClick={() => void runFullPipeline()}
+                            disabled={!canStartAgentMessage}
+                            onClick={() => void runAgentMessage()}
                           />
                         </span>
                       </Tooltip>

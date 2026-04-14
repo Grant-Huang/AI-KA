@@ -1,0 +1,8 @@
+{
+  "schema_version": "1",
+  "id": "package-solution-review-fs-v2",
+  "name": "方案评审（FS）V2：一审/二审（精简版）",
+  "version": "2.0.0",
+  "description": "来自历史 rules_new2.md（已迁移），用于方案一审/二审评审（精简结构）。"
+}
+

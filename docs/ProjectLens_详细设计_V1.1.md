@@ -3,7 +3,7 @@
 
 详细设计文档（Detailed Design）
 
-V1.3  |  2026-04-12
+V1.4  |  2026-04-14（扩展：§9 Skills/Memory/Tools/Hooks）
 
 ---
 
@@ -11,7 +11,9 @@ V1.3  |  2026-04-12
 
 | 版本 | 日期 | 修改内容 | 作者 |
 | :-- | :-- | :-- | :-- |
-| V1.3 | 2026-04-12 | 活动规则文件「组合使用建议」固定 **五列表** 解析/写回；`focus_combo_tips` / `focus_presets` 含 `review_role`、`review_goals_principles`、`output_requirements`；`build_system_prompt` 用预设三字段覆盖默认角色/原则/输出段落；`POST …/analyze/stream`（及会话流）请求体可选传入上述三字段；环境变量 `AIKA_RULES_FILENAME` 切换规则文件 | AI 协作 |
+| V1.4 | 2026-04-14 | 新增第 9 章：审查技能包（Skills）、记忆（Memory）、工具（Tools）、钩子（Hooks）的实现机制、关键模块路径、与 `analyze/stream` / `prompt_builder` / `memory_recall` 的调用关系 | AI 协作 |
+| V1.5 | 2026-04-14 | 新增自动编排入口 `agent/stream`：后端统一编排路由（审查/追问/澄清/提示初始化），分析页隐藏预设选择（模式 C），并输出统一 SSE 事件（含产物下载入口） | AI 协作 |
+| V1.3 | 2026-04-12 | 审查技能包内 `review_domain.md` 的「组合使用建议」固定 **五列表** 解析/写回；`focus_combo_tips` / `focus_presets` 含 `review_role`、`review_goals_principles`、`output_requirements`；`build_system_prompt` 用预设三字段覆盖默认角色/原则/输出段落；`POST …/analyze/stream`（及会话流）请求体可选传入上述三字段 | AI 协作 |
 | V1.2 | 2026-04-10 | 索引器双策略、`locator_json` 扩展字段；`list_chunk_entries`；`build_user_prompt_from_entries` 块头；`analyze/stream` 追加索引表；`GET/POST /api/v1/settings` 的 `chunk_strategy`；`index-md` 传入策略 | AI 协作 |
 | V1.1 | 2026-03-25 | 基于《需求与设计文档 V1.0》补齐详细设计：模块边界、数据模型、接口契约、时序、异常与审计 | AI 协作 |
 
@@ -148,14 +150,14 @@ V1.3  |  2026-04-12
 - **提示词**（`web/backend/prompt_builder.py`）：`build_user_prompt_from_entries` 生成带「片段 n | 文件 | 章节 | 行」的块头；`format_chunk_index_markdown` 生成文末 GFM 索引表。
 - **分析 API**（`web/backend/main.py`）：流式结束后将模型输出规范化 Markdown，再**拼接**上述索引表（仅包含实际送入模型的片段）。
 
-#### 3.1.3.2 规则文件、`focus_presets` 与审查系统提示（当前 Web）
+#### 3.1.3.2 审查技能包、`focus_presets` 与审查系统提示（当前 Web）
 
-- **活动规则文件路径**：`$AIKA_REPO_ROOT` 下文件名由环境变量 `AIKA_RULES_FILENAME` 指定，默认 `rules.md`。
+- **活动审查域文件路径**：当前活动审查技能包内 `review_domain.md`（例如 `review_skill_packages/<package_id>/review_domain.md`）。包根目录可由 `AIKA_REVIEW_SKILL_PACKAGES_ROOT` 覆盖；当前活动包 id 为 `app_settings.md` 的 `active_skill_package_id`。
 - **关注点**：行级解析 `### focus:<id> | <名称>`，正文为 Prompt；强校验二级标题结构，禁止误用 `### 组合使用建议`（须用 `## 组合使用建议`）。
 - **「组合使用建议」表格**：仅解析 **固定五列** 数据行（表头/列序：`评审节点` | `推荐组合的关注点` | `审查角色` | `审查目标与原则` | `输出要求`）。单元格编码：换行 ↔ `<br>`，`|` ↔ `&#124;`（实现见 `web/backend/main.py` 中 `_combo_cell_encode` / `_combo_cell_decode`）。
 - **派生对象**：
   - `focus_combo_tips[]`：每行对应 `stage`、`recommended`、`review_role`、`review_goals_principles`、`output_requirements`。
-  - `focus_presets[]`：由表格与关注点名称映射生成，含 `id`、`name`、`focus_points` 及上述三字符串字段（可空）。
+  - `focus_presets[]`：由表格与关注点名称映射生成，含 `id`、`name`、`focus_points` 及上述三字符串字段（保存时不可空）。
 - **设置持久化**：`POST /api/v1/settings` 可保存 `focus_points`、`focus_presets`；写回规则文件时组合节重写为五列表。
 - **分析请求体**（非会话与会话流式 analyze）：除 `focus_points`、`chunk_limit` 等外，可选 `review_role`、`review_goals_principles`、`output_requirements`。非空时传入 `build_system_prompt`（`web/backend/prompt_builder.py`），用于**覆盖**默认「审查角色 / 审查目标与原则 / 输出要求」段落（含与 `MARKDOWN_OUTPUT_HINT` 相关的输出结构约定）。
 - **前端**：设置页「规则」分为子 Tab「关注点」「预设组合」；首页选预设后随请求带上三字段（与 `focus_presets` 对齐）。
@@ -271,8 +273,9 @@ V1.3  |  2026-04-12
   - 入参：`format: docx|pdf|md`，可选 `version_id`
   - 出参：下载信息（或 bytes 流）
 - `GET/POST /api/v1/settings`
-  - 出参/入参（摘要）：含 `focus_points`、`focus_combo_tips`、`focus_presets`（预设含 `review_role`、`review_goals_principles`、`output_requirements`）、`chunk_strategy`、`llm_settings`、`rules_md_error`、`rules_filename` 等（以 OpenAPI/代码为准）。
-- `POST /api/v1/projects/{id}/conversations/{conversation_id}/analyze/stream`（流式 analyze）
+  - 出参/入参（摘要）：含 `focus_points`、`focus_combo_tips`、`focus_presets`（预设含 `review_role`、`review_goals_principles`、`output_requirements`）、`chunk_strategy`、`llm_settings`、`review_domain_error`、`review_domain_path`、`composer_hint` 等（以 OpenAPI/代码为准）。
+- `POST /api/v1/projects/{id}/conversations/{conversation_id}/agent/stream`（自动编排入口，统一对话）
+- `POST /api/v1/projects/{id}/conversations/{conversation_id}/analyze/stream`（底层流式 analyze，供编排复用）
   - 请求体可选：`review_role`、`review_goals_principles`、`output_requirements`（与所选预设一致时由前端填充）。
 
 ---
@@ -360,4 +363,48 @@ V1.3  |  2026-04-12
    - 当 merge/col_widths 未设置时给出 lint/validate 的明确错误信息，避免生成出来错版。
 4) **Markdown → blocks 的官方转换器（可选）**
    - 让本项目可以先产出 Markdown，再由转换器变成 blocks JSON，降低模板维护成本。
+
+---
+
+## 9. 扩展机制实现：Skills / Memory / Tools / Hooks
+
+本节与《需求与设计文档》第十二章一致，侧重**模块、数据流与接口**。
+
+### 9.1 审查技能包（Skills）
+
+| 项 | 说明 |
+| :-- | :-- |
+| 目录布局 | `review_skill_packages/<package_id>/manifest.json`、`review_domain.md`；根目录可由 `AIKA_REVIEW_SKILL_PACKAGES_ROOT` 覆盖（见 `docs/aika_spec/PACKAGE_LAYOUT.md`）。 |
+| 活动包 | 应用设置中的 `active_skill_package_id`；设置 API 与 Web 设置页切换后，后端重新加载包内 `review_domain.md` 关注点与组合。 |
+| 进入分析 | `analyze/stream` 解析 `focus_points` → `_resolve_focus_definitions_for_subset`；`build_system_prompt` 组装角色/原则/输出、`skill_meta`（包版本、规则哈希等，见 `main.py` 中 `skill_meta_payload`）。 |
+
+### 9.2 记忆（Memory）
+
+| 项 | 说明 |
+| :-- | :-- |
+| 存储根 | `memory_root_under_repo(repository_root())` → `<repo>/.aika/memory/`（`memory_recall.py`）。 |
+| 候选文件 | `iter_memory_candidate_files`：`user/*.md`、`feedback/*.md`、`project/<project_id>/*.md`、`reference/<project_id>/*.md`。 |
+| 召回 | `recall_memory_snippets`：分词重叠打分，默认最多 5 条、`max_body_chars` 上限；`already_surfaced` 按记忆 `id`（相对路径）去重。 |
+| 请求字段 | `AnalyzeStreamBody`：`memory_snippets`、`memory_query`、`already_surfaced`（`main.py`）。未传 `memory_query` 时用关注点名称拼接作为查询串。 |
+| 注入提示词 | `build_system_prompt(..., memory_snippets=...)` 输出 **「【注入记忆片段】」** 段（`prompt_builder.py`）。 |
+| 运行元数据 | `build_run_metadata(..., memory_injected=...)` → JSON 键 **`memory_files_injected`**；SSE `final` 事件携带同名字段供前端展示摘要。 |
+| HTTP | `GET/POST …/memory/files`、`…/memory/upsert`（路径校验见 `main.py`）。 |
+
+### 9.3 工具（Tools）
+
+| 项 | 说明 |
+| :-- | :-- |
+| 注册表 | `backend/tools/registry.py`：`register_tool`、`invoke_tool`、`list_tool_names`。 |
+| HTTP | `POST /api/v1/tools/invoke`，`payload.name` + `payload.kwargs`。 |
+| 内置 | `_register_defaults` 注册 `validate_review_domain`、`compute_scope_metrics`（占位）；错误返回 `{status, message}`。 |
+
+### 9.4 钩子（Hooks）
+
+| 项 | 说明 |
+| :-- | :-- |
+| API | `register_before_analyze` / `register_after_analyze`；`run_before_analyze_hooks(ctx)`、`run_after_analyze_hooks(ctx)`（`backend/hooks/registry.py`）。 |
+| 调用点 | `analyze/stream` 内在拼好 `snippets` 之后、`build_system_prompt` 之前执行 **before**；写入输出与 `insert_message` 等完成后执行 **after**（`main.py`）。 |
+| 扩展记忆 | before 阶段可向 `ctx["extra_memory_snippets"]` 追加 `{id,title,body}`，主流程合并入 `snippets`。 |
+| 内置 | `backend/hooks/builtin.py`：审计 INFO；`main.py` 启动时 `register_builtin_hooks()`。 |
+| 异常 | 单 hook 内异常仅 `logger.exception`，不中断分析。 |
 

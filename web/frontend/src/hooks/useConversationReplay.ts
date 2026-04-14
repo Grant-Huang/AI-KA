@@ -14,6 +14,7 @@ export type ReplayMilestonesResult = {
   events: Array<
     | { type: "stage"; stage: string; status: string; detail?: string }
     | { type: "chunk_index"; markdown: string; index_file_path?: string | null }
+    | { type: "memory_injected"; items: Array<{ id?: string; title?: string }> }
     | { type: "error"; message: string }
     | { type: string; [k: string]: unknown }
   >;
@@ -28,6 +29,30 @@ function parseJsonlFencedBlock(text: string): string[] {
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
+}
+
+/** 从 milestones 落盘全文解析「加载的记忆」列表（与实时 SSE final.memory_files_injected 展示一致） */
+export function parseMemoryInjectedItemsFromMilestonesRaw(raw: string): Array<{ id: string; title?: string }> {
+  const lines = parseJsonlFencedBlock(raw);
+  let last: Array<{ id: string; title?: string }> = [];
+  for (const line of lines) {
+    try {
+      const obj = JSON.parse(line) as { type?: string; items?: unknown };
+      if (obj?.type === "memory_injected" && Array.isArray(obj.items)) {
+        const batch: Array<{ id: string; title?: string }> = [];
+        for (const x of obj.items) {
+          if (x && typeof x === "object" && "id" in x) {
+            const id = String((x as { id?: unknown }).id ?? "").trim();
+            if (id) batch.push({ id, title: String((x as { title?: unknown }).title ?? "").trim() || undefined });
+          }
+        }
+        if (batch.length) last = batch;
+      }
+    } catch {
+      // ignore malformed line
+    }
+  }
+  return last;
 }
 
 export function useConversationReplay(projectId: number | null, conversationId: number | null) {

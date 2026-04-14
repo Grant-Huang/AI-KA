@@ -21,6 +21,7 @@ V1.0  |  2025年Q2
 | ---------- | ----------------------------------------------------------------------------------------- |
 | 2026-04-10 | 增加可配置文档分块策略（空行 / Markdown 结构感知）；审查输出可追溯片段与文件章节行号；Web 流程体验（任务说明、里程碑折叠、完成提示）；运维侧见《系统管理员手册》。 |
 | 2026-04-13 | 文档对齐代码实现：当前 Web 范围聚焦“项目选择/转换/索引/流式审查/追问/导出/规则与模型设置”；更新接口清单（SSE 替代 WebSocket）、技术栈与安全/运维说明。 |
+| 2026-04-14 | 增补「审查技能包 Skills、记忆 Memory、工具 Tools、钩子 Hooks」的预设能力与实现机制说明（见第十二章）；与 `docs/aika_spec/` 目录约定一致。 |
 
 
 # **目录**
@@ -44,7 +45,7 @@ V1.0  |  2025年Q2
 
 ### **1.2.1  通用业务文档审查定位（补充）**
 
-除项目交付实施场景外，ProjectLens 的定位进一步扩展为“**通用业务关联性文档审查平台**”。系统通过 `rules.md` 中可配置的关注点与 Prompt 驱动审查逻辑，使其可应用于更多业务文档体系：
+除项目交付实施场景外，ProjectLens 的定位进一步扩展为“**通用业务关联性文档审查平台**”。系统通过**审查技能包**内 `review_domain.md` 可配置的关注点与 Prompt 驱动审查逻辑，使其可应用于更多业务文档体系：
 
 - 合规/内控文档：制度条款覆盖、职责边界、证据留痕、审计追溯。
 - 合同/招采文档：交付范围、验收标准、违约责任、变更控制。
@@ -52,7 +53,7 @@ V1.0  |  2025年Q2
 - 数据治理文档：主数据责任、字段口径、质量规则与一致性检查。
 - 架构/接口文档：依赖关系、异常与降级策略、跨系统一致性约束。
 
-该能力边界由 `rules.md` 定义，不与某一行业或交付阶段强绑定。
+该能力边界由**当前活动审查技能包**内的 `review_domain.md` 定义，不与某一行业或交付阶段强绑定。
 
 ### **1.2.3  当前实现范围（以代码为准）**
 
@@ -69,7 +70,7 @@ V1.0  |  2025年Q2
 
 ### **1.2.2  规则文件与「组合使用建议」（配置约定，与实现对齐）**
 
-- **活动规则文件**：默认使用仓库根目录 `rules.md`；部署时可通过环境变量指定同目录下其他文件名（如 `rules_new2.md`），仅加载该文件作为关注点与组合表来源。
+- **活动审查域文件**：唯一配置源为**当前活动审查技能包**内 `review_domain.md`（目录：`review_skill_packages/<package_id>/review_domain.md`；包根可由 `AIKA_REVIEW_SKILL_PACKAGES_ROOT` 覆盖）。
 - **关注点**：以 `### focus:<id> | <名称>` 定义可配置审查维度，正文为 Prompt。
 - **组合使用建议**：在活动规则文件中以二级标题「组合使用建议」引导 **固定五列** Markdown 表（评审节点、推荐组合的关注点、审查角色、审查目标与原则、输出要求），用于推导首页可选预设及非空的审查角色/原则/输出约定；推荐列以 `` `focus:id` `` 引用关注点 id。详细格式与界面行为见《ProjectLens_功能设计_V1.1.md》《ProjectLens_详细设计_V1.1.md》及《User_Manual_zh.md》。
 
@@ -118,7 +119,7 @@ V1.0  |  2025年Q2
 
 ### **场景 E：通用业务制度与合规材料审查（扩展）**
 
-组织可将制度、流程、合规与审计材料导入统一目录，通过自定义 `rules.md` 关注点（如“职责边界”“控制点覆盖”“证据完整性”）执行审查。系统输出结构化问题清单与证据引用，支持形成内控评估报告。
+组织可将制度、流程、合规与审计材料导入统一目录，通过自定义**审查技能包**（编辑包内 `review_domain.md` 的关注点，如“职责边界”“控制点覆盖”“证据完整性”）执行审查。系统输出结构化问题清单与证据引用，支持形成内控评估报告。
 
 ### **场景 F：合同与招采文档一致性审查（扩展）**
 
@@ -454,12 +455,12 @@ V1.0  |  2025年Q2
 | GET | /health | 健康检查 | |
 | GET | /fs/capabilities | 文件夹选择能力 | 返回是否允许本机弹窗选目录 |
 | POST | /fs/pick-directory | 本机弹窗选目录 | 默认仅允许 localhost 调用 |
-| GET | /settings | 获取设置 | 含规则解析结果、活动规则文件路径等调试信息 |
-| POST | /settings | 保存设置 | 写入 `rules.md` 与 `app_settings.md` |
+| GET | /settings | 获取设置 | 含审查域解析结果、当前活动技能包与 `review_domain.md` 路径等调试信息 |
+| POST | /settings | 保存设置 | 写入当前活动包的 `review_domain.md`，并写入 `app_settings.md` |
 | GET | /helpme | 获取帮助页 Markdown | 读取 `helpme.md` 或回退 `docs/helpme.md` |
-| POST | /settings/rules-md/validate | 校验 rules 文本 | 仅校验并解析关注点 |
-| POST | /settings/rules-md/import | 导入 rules 文本 | 写入当前活动规则文件 |
-| POST | /settings/rules-md/restore-default-template | 从模板恢复规则 | 将 `default_rules.md` 复制为活动规则文件 |
+| POST | /settings/review-domain/validate | 校验审查域文本 | 仅校验并解析关注点 |
+| POST | /settings/review-domain/import | 导入审查域文本 | 写入当前活动包的 `review_domain.md` |
+| POST | /settings/review-domain/restore-default-skills-template | 从模板恢复 | 将 `default_skills.md` 复制为当前活动包的 `review_domain.md` |
 | GET | /projects | 项目列表 | |
 | POST | /projects | 创建项目 | `name` + `root_path` |
 | POST | /projects/ensure | 确保项目存在 | 按 `root_path` 复用或创建 |
@@ -469,11 +470,12 @@ V1.0  |  2025年Q2
 | POST | /projects/{project_id}/conversations | 创建会话 | 支持 `preset_id` |
 | GET | /projects/{project_id}/conversations/{conversation_id} | 会话详情 | 返回是否已有分析、最近一次关注点等 |
 | GET | /projects/{project_id}/conversations/preset-history | 预设历史 | 查询某 preset 最近一次有分析输出的会话 |
-| GET | /projects/{project_id}/rules | 项目规则 | 项目级 rules（与 `rules.md` 的关注点不同） |
+| GET | /projects/{project_id}/rules | 项目规则 | 项目级 rules（与审查技能包 `review_domain.md` 的关注点不同） |
 | POST | /projects/{project_id}/rules | 保存项目规则 | |
 | GET | /projects/{project_id}/convert-md/stream | 转换流 | SSE：调用 docs2md 输出日志 |
 | POST | /projects/{project_id}/index-md | 索引与分块 | 扫描 `md_out` 入库并按策略分块 |
-| POST | /projects/{project_id}/conversations/{conversation_id}/analyze/stream | 流式审查 | SSE：输出 delta + stage + final 等事件 |
+| POST | /projects/{project_id}/conversations/{conversation_id}/agent/stream | 自动编排对话入口（模式 C） | SSE：`agent_stage` / `assistant_delta` / `artifact_ready` / `need_ingest` / `final` |
+| POST | /projects/{project_id}/conversations/{conversation_id}/analyze/stream | （底层能力）流式审查 | SSE：输出 delta + stage + final 等事件 |
 | POST | /projects/{project_id}/conversations/{conversation_id}/followup/stream | 流式追问 | SSE：基于上次结果与 chunks 追问 |
 | GET | /projects/{project_id}/conversations/{conversation_id}/outputs-index | 输出文件索引 | 列出该会话产生的导出文件 |
 | GET | /files/{project_id}/{filename} | 下载导出文件 | 仅允许 `.md/.txt/.json/.docx` |
@@ -595,6 +597,39 @@ V1.0  |  2025年Q2
 | 兼容性 | 操作系统           | Windows/macOS/Linux   | 桌面和服务器均支持           |
 | 兼容性 | 浏览器            | Chrome 90+ / Edge 90+ | 现代浏览器               |
 | 国际化 | 界面语言           | 简体中文（首选）              | 后续支持英文              |
+
+
+# **第十二章  扩展机制：审查技能（Skills）、记忆（Memory）、工具（Tools）、钩子（Hooks）**
+
+> 本章描述**当前仓库已实现**的可扩展点，用于统一产品、帮助文档与代码行为。更细的目录与文件格式约定见 `docs/aika_spec/PACKAGE_LAYOUT.md`、`MEMORY_TAXONOMY.md`、`SKILL_MANIFEST.md`。
+
+## 12.1 审查技能包（Skills）
+
+- **定位**：一套可切换的**审查配置包**，内含 `manifest.json`（id、名称、版本等元数据）与 **`review_domain.md`**（关注点 `### focus:…`、**组合使用建议**五列表等）。与仓库根 `default_skills.md` 结构对齐的部分可迁移/导入到包内 `review_domain.md`。
+- **存放位置**：默认在仓库根下 `review_skill_packages/<package_id>/`；可通过环境变量 **`AIKA_REVIEW_SKILL_PACKAGES_ROOT`** 指向其它根目录。
+- **运行时选择**：当前活动包 id 保存在应用设置（如 `app_settings.md` / 设置 API）中的 **`active_skill_package_id`**（默认常为 `package-general`）；用户可在 **设置 → 审查域** 切换包。
+- **在分析流程中的作用**：发起 `POST …/analyze/stream` 时，后端将关注点解析结果、预设中的审查角色/目标与原则/输出要求、以及技能包相关的 **skill 元数据**（包 id、规则文件哈希等）一并写入 **系统提示词**（`build_system_prompt`），使同一套文档在不同技能包下可有不同审查立场与输出约束。
+
+## 12.2 记忆（Memory）
+
+- **定位**：在审查前向模型提供**可复用的短文本知识**（术语、偏好、项目画像摘要等），与「当前分块正文」分离管理。
+- **存放位置**：在 **`AIKA_REPO_ROOT`（仓库根）** 下 **`/.aika/memory/`**，子目录约定为：`user/`、`feedback/`（全局）；`project/<project_id>/`、`reference/<project_id>/`（按项目）。文件为 **Markdown（`*.md`）**；分类与命名约定详见 `docs/aika_spec/MEMORY_TAXONOMY.md`。
+- **召回机制**：分析请求可携带 **`memory_snippets`**（直接指定片段）、**`memory_query`**（检索词；未传时后端可用关注点名称拼接）、**`already_surfaced`**（已注入 id 去重）。服务端在候选文件中做**关键词分词重叠打分**，取不超过 **5** 条正文（有长度上限），拼入系统提示中的 **「【注入记忆片段】」** 段落（见 `prompt_builder.py`、`memory_recall.py`）。
+- **API**：`GET /api/v1/projects/{id}/memory/files` 列出可用相对路径；`POST …/memory/upsert` 在允许前缀下写入/更新单个 `.md` 文件。
+- **审计**：运行元数据中记录 **`memory_files_injected`**（路径 id 与标题摘要），便于复现本轮注入了哪些记忆文件。
+
+## 12.3 工具（Tools）
+
+- **定位**：后端维护 **Tool 注册表**（`backend/tools/registry.py`），通过名称调用，用于校验、指标计算等**不替代主 LLM 审查**的辅助逻辑。
+- **调用方式**：HTTP **`POST /api/v1/tools/invoke`**，body 含 `name` 与可选 `kwargs`；返回统一结构（含 `status`）。
+- **预设工具（示例）**：如 **`validate_review_domain`**（校验审查域文本模式）、**`compute_scope_metrics`**（占位类统计）等；可按需注册新工具，**不应**在工具内重复实现与主流程相同的审查逻辑。
+
+## 12.4 钩子（Hooks）
+
+- **定位**：在**单次会话分析**（`analyze/stream`）前后插入扩展逻辑，用于审计、或向上下文追加额外记忆片段等。
+- **扩展点**：**`run_before_analyze_hooks(ctx)`**（构建系统提示前）、**`run_after_analyze_hooks(ctx)`**（落盘与入库完成后）。`ctx` 至少包含 `project_id`、`conversation_id`、`focus_points`、`chunk_limit`；before 阶段可写入 **`ctx["extra_memory_snippets"]`**（元素为 `{id,title,body}`），由主流程合并进本轮 `memory_snippets`。
+- **内置行为**：默认注册**审计日志**（logger `aika.hooks.audit`），不修改业务数据。
+- **错误策略**：单个 hook 抛错时记录日志，**不中断**主分析流程（详见 `backend/hooks/registry.py`）。
 
 
 # **附录 A  术语表**

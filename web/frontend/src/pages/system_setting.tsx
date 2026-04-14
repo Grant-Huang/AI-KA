@@ -10,22 +10,24 @@ export default function SystemSettingPage(props: {
   saving?: boolean;
 }) {
   return (
-    <div className="standalone-page">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <div>
-          <Title level={3} style={{ margin: 0 }}>
+    <div className="settings-page">
+      <header className="settings-page__header">
+        <div className="settings-page__header-text">
+          <Title level={3} className="settings-page__title">
             设置
           </Title>
-          <Text type="secondary">保存后会提示成功/失败，不会自动关闭页面。</Text>
+          <Text type="secondary" className="settings-page__subtitle">
+            文档、审查域与模型配置与主窗口内设置一致。保存后会提示成功或失败，不会自动关闭页面。
+          </Text>
         </div>
-        <Space wrap>
+        <Space wrap className="settings-page__actions">
           <Button type="primary" onClick={props.onSave} loading={!!props.saving}>
             保存
           </Button>
           <Button onClick={props.onClose}>关闭</Button>
         </Space>
-      </div>
-      <div style={{ marginTop: 14 }}>{props.content}</div>
+      </header>
+      <main className="settings-page__body">{props.content}</main>
     </div>
   );
 }

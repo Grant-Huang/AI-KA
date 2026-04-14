@@ -38,11 +38,6 @@ docs/epic-doc/out/
 # Local docs source files (not for commit)
 docs/*.docx
 
-# Local focus-point settings file
-rules.md
-rules_new.md
-rules_new2.md
-
 # Local workspace / tooling copies (not for commit)
 ref/
 

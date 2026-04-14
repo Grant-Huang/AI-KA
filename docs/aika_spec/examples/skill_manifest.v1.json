@@ -1,0 +1,12 @@
+{
+  "schema_version": "1",
+  "id": "package-general",
+  "name": "通用交付审查",
+  "version": "1.0.0",
+  "focus_ids": ["req", "risk", "integration", "scope"],
+  "review_role": "你是资深 IT 实施与项目评审顾问。",
+  "review_goals_principles": "除专有名词外使用简体中文；逐项给结论与证据。",
+  "output_requirements": "分章节 Markdown；引用片段编号。",
+  "description": "默认通用维度",
+  "tags": ["delivery", "general"]
+}

@@ -128,6 +128,8 @@ export type AnalyzeStreamPresetFields = {
   review_role?: string | null;
   review_goals_principles?: string | null;
   output_requirements?: string | null;
+  /** 记忆召回查询；不传时后端用关注点拼接作为查询 */
+  memory_query?: string | null;
 };
 
 export async function getConversationDetail(
@@ -139,7 +141,7 @@ export async function getConversationDetail(
   title: string;
   created_at?: string;
   updated_at?: string;
-  /** 与 rules 中 focus_presets[].id 对应；旧会话可能为空 */
+  /** 与审查技能包预设（focus_presets[].id）对应；旧会话可能为空 */
   preset_id?: string | null;
   has_analysis_run: boolean;
   /** 最近一次 analyze 写入的关注点名称列表；与当前预设比对可判断是否需重新全文审查 */
@@ -157,6 +159,17 @@ export async function getPresetHistory(
 }> {
   const q = encodeURIComponent(presetId);
   return apiJson(`/api/v1/projects/${projectId}/conversations/preset-history?preset_id=${q}`);
+}
+
+export async function getProjectIngestStatus(projectId: number): Promise<{
+  project_id: number;
+  md_out: string;
+  md_out_exists: boolean;
+  chunk_count: number;
+  initialized: boolean;
+  has_review_records: boolean;
+}> {
+  return apiJson(`/api/v1/projects/${projectId}/ingest-status`);
 }
 
 export async function postAnalyzeConversationStream(
@@ -199,6 +212,29 @@ export async function postFollowupConversationStream(
   await consumeSseFromResponse(r, onEvent, signal);
 }
 
+export async function postAgentConversationStream(
+  projectId: number,
+  conversationId: number,
+  body: { message: string },
+  onEvent: (ev: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const r = await fetch(
+    `${BASE}/api/v1/projects/${projectId}/conversations/${conversationId}/agent/stream`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  if (!r.ok) {
+    const j = (await r.json().catch(() => ({}))) as ApiErr;
+    throw new Error(j.message || `HTTP ${r.status}`);
+  }
+  await consumeSseFromResponse(r, onEvent, signal);
+}
+
 export type ConversationOutputsIndexItem = {
   id: number;
   conversation_id: number;
@@ -234,6 +270,12 @@ export async function deleteConversation(
   conversationId: number,
 ): Promise<{ deleted: boolean }> {
   return apiJson(`/api/v1/projects/${projectId}/conversations/${conversationId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function deleteProject(projectId: number): Promise<{ deleted: boolean }> {
+  return apiJson(`/api/v1/projects/${projectId}`, {
     method: "DELETE",
   });
 }
