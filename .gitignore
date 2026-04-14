@@ -40,6 +40,11 @@ docs/*.docx
 
 # Local focus-point settings file
 rules.md
+rules_new.md
+rules_new2.md
+
+# Local workspace / tooling copies (not for commit)
+ref/
 
 # Local app settings (contains API keys)
 app_settings.md
