@@ -1175,6 +1175,115 @@ def evolve_focus_point_endpoint(package_id: str, focus_id: str, body: EvolveFocu
     }))
 
 
+@app.get("/api/v1/skill-packages/{package_id}/focus-points/{focus_id}/hints")
+def list_focus_point_hints(package_id: str, focus_id: str) -> JSONResponse:
+    """List queued evolution hints for a focus point (S7-2 backend)."""
+    from backend.evolution_queue import list_hints_for_focus
+    rr = repository_root()
+    hints = list_hints_for_focus(rr, focus_id)
+    return JSONResponse(ok({"focus_id": focus_id, "hints": hints, "count": len(hints)}))
+
+
+@app.delete("/api/v1/skill-packages/{package_id}/focus-points/{focus_id}/hints")
+def clear_focus_point_hints(package_id: str, focus_id: str) -> JSONResponse:
+    """Clear the evolution hint queue for a focus point."""
+    from backend.evolution_queue import clear_hints_for_focus
+    rr = repository_root()
+    n = clear_hints_for_focus(rr, focus_id)
+    return JSONResponse(ok({"focus_id": focus_id, "cleared": n}))
+
+
+@app.get("/api/v1/evolution-hints")
+def list_all_evolution_hints() -> JSONResponse:
+    """List all focus IDs with pending evolution hints."""
+    from backend.evolution_queue import list_all_hint_focus_ids, list_hints_for_focus
+    rr = repository_root()
+    focus_ids = list_all_hint_focus_ids(rr)
+    return JSONResponse(ok({
+        "focus_ids": focus_ids,
+        "total_focuses": len(focus_ids),
+    }))
+
+
+class ImprovePromptBody(BaseModel):
+    dry_run: bool = Field(default=True, description="If true, return suggested prompt without saving")
+    note: str = Field(default="", description="Change note")
+
+
+@app.post("/api/v1/skill-packages/{package_id}/focus-points/{focus_id}/improve")
+def improve_focus_point_with_llm(package_id: str, focus_id: str, body: ImprovePromptBody) -> JSONResponse:
+    """
+    LLM-assisted focus point rewrite using accumulated evolve-hints (S7-3).
+    Reads hints from queue, generates improved prompt, optionally saves.
+    """
+    from backend.evolution_queue import clear_hints_for_focus, list_hints_for_focus
+    rr = repository_root()
+    hints = list_hints_for_focus(rr, focus_id)
+    if not hints:
+        return JSONResponse(err("no evolution hints found for this focus point"), status_code=400)
+
+    ensure_default_skill_package(rr)
+    pkg_d = package_dir(rr, package_id)
+    fp_path = focus_points_dir(rr, package_id) / f"focus-{focus_id}.md"
+    fp = load_focus_point(fp_path)
+    if fp is None:
+        return JSONResponse(err(f"focus point {focus_id} not found in package {package_id}"), status_code=404)
+
+    hints_text = "\n".join(f"- {h['suggestion']}" for h in hints)
+    improve_prompt = (
+        f"你是一名AI评审专家，负责改进以下审查关注点的 Prompt。\n\n"
+        f"当前 Prompt（focus:{fp.id} - {fp.name} v{fp.version}）：\n\n"
+        f"{fp.prompt}\n\n"
+        f"使用者反馈的改进建议：\n{hints_text}\n\n"
+        f"请根据以上建议，重写这个 Prompt。要求：\n"
+        f"1. 保留原有的分析步骤框架\n"
+        f"2. 融入反馈中有价值的改进点\n"
+        f"3. 保持简洁专业，用中文输出\n"
+        f"4. 只输出新的 Prompt 正文，不要包含任何解释"
+    )
+
+    try:
+        cfg = _build_text_llm_config(_conn(), timeout_s=60.0)
+        provider = get_provider(cfg.provider)
+        result = provider.chat(
+            system="你是一名专业AI系统设计师，专注于审查类Prompt工程。",
+            user=improve_prompt,
+            config=cfg,
+        )
+        new_prompt = result.text.strip()
+    except Exception as e:
+        return JSONResponse(err(f"LLM call failed: {e}"), status_code=500)
+
+    if body.dry_run:
+        return JSONResponse(ok({
+            "focus_id": focus_id,
+            "dry_run": True,
+            "current_version": fp.version,
+            "suggested_prompt": new_prompt,
+            "hints_used": len(hints),
+        }))
+
+    # Save the improved focus point
+    try:
+        new_fp = evolve_focus_point(
+            fp,
+            new_prompt=new_prompt,
+            note=body.note or f"LLM-improved using {len(hints)} hint(s)",
+            package_dir=pkg_d,
+            repo_root=rr,
+        )
+        clear_hints_for_focus(rr, focus_id)
+    except Exception as e:
+        return JSONResponse(err(str(e)), status_code=500)
+
+    return JSONResponse(ok({
+        "focus_id": focus_id,
+        "dry_run": False,
+        "new_version": new_fp.version,
+        "hints_cleared": len(hints),
+    }))
+
+
 @app.post("/api/v1/settings/review-domain/restore-default-skills-template")
 def restore_default_skills_template() -> JSONResponse:
     """将 default_skills.md 复制为当前活动审查技能包的 review_domain.md。"""
@@ -2046,8 +2155,22 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
             new_findings = extract_findings_from_markdown(body, open_findings, focus_ids_used)
             for f in new_findings:
                 yield _sse_line({"type": "finding", "finding": f.to_dict()})
-            # Extract evolve hints for Sprint 7
+            # Extract evolve hints and write to evolution queue (S7-1)
             evolve_hints = extract_evolve_hints(body)
+            if evolve_hints:
+                from backend.evolution_queue import append_evolve_hint
+                turn_n = dbm.count_messages(conn, conversation_id=conversation_id) if hasattr(dbm, "count_messages") else 0
+                for hint in evolve_hints:
+                    try:
+                        append_evolve_hint(
+                            repository_root(),
+                            focus_id=hint["focus_id"],
+                            suggestion=hint["suggestion"],
+                            conversation_id=conversation_id,
+                            turn=turn_n,
+                        )
+                    except Exception:
+                        pass
 
             # --- deep mode: self-critique pass ---
             critique_summary: str | None = None
@@ -2177,7 +2300,20 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
                     }
                 )
 
-            yield _sse_line({"type": "pass_done", "pass": 1, "finding_count": len(new_findings)})
+            # Token cost estimation (S7-5): Chinese ~2 chars/token, other ~4 chars/token
+            def _estimate_tokens(s: str) -> int:
+                cn = sum(1 for c in s if "一" <= c <= "鿿")
+                rest = len(s) - cn
+                return max(1, cn // 2 + rest // 4)
+
+            input_text = system + user
+            token_est = {
+                "input_approx": _estimate_tokens(input_text),
+                "output_approx": _estimate_tokens(body),
+                "total_approx": _estimate_tokens(input_text + body),
+                "deep_mode": payload.deep_mode,
+            }
+            yield _sse_line({"type": "pass_done", "pass": 1, "finding_count": len(new_findings), "token_est": token_est})
             ev = {"type": "stage", "stage": "呈现结果", "status": "end"}
             append_milestone_event(milestones_path, ev)
             yield _sse_stage("呈现结果", "end")

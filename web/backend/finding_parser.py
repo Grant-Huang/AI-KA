@@ -112,4 +112,8 @@ FINDING_INSTRUCTION = """
 - severity: high=可能影响项目成败, medium=需要关注, low=建议改进
 - focus_id 使用本次审查的关注点 id（见上方审查清单）
 - 无发现时不输出此注释
+
+【关注点改进建议（可选）】
+若发现当前关注点的审查方向可以改进，在分析末尾附加：
+<!-- evolve-hint: <focus_id> | <改进建议，简短描述如何调整关注点的分析角度> -->
 """.strip()

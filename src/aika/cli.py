@@ -244,6 +244,28 @@ def cmd_skill_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_skill_review_hints(args: argparse.Namespace) -> int:
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "web"))
+    from backend.evolution_queue import clear_hints_for_focus, list_hints_for_focus
+
+    hints = list_hints_for_focus(_repo_root(), args.focus_id)
+    if not hints:
+        print(f"(no evolution hints for focus:{args.focus_id})")
+        return 0
+    print(f"Evolution hints for focus:{args.focus_id} ({len(hints)} total):\n")
+    for i, h in enumerate(hints, 1):
+        print(f"  [{i}] {h.get('created_at', '')}")
+        print(f"      {h.get('suggestion', '')}")
+        if h.get("conversation_id"):
+            print(f"      conversation={h['conversation_id']} turn={h.get('turn', 0)}")
+        print()
+    if args.clear:
+        n = clear_hints_for_focus(_repo_root(), args.focus_id)
+        print(f"[ok] cleared {n} hint(s)")
+    return 0
+
+
 def cmd_skill_migrate(args: argparse.Namespace) -> int:
     import sys
     sys.path.insert(0, str(Path(__file__).parent.parent.parent / "web"))
@@ -347,6 +369,11 @@ def build_parser() -> argparse.ArgumentParser:
     skill_migrate.add_argument("--package", required=False, default="package-general")
     skill_migrate.add_argument("--overwrite", action="store_true", help="Overwrite existing focus-*.md files")
     skill_migrate.set_defaults(func=cmd_skill_migrate)
+
+    skill_hints = skill_sp.add_parser("review-hints", help="Show evolution hints for a focus point")
+    skill_hints.add_argument("focus_id", help="Focus point id (e.g. req)")
+    skill_hints.add_argument("--clear", action="store_true", help="Clear hints after review")
+    skill_hints.set_defaults(func=cmd_skill_review_hints)
 
     return p
 
