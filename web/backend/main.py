@@ -348,6 +348,7 @@ def _write_app_settings_md(payload: dict[str, Any]) -> None:
         "llm_settings": merged.get("llm_settings") if isinstance(merged.get("llm_settings"), dict) else {},
         "llm_text_api_key": str(merged.get("llm_text_api_key") or ""),
         "llm_vl_api_key": str(merged.get("llm_vl_api_key") or ""),
+        "embedding_model": str(merged.get("embedding_model") or ""),
     }
     aid = merged.get("active_skill_package_id")
     if isinstance(aid, str) and aid.strip():
@@ -391,6 +392,7 @@ def _build_settings_payload(conn: Any) -> dict[str, Any]:
         "review_domain_path": str(domain_path(rr, sp_id)),
         "focus_combo_tips": _read_focus_combo_tips_from_review_domain(),
         "composer_hint": _read_composer_hint_from_review_domain(),
+        "embedding_model": _get_embedding_model(),
     }
 
 
@@ -568,6 +570,12 @@ def _get_vl_base_url() -> str:
     if isinstance(v, str) and v.strip():
         return v.strip()
     return str(get_settings().llm_base_url or "").strip()
+
+
+def _get_embedding_model() -> str:
+    app_cfg, _ = _read_app_settings_md()
+    v = app_cfg.get("embedding_model") if isinstance(app_cfg, dict) else None
+    return str(v).strip() if isinstance(v, str) and v.strip() else ""
 
 
 def _get_llm_settings() -> dict[str, Any]:

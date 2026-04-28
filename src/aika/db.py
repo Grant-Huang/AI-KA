@@ -152,6 +152,14 @@ CREATE TABLE IF NOT EXISTS app_settings (
   value_json TEXT NOT NULL,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS memory_file_embeddings (
+  path         TEXT PRIMARY KEY,
+  embedding    BLOB NOT NULL,
+  content_hash TEXT NOT NULL,
+  embed_model  TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
 """
 
 
@@ -208,6 +216,8 @@ class ConversationRow:
     created_at: str
     updated_at: str
     preset_id: str | None = None
+    mode: str = "reviewing"
+    state: str = "idle"
 
 
 @dataclass(frozen=True)
@@ -229,6 +239,7 @@ class MessageRow:
     role: str
     content: str
     created_at: str
+    metadata_json: str | None = None
 
 
 @dataclass(frozen=True)
@@ -268,6 +279,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _migrate_projects_web_columns(conn)
     _migrate_conversations_preset_id(conn)
     _migrate_analysis_runs_metadata(conn)
+    _migrate_conversations_mode_state(conn)
+    _migrate_messages_metadata(conn)
+    _migrate_chunks_embedding(conn)
 
 
 def _table_column_names(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -313,6 +327,33 @@ def _migrate_analysis_runs_metadata(conn: sqlite3.Connection) -> None:
     cols = _table_column_names(conn, "analysis_runs")
     if "run_metadata_json" not in cols:
         conn.execute("ALTER TABLE analysis_runs ADD COLUMN run_metadata_json TEXT")
+        conn.commit()
+
+
+def _migrate_conversations_mode_state(conn: sqlite3.Connection) -> None:
+    cols = _table_column_names(conn, "conversations")
+    if "mode" not in cols:
+        conn.execute("ALTER TABLE conversations ADD COLUMN mode TEXT NOT NULL DEFAULT 'reviewing'")
+        conn.commit()
+    if "state" not in cols:
+        conn.execute("ALTER TABLE conversations ADD COLUMN state TEXT NOT NULL DEFAULT 'idle'")
+        conn.commit()
+
+
+def _migrate_messages_metadata(conn: sqlite3.Connection) -> None:
+    cols = _table_column_names(conn, "messages")
+    if "metadata_json" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN metadata_json TEXT")
+        conn.commit()
+
+
+def _migrate_chunks_embedding(conn: sqlite3.Connection) -> None:
+    cols = _table_column_names(conn, "document_chunks")
+    if "embedding" not in cols:
+        conn.execute("ALTER TABLE document_chunks ADD COLUMN embedding BLOB")
+        conn.commit()
+    if "embed_model" not in cols:
+        conn.execute("ALTER TABLE document_chunks ADD COLUMN embed_model TEXT")
         conn.commit()
 
 
@@ -754,30 +795,54 @@ def create_conversation(
     analysis_type: str,
     title: str,
     preset_id: str | None = None,
+    mode: str = "reviewing",
 ) -> ConversationRow:
     pid = str(preset_id).strip() if preset_id is not None else None
     cur = conn.execute(
         """
-        INSERT INTO conversations(project_id, analysis_type, title, preset_id)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO conversations(project_id, analysis_type, title, preset_id, mode, state)
+        VALUES (?, ?, ?, ?, ?, 'idle')
         """,
-        (project_id, str(analysis_type), str(title), pid),
+        (project_id, str(analysis_type), str(title), pid, str(mode)),
     )
     conn.commit()
     cid = int(cur.lastrowid)
     r = conn.execute(
-        "SELECT id, project_id, analysis_type, title, created_at, updated_at, preset_id FROM conversations WHERE id=?",
+        "SELECT id, project_id, analysis_type, title, created_at, updated_at, preset_id, mode, state FROM conversations WHERE id=?",
         (cid,),
     ).fetchone()
     assert r is not None
     return _row_to_conversation(r)
 
 
+def update_conversation_state(
+    conn: sqlite3.Connection,
+    *,
+    conversation_id: int,
+    state: str,
+    mode: str | None = None,
+) -> None:
+    if mode is not None:
+        conn.execute(
+            "UPDATE conversations SET state=?, mode=?, updated_at=datetime('now') WHERE id=?",
+            (str(state), str(mode), int(conversation_id)),
+        )
+    else:
+        conn.execute(
+            "UPDATE conversations SET state=?, updated_at=datetime('now') WHERE id=?",
+            (str(state), int(conversation_id)),
+        )
+    conn.commit()
+
+
 def _row_to_conversation(r: sqlite3.Row) -> ConversationRow:
-    pj = r["preset_id"] if "preset_id" in r.keys() else None
+    keys = r.keys()
+    pj = r["preset_id"] if "preset_id" in keys else None
     preset_out: str | None = None
     if pj is not None and str(pj).strip():
         preset_out = str(pj).strip()
+    mode_val = str(r["mode"]) if "mode" in keys and r["mode"] is not None else "reviewing"
+    state_val = str(r["state"]) if "state" in keys and r["state"] is not None else "idle"
     return ConversationRow(
         id=int(r["id"]),
         project_id=int(r["project_id"]),
@@ -786,6 +851,8 @@ def _row_to_conversation(r: sqlite3.Row) -> ConversationRow:
         created_at=str(r["created_at"]),
         updated_at=str(r["updated_at"]),
         preset_id=preset_out,
+        mode=mode_val,
+        state=state_val,
     )
 
 
@@ -924,20 +991,21 @@ def insert_message(
     conversation_id: int,
     role: str,
     content: str,
+    metadata: dict[str, Any] | None = None,
 ) -> MessageRow:
+    meta_s = json.dumps(metadata, ensure_ascii=False) if metadata is not None else None
     cur = conn.execute(
         """
-        INSERT INTO messages(conversation_id, role, content)
-        VALUES (?, ?, ?)
+        INSERT INTO messages(conversation_id, role, content, metadata_json)
+        VALUES (?, ?, ?, ?)
         """,
-        (conversation_id, str(role), str(content)),
+        (conversation_id, str(role), str(content), meta_s),
     )
-    # touch conversation updated_at
     conn.execute("UPDATE conversations SET updated_at=datetime('now') WHERE id=?", (conversation_id,))
     conn.commit()
     mid = int(cur.lastrowid)
     r = conn.execute(
-        "SELECT id, conversation_id, role, content, created_at FROM messages WHERE id=?",
+        "SELECT id, conversation_id, role, content, created_at, metadata_json FROM messages WHERE id=?",
         (mid,),
     ).fetchone()
     if r is None:
@@ -947,20 +1015,41 @@ def insert_message(
             role=str(role),
             content=str(content),
             created_at="",
+            metadata_json=meta_s,
         )
+    return _row_to_message(r)
+
+
+def update_message_metadata(
+    conn: sqlite3.Connection,
+    *,
+    message_id: int,
+    metadata: dict[str, Any],
+) -> None:
+    conn.execute(
+        "UPDATE messages SET metadata_json=? WHERE id=?",
+        (json.dumps(metadata, ensure_ascii=False), int(message_id)),
+    )
+    conn.commit()
+
+
+def _row_to_message(r: sqlite3.Row) -> MessageRow:
+    keys = r.keys()
+    meta = r["metadata_json"] if "metadata_json" in keys else None
     return MessageRow(
         id=int(r["id"]),
         conversation_id=int(r["conversation_id"]),
         role=str(r["role"]),
         content=str(r["content"]),
         created_at=str(r["created_at"]),
+        metadata_json=(str(meta) if meta is not None else None),
     )
 
 
 def list_messages(conn: sqlite3.Connection, *, conversation_id: int, limit: int = 200) -> list[MessageRow]:
     rows = conn.execute(
         """
-        SELECT id, conversation_id, role, content, created_at
+        SELECT id, conversation_id, role, content, created_at, metadata_json
         FROM messages
         WHERE conversation_id=?
         ORDER BY id ASC
@@ -968,16 +1057,7 @@ def list_messages(conn: sqlite3.Connection, *, conversation_id: int, limit: int 
         """,
         (conversation_id, int(limit)),
     ).fetchall()
-    return [
-        MessageRow(
-            id=int(r["id"]),
-            conversation_id=int(r["conversation_id"]),
-            role=str(r["role"]),
-            content=str(r["content"]),
-            created_at=str(r["created_at"]),
-        )
-        for r in rows
-    ]
+    return [_row_to_message(r) for r in rows]
 
 
 def list_recent_messages(
@@ -987,7 +1067,7 @@ def list_recent_messages(
     lim = max(1, int(limit))
     rows = conn.execute(
         """
-        SELECT id, conversation_id, role, content, created_at
+        SELECT id, conversation_id, role, content, created_at, metadata_json
         FROM messages
         WHERE conversation_id=? AND role IN ('user', 'assistant')
         ORDER BY id DESC
@@ -996,16 +1076,7 @@ def list_recent_messages(
         (conversation_id, lim),
     ).fetchall()
     ordered = list(reversed(rows))
-    return [
-        MessageRow(
-            id=int(r["id"]),
-            conversation_id=int(r["conversation_id"]),
-            role=str(r["role"]),
-            content=str(r["content"]),
-            created_at=str(r["created_at"]),
-        )
-        for r in ordered
-    ]
+    return [_row_to_message(r) for r in ordered]
 
 
 def insert_analysis_run(
@@ -1201,6 +1272,113 @@ def list_annotations(conn: sqlite3.Connection, project_id: int, type_: str | Non
         )
         for r in rows
     ]
+
+
+def upsert_memory_embedding(
+    conn: sqlite3.Connection,
+    *,
+    path: str,
+    embedding_bytes: bytes,
+    content_hash: str,
+    embed_model: str,
+) -> None:
+    from datetime import datetime as _dt
+    conn.execute(
+        """
+        INSERT INTO memory_file_embeddings(path, embedding, content_hash, embed_model, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(path) DO UPDATE SET
+          embedding=excluded.embedding,
+          content_hash=excluded.content_hash,
+          embed_model=excluded.embed_model,
+          updated_at=excluded.updated_at
+        """,
+        (str(path), embedding_bytes, str(content_hash), str(embed_model), _dt.utcnow().isoformat()),
+    )
+    conn.commit()
+
+
+def get_memory_embedding(
+    conn: sqlite3.Connection,
+    *,
+    path: str,
+    content_hash: str,
+) -> bytes | None:
+    """Returns embedding bytes if stored hash matches, else None (stale or missing)."""
+    r = conn.execute(
+        "SELECT embedding, content_hash FROM memory_file_embeddings WHERE path=?",
+        (str(path),),
+    ).fetchone()
+    if r is None:
+        return None
+    if str(r["content_hash"]) != str(content_hash):
+        return None
+    return bytes(r["embedding"])
+
+
+def list_all_memory_embeddings(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT path, embedding, content_hash, embed_model FROM memory_file_embeddings"
+    ).fetchall()
+    return [
+        {
+            "path": str(r["path"]),
+            "embedding": bytes(r["embedding"]),
+            "content_hash": str(r["content_hash"]),
+            "embed_model": str(r["embed_model"]),
+        }
+        for r in rows
+    ]
+
+
+def update_chunk_embedding(
+    conn: sqlite3.Connection,
+    *,
+    chunk_id: int,
+    embedding_bytes: bytes,
+    embed_model: str,
+) -> None:
+    conn.execute(
+        "UPDATE document_chunks SET embedding=?, embed_model=? WHERE id=?",
+        (embedding_bytes, str(embed_model), int(chunk_id)),
+    )
+
+
+def get_chunk_embeddings_for_project(
+    conn: sqlite3.Connection,
+    *,
+    project_id: int,
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT c.id AS chunk_id, c.embedding AS embedding, c.embed_model AS embed_model,
+               c.text AS text, d.path AS doc_path, c.chunk_index AS chunk_index,
+               c.locator_json AS locator_json
+        FROM document_chunks c
+        JOIN documents d ON d.id = c.document_id
+        WHERE d.project_id=? AND c.embedding IS NOT NULL
+        ORDER BY d.path, c.chunk_index
+        """,
+        (int(project_id),),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            loc = json.loads(str(r["locator_json"])) if r["locator_json"] else {}
+        except json.JSONDecodeError:
+            loc = {}
+        out.append(
+            {
+                "chunk_id": int(r["chunk_id"]),
+                "embedding": bytes(r["embedding"]),
+                "embed_model": str(r["embed_model"]) if r["embed_model"] else "",
+                "text": str(r["text"]),
+                "doc_path": str(r["doc_path"]),
+                "chunk_index": int(r["chunk_index"]),
+                "locator": loc,
+            }
+        )
+    return out
 
 
 def insert_annotation(
