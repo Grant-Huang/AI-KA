@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import urllib.error
@@ -10,6 +11,14 @@ from typing import Any, Iterator
 
 class LLMError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class EmbedConfig:
+    base_url: str
+    model: str
+    api_key: str | None = None
+    timeout_s: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -230,6 +239,53 @@ class OpenAICompatibleProvider(LLMProvider):
                     continue
         finally:
             resp.close()
+
+
+def embed(text: str, config: EmbedConfig) -> list[float]:
+    """
+    Call an OpenAI-compatible embeddings endpoint and return the float vector.
+    Raises LLMError on any failure.
+    """
+    base = (config.base_url or "").rstrip("/")
+    if not base:
+        raise LLMError("embed: base_url is required")
+    if not config.model:
+        raise LLMError("embed: model is required")
+
+    api_key = config.api_key
+    if not api_key:
+        api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("AIKA_LLM_API_KEY")
+
+    if base.endswith("/v1"):
+        url = f"{base}/embeddings"
+    else:
+        url = f"{base}/v1/embeddings"
+
+    payload = {"model": config.model, "input": text}
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=float(config.timeout_s)) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        err = e.read().decode("utf-8", errors="replace")
+        raise LLMError(f"embed http error {e.code}: {err}") from e
+    except Exception as e:
+        raise LLMError(f"embed error: {e}") from e
+
+    try:
+        raw = json.loads(body)
+        return [float(v) for v in raw["data"][0]["embedding"]]
+    except Exception as e:
+        raise LLMError(f"embed invalid response: {body[:300]}") from e
+
+
+def content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def get_provider(provider_id: str) -> LLMProvider:

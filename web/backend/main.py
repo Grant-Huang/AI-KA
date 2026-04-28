@@ -7,6 +7,7 @@ import shutil
 from typing import Any, Iterator
 from pathlib import Path
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,6 +53,13 @@ from backend.context_builder import (
     collect_open_findings, collect_all_findings,
 )
 from backend.conversation_fsm import transition as fsm_transition, mark_awaiting
+from backend.embedding_service import (
+    configure as configure_embeddings,
+    content_hash as emb_content_hash,
+    embed_text,
+    is_configured as embeddings_configured,
+    vec_to_bytes,
+)
 from backend.hooks import register_builtin_hooks, run_after_analyze_hooks, run_before_analyze_hooks
 from backend.hooks.registry import list_hook_names
 from backend.services.outputs_files_service import (
@@ -101,7 +109,13 @@ def _message_rows_to_prior_tuples(rows: list[Any]) -> list[tuple[str, str]]:
     return [(str(r.role), _truncate_message_for_context(r.content)) for r in rows]
 
 
-app = FastAPI(title="AI-KA Web", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    _reload_embedding_config()
+    yield
+
+
+app = FastAPI(title="AI-KA Web", version="0.1.0", lifespan=_lifespan)
 _settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
@@ -205,7 +219,28 @@ def upsert_project_memory_file(project_id: int, payload: dict[str, Any]) -> JSON
         dest.write_text(content, encoding="utf-8")
     except OSError as e:
         return JSONResponse(err(str(e)), status_code=500)
-    return JSONResponse(ok({"path": rel, "written": True}))
+
+    # Lazily embed the written file if embedding is configured
+    embed_status = "skipped"
+    if embeddings_configured():
+        try:
+            from backend.embedding_service import bytes_to_vec  # noqa: F401 (verify import)
+            h = emb_content_hash(content)
+            existing = dbm.get_memory_embedding(conn, path=rel, content_hash=h)
+            if existing is None:
+                vec = embed_text(content[:8000])
+                dbm.upsert_memory_embedding(
+                    conn,
+                    path=rel,
+                    embedding_bytes=vec_to_bytes(vec),
+                    content_hash=h,
+                    embed_model=_get_embedding_model(),
+                )
+            embed_status = "ok"
+        except Exception:
+            embed_status = "error"
+
+    return JSONResponse(ok({"path": rel, "written": True, "embed": embed_status}))
 
 
 def _get_active_skill_package_id() -> str:
@@ -374,6 +409,17 @@ def _write_app_settings_md(payload: dict[str, Any]) -> None:
         obj["focus_preset_review_overlay"] = ovr
     text = "# 应用设置\n\n```json\n" + json.dumps(obj, ensure_ascii=False, indent=2) + "\n```\n"
     p.write_text(text, encoding="utf-8")
+
+def _reload_embedding_config() -> None:
+    """Re-configure embedding singleton from current app_settings.md. Non-fatal."""
+    try:
+        em = _get_embed_model_from_llm_settings()
+        base = _get_embed_base_url_from_llm_settings()
+        if em and base:
+            configure_embeddings(base_url=base, model=em)
+    except Exception:
+        pass
+
 
 def _helpme_md_path() -> Path:
     root = repository_root()
@@ -592,6 +638,26 @@ def _get_embedding_model() -> str:
     return str(v).strip() if isinstance(v, str) and v.strip() else ""
 
 
+def _get_embed_model_from_llm_settings() -> str:
+    app_cfg, _ = _read_app_settings_md()
+    llm = app_cfg.get("llm_settings") if isinstance(app_cfg, dict) else {}
+    if isinstance(llm, dict):
+        v = llm.get("embed_model")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def _get_embed_base_url_from_llm_settings() -> str:
+    app_cfg, _ = _read_app_settings_md()
+    llm = app_cfg.get("llm_settings") if isinstance(app_cfg, dict) else {}
+    if isinstance(llm, dict):
+        v = llm.get("embed_base_url")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
 def _get_llm_settings() -> dict[str, Any]:
     return {
         "text_provider": _get_text_provider(),
@@ -599,6 +665,8 @@ def _get_llm_settings() -> dict[str, Any]:
         "text_model": _get_text_model(),
         "vl_model": _get_vl_model(),
         "vl_base_url": _get_vl_base_url(),
+        "embed_model": _get_embed_model_from_llm_settings(),
+        "embed_base_url": _get_embed_base_url_from_llm_settings(),
         "has_text_api_key": bool(_get_text_llm_api_key_effective()),
         "has_vl_api_key": bool(_get_vl_llm_api_key_effective()),
     }
@@ -796,12 +864,16 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
         text_model = str(raw_llm.get("text_model") or "").strip() or DEFAULT_TEXT_MODEL
         vl_model = str(raw_llm.get("vl_model") or "").strip() or DEFAULT_VL_MODEL
         vl_base_url = str(raw_llm.get("vl_base_url") or "").strip()
+        embed_model = str(raw_llm.get("embed_model") or "").strip()
+        embed_base_url = str(raw_llm.get("embed_base_url") or "").strip()
         current["llm_settings"] = {
             "text_provider": text_provider,
             "text_base_url": text_base_url,
             "text_model": text_model,
             "vl_model": vl_model,
             "vl_base_url": vl_base_url,
+            "embed_model": embed_model,
+            "embed_base_url": embed_base_url,
             # 先占位，后面会根据 payload 覆盖
             "has_text_api_key": bool(_get_text_llm_api_key_effective()),
             "has_vl_api_key": bool(_get_vl_llm_api_key_effective()),
@@ -812,7 +884,11 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
             "text_model": text_model,
             "vl_model": vl_model,
             "vl_base_url": vl_base_url,
+            "embed_model": embed_model,
+            "embed_base_url": embed_base_url,
         }
+        if embed_model and embed_base_url:
+            configure_embeddings(base_url=embed_base_url, model=embed_model)
 
     # API Key: 随 app_settings.md 等持久化（不再写数据库业务表）
     text_key = None
@@ -1462,6 +1538,42 @@ def convert_md_stream(project_id: int) -> StreamingResponse:
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+def _embed_project_chunks(conn: Any, project_id: int, batch_size: int = 50) -> int:
+    """
+    Embed any document chunks that lack embeddings. Returns count of newly embedded chunks.
+    Silently skips on embedding errors to keep indexing non-fatal.
+    """
+    if not embeddings_configured():
+        return 0
+    em = _get_embedding_model()
+    rows = conn.execute(
+        """
+        SELECT c.id, c.text FROM document_chunks c
+        JOIN documents d ON d.id = c.document_id
+        WHERE d.project_id=? AND (c.embedding IS NULL OR c.embed_model != ?)
+        LIMIT ?
+        """,
+        (int(project_id), em, batch_size),
+    ).fetchall()
+    count = 0
+    for r in rows:
+        try:
+            text = str(r["text"] or "")
+            vec = embed_text(text[:4000])
+            dbm.update_chunk_embedding(
+                conn,
+                chunk_id=int(r["id"]),
+                embedding_bytes=vec_to_bytes(vec),
+                embed_model=em,
+            )
+            count += 1
+        except Exception:
+            continue
+    if count:
+        conn.commit()
+    return count
+
+
 @app.post("/api/v1/projects/{project_id}/index-md")
 def index_md(project_id: int) -> JSONResponse:
     conn = _conn()
@@ -1478,7 +1590,10 @@ def index_md(project_id: int) -> JSONResponse:
         chunk_strategy=_get_chunk_strategy(),
         full_resync=_get_md_index_mode() == MD_INDEX_MODE_FULL,
     )
-    return JSONResponse(ok({"indexed_documents": n}))
+    embedded_chunks = 0
+    if embeddings_configured():
+        embedded_chunks = _embed_project_chunks(conn, project_id)
+    return JSONResponse(ok({"indexed_documents": n, "embedded_chunks": embedded_chunks}))
 
 
 def _safe_slug(text: str) -> str:
@@ -1529,12 +1644,20 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
             surf.add(sid)
     fq = " ".join(str(x) for x in payload.focus_points)
     mq = (payload.memory_query or fq).strip()
+    embed_query_vec: list[float] | None = None
+    if embeddings_configured() and mq:
+        try:
+            embed_query_vec = embed_text(mq[:500])
+        except Exception:
+            embed_query_vec = None
     recalled = recall_memory_snippets(
         memory_root=mem_root,
         project_id=project_id,
         query=mq,
         already_surfaced=surf,
         limit=5,
+        db_conn=conn,
+        embed_query_vec=embed_query_vec,
     )
     snippets.extend(recalled)
     _recalled_meta = [
@@ -2263,7 +2386,17 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
         fq = " ".join(focus_ids)
         mq = (memory_query or fq).strip()
         mem_root = memory_root_under_repo(repository_root())
-        recalled = recall_memory_snippets(memory_root=mem_root, project_id=project_id, query=mq, already_surfaced=set(), limit=5)
+        _eq_vec: list[float] | None = None
+        if embeddings_configured() and mq:
+            try:
+                _eq_vec = embed_text(mq[:500])
+            except Exception:
+                pass
+        recalled = recall_memory_snippets(
+            memory_root=mem_root, project_id=project_id, query=mq,
+            already_surfaced=set(), limit=5,
+            db_conn=conn, embed_query_vec=_eq_vec,
+        )
 
         system = build_system_prompt(None, focus_definitions=resolved, memory_snippets=recalled or None, skill_meta=skill_meta_payload)
         user, used_entries = build_user_prompt_from_entries(entries)

@@ -171,6 +171,8 @@ type LlmSettings = {
   text_model: string;
   vl_model: string;
   vl_base_url: string;
+  embed_model?: string;
+  embed_base_url?: string;
   has_text_api_key?: boolean;
   has_vl_api_key?: boolean;
 };
@@ -2645,6 +2647,31 @@ export default function App() {
                 </Space>
               </div>
             </Space>
+            <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid #f0f0f0" }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
+                语义召回（Embedding）— 配置后可提升记忆与文档片段的召回准确率
+              </Typography.Text>
+              <Space wrap>
+                <Input
+                  style={{ width: 360 }}
+                  addonBefore="Embed Base URL"
+                  placeholder="OpenAI 兼容 Embeddings 接口 URL"
+                  value={settingsDraft.llm_settings?.embed_base_url ?? ""}
+                  onChange={(e) =>
+                    setSettingsDraft((s) => ({ ...s, llm_settings: { ...s.llm_settings, embed_base_url: e.target.value } }))
+                  }
+                />
+                <Input
+                  style={{ width: 280 }}
+                  addonBefore="Embed 模型"
+                  placeholder="例如 text-embedding-ada-002"
+                  value={settingsDraft.llm_settings?.embed_model ?? ""}
+                  onChange={(e) =>
+                    setSettingsDraft((s) => ({ ...s, llm_settings: { ...s.llm_settings, embed_model: e.target.value } }))
+                  }
+                />
+              </Space>
+            </div>
                 </div>
               ),
             },
