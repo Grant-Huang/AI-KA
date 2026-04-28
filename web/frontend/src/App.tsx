@@ -35,6 +35,8 @@ import {
   UserOutlined,
   SearchOutlined,
   FolderOpenOutlined,
+  AuditOutlined,
+  BulbOutlined,
 } from "@ant-design/icons";
 import {
   apiJson,
@@ -464,6 +466,7 @@ export default function App() {
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [appMode, setAppMode] = useState<"review" | "extraction">("review");
   const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain">("analyze");
   const [projectIngest, setProjectIngest] = useState<
     Record<number, { initialized: boolean; chunk_count: number; md_out_exists: boolean; has_review_records?: boolean }>
@@ -3113,41 +3116,73 @@ export default function App() {
       <div className="side-nav">
         <Button
           type="text"
-          className="side-nav-btn"
-          icon={<PlusOutlined />}
-          title="新对话"
-          onClick={startNewConversationPage}
+          className={`side-nav-btn${appMode === "review" ? " side-nav-btn--active" : ""}`}
+          icon={<AuditOutlined />}
+          title="项目审查"
+          onClick={() => setAppMode("review")}
         />
         <Button
           type="text"
-          className="side-nav-btn"
-          icon={<CommentOutlined />}
-          title="审查历史"
-          onClick={() => setChatsOpen(true)}
+          className={`side-nav-btn${appMode === "extraction" ? " side-nav-btn--active" : ""}`}
+          icon={<BulbOutlined />}
+          title="知识提取"
+          onClick={() => {
+            setAppMode("extraction");
+            setChatsOpen(false);
+          }}
         />
         <div className="side-nav-separator" aria-hidden="true" />
-        <Button
-          type="text"
-          className="side-nav-btn"
-          icon={<FolderOpenOutlined />}
-          title="项目初始化"
-          onClick={() => {
-            setChatsOpen(false);
-            setMainPanel("ingest");
-          }}
-        />
-        <Button
-          type="text"
-          className="side-nav-btn"
-          icon={<FileSearchOutlined />}
-          title="审查域设定"
-          onClick={() => {
-            setChatsOpen(false);
-            setMainPanel("review_domain");
-            // 进入独立页面时刷新一次，避免显示旧值
-            void loadSettings({ snapshot_chunk_strategy: true });
-          }}
-        />
+        {appMode === "review" ? (
+          <>
+            <Button
+              type="text"
+              className="side-nav-btn"
+              icon={<PlusOutlined />}
+              title="新审查会话"
+              onClick={startNewConversationPage}
+            />
+            <Button
+              type="text"
+              className="side-nav-btn"
+              icon={<CommentOutlined />}
+              title="审查历史"
+              onClick={() => setChatsOpen(true)}
+            />
+            <div className="side-nav-separator" aria-hidden="true" />
+            <Button
+              type="text"
+              className="side-nav-btn"
+              icon={<FolderOpenOutlined />}
+              title="项目初始化"
+              onClick={() => {
+                setChatsOpen(false);
+                setMainPanel("ingest");
+              }}
+            />
+            <Button
+              type="text"
+              className="side-nav-btn"
+              icon={<FileSearchOutlined />}
+              title="审查域设定"
+              onClick={() => {
+                setChatsOpen(false);
+                setMainPanel("review_domain");
+                // 进入独立页面时刷新一次，避免显示旧值
+                void loadSettings({ snapshot_chunk_strategy: true });
+              }}
+            />
+          </>
+        ) : (
+          <>
+            <Button
+              type="text"
+              className="side-nav-btn"
+              icon={<PlusOutlined />}
+              title="新提取会话"
+              onClick={() => message.info("知识提取功能建设中，敬请期待")}
+            />
+          </>
+        )}
         <div className="side-nav-spacer" />
         <div className="side-nav-bottom">
           <Button
@@ -3188,7 +3223,7 @@ export default function App() {
             />
           ) : null}
 
-          {chatsOpen ? (
+          {chatsOpen && appMode === "review" ? (
             <div className="chat-history-page">
               <div className="chat-history-toolbar">
                 <Title level={4} className="chat-history-title">
@@ -3288,7 +3323,7 @@ export default function App() {
             </div>
           ) : null}
 
-          {!chatsOpen && mainPanel === "ingest" ? (
+          {!chatsOpen && appMode === "review" && mainPanel === "ingest" ? (
             <div style={{ maxWidth: 980, margin: "0 auto", padding: "10px 10px 18px" }}>
               <Title level={4} style={{ margin: "6px 0 10px" }}>
                 项目初始化
@@ -3439,9 +3474,9 @@ export default function App() {
                 ) : null}
               </Space>
             </div>
-          ) : !chatsOpen && mainPanel === "review_domain" ? (
+          ) : !chatsOpen && appMode === "review" && mainPanel === "review_domain" ? (
             reviewDomainPageNode
-          ) : !chatsOpen && showMainOutput ? (
+          ) : !chatsOpen && appMode === "review" && showMainOutput ? (
             <>
               <div className="pipeline-output-panel pipeline-output-panel--footer-clear">
                 {pipelineRunning && lastSubmittedUserMessage?.text ? (
@@ -4016,7 +4051,17 @@ export default function App() {
         </div>
       </div>
 
-      {!chatsOpen && mainPanel === "analyze" ? (
+      {appMode === "extraction" ? (
+        <div className="composer-overlay composer-overlay-center">
+          <div className="composer-overlay-inner">
+            <div className="welcome">
+              <div className="welcome-title">知识提取</div>
+              <div className="welcome-subtitle">隐性知识显化功能建设中，敬请期待</div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {!chatsOpen && appMode === "review" && mainPanel === "analyze" ? (
         <div
           className={`composer-overlay ${
             // 打开会话时输入框固定底部；空白页可居中
