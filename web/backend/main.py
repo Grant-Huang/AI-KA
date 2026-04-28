@@ -60,6 +60,15 @@ from backend.embedding_service import (
     is_configured as embeddings_configured,
     vec_to_bytes,
 )
+from backend.personal_memory import (
+    add_memory_suggestion,
+    approve_memory_suggestion,
+    dismiss_memory_suggestion,
+    ensure_personal_dirs,
+    list_memory_suggestions,
+    load_personal_focus_override,
+    recall_personal_memory,
+)
 from backend.hooks import register_builtin_hooks, run_after_analyze_hooks, run_before_analyze_hooks
 from backend.hooks.registry import list_hook_names
 from backend.services.outputs_files_service import (
@@ -119,6 +128,10 @@ def _message_rows_to_prior_tuples(rows: list[Any]) -> list[tuple[str, str]]:
 
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
+    try:
+        ensure_personal_dirs()
+    except Exception:
+        pass
     _reload_embedding_config()
     yield
 
@@ -249,6 +262,75 @@ def upsert_project_memory_file(project_id: int, payload: dict[str, Any]) -> JSON
             embed_status = "error"
 
     return JSONResponse(ok({"path": rel, "written": True, "embed": embed_status}))
+
+
+# ---------------------------------------------------------------------------
+# Personal memory endpoints (~/.aika/)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/personal/memory/suggestions")
+def get_personal_memory_suggestions() -> JSONResponse:
+    return JSONResponse(ok(list_memory_suggestions()))
+
+
+class MemorySuggestionBody(BaseModel):
+    title: str = Field(..., description="Memory file title (no extension)")
+    content: str = Field(..., description="Markdown content for the memory file")
+    reason: str = Field(default="", description="Why this memory is suggested")
+
+
+@app.post("/api/v1/personal/memory/suggestions")
+def create_personal_memory_suggestion(body: MemorySuggestionBody) -> JSONResponse:
+    """Add a pending memory suggestion (never auto-writes to memory/)."""
+    add_memory_suggestion({"title": body.title, "content": body.content, "reason": body.reason})
+    return JSONResponse(ok({"queued": True}))
+
+
+@app.post("/api/v1/personal/memory/suggestions/{index}/approve")
+def approve_personal_memory_suggestion(index: int) -> JSONResponse:
+    result = approve_memory_suggestion(index)
+    if result is None:
+        return JSONResponse(err("suggestion not found or empty"), status_code=404)
+    return JSONResponse(ok(result))
+
+
+@app.post("/api/v1/personal/memory/suggestions/{index}/dismiss")
+def dismiss_personal_memory_suggestion(index: int) -> JSONResponse:
+    ok_flag = dismiss_memory_suggestion(index)
+    return JSONResponse(ok({"dismissed": ok_flag}))
+
+
+@app.get("/api/v1/personal/focus-overrides")
+def list_personal_focus_override_files() -> JSONResponse:
+    from backend.personal_memory import list_personal_focus_overrides
+    return JSONResponse(ok(list_personal_focus_overrides()))
+
+
+class PersonalFocusOverrideBody(BaseModel):
+    prompt: str = Field(..., description="Override prompt text for this focus point")
+
+
+@app.put("/api/v1/personal/focus-overrides/{focus_id}")
+def upsert_personal_focus_override(focus_id: str, body: PersonalFocusOverrideBody) -> JSONResponse:
+    from backend.personal_memory import personal_focus_overrides_dir
+    d = personal_focus_overrides_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    dest = d / f"focus-{focus_id}.md"
+    try:
+        dest.write_text(body.prompt, encoding="utf-8")
+    except OSError as e:
+        return JSONResponse(err(str(e)), status_code=500)
+    return JSONResponse(ok({"focus_id": focus_id, "written": True}))
+
+
+@app.delete("/api/v1/personal/focus-overrides/{focus_id}")
+def delete_personal_focus_override(focus_id: str) -> JSONResponse:
+    from backend.personal_memory import personal_focus_overrides_dir
+    dest = personal_focus_overrides_dir() / f"focus-{focus_id}.md"
+    if not dest.is_file():
+        return JSONResponse(err("override not found"), status_code=404)
+    dest.unlink()
+    return JSONResponse(ok({"focus_id": focus_id, "deleted": True}))
 
 
 def _get_active_skill_package_id() -> str:
@@ -1580,13 +1662,13 @@ def _resolve_focus_definitions_for_subset(conn: Any, focus_names: list[str]) -> 
         if n not in by_name:
             return [], f"未知关注点：{n}（请从设置中已加载的关注点中选择）"
         d = by_name[n]
-        out.append(
-            {
-                "id": str(d["id"]),
-                "name": str(d["name"]),
-                "prompt": str(d.get("prompt") or ""),
-            }
-        )
+        fid = str(d["id"])
+        prompt = str(d.get("prompt") or "")
+        # Apply personal focus override if present (S6-3)
+        personal_override = load_personal_focus_override(fid)
+        if personal_override:
+            prompt = personal_override
+        out.append({"id": fid, "name": str(d["name"]), "prompt": prompt})
     return out, None
 
 
@@ -1747,17 +1829,26 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
         project_id=project_id,
         query=mq,
         already_surfaced=surf,
-        limit=5,
+        limit=4,
         db_conn=conn,
         embed_query_vec=embed_query_vec,
     )
+    # Also recall from personal memory (~/.aika/memory/)
+    personal_recalled = recall_personal_memory(
+        mq,
+        already_surfaced=surf | {str(s.get("id") or "") for s in recalled},
+        limit=2,
+        embed_query_vec=embed_query_vec,
+    )
+    recalled = recalled + personal_recalled
     snippets.extend(recalled)
     _recalled_meta = [
         {
             "id": str(s.get("id") or ""),
             "title": str(s.get("title") or ""),
-            "score": int(s.get("score") or 0),
+            "score": float(s.get("score") or 0),
             "excerpt": str(s.get("body") or "")[:240],
+            "source": str(s.get("source") or "project"),
         }
         for s in recalled
         if isinstance(s, dict) and str(s.get("id") or "").strip()
