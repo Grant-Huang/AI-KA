@@ -606,6 +606,10 @@ export default function App() {
   }, [replay.milestones]);
 
   const [chunkLimit, setChunkLimit] = useState(40);
+  // Sprint 2+5: multi-turn conversation state
+  const [deepMode, setDeepMode] = useState(false);
+  const [sessionFindings, setSessionFindings] = useState<import("./FindingsPanel").Finding[]>([]);
+  const [reportLoading, setReportLoading] = useState(false);
   const [nativePickerAvailable, setNativePickerAvailable] = useState(true);
   const [pickLoading, setPickLoading] = useState(false);
   const [manualRootInput, setManualRootInput] = useState("");
@@ -622,6 +626,7 @@ export default function App() {
     setConversationMessages([]);
     setConversationDownloads([]);
     setCorpusStaleReason("");
+    setSessionFindings([]);
     void (async () => {
       if (selectedId == null || selectedConversationId == null) return;
       try {
@@ -1730,6 +1735,10 @@ export default function App() {
     if (pg) analyzeBody.review_goals_principles = pg;
     const po = (preset?.output_requirements ?? "").trim();
     if (po) analyzeBody.output_requirements = po;
+    // Sprint 2+5: multi-turn flags
+    (analyzeBody as Record<string, unknown>).deferred_doc = true;
+    (analyzeBody as Record<string, unknown>).deep_mode = deepMode;
+    if (draftText.trim()) (analyzeBody as Record<string, unknown>).user_message = draftText.trim();
     setFragmentIndexMd("");
     setMilestones((prev) => prev.filter((m) => m.id !== STAGE_FRAGMENT_INDEX));
 
@@ -1803,7 +1812,32 @@ export default function App() {
               setMilestoneStatus(key, "done");
             }
           }
+          if (ev.type === "finding") {
+            const f = (ev as any).finding;
+            if (f && typeof f === "object" && f.id) {
+              setSessionFindings((prev) => {
+                const exists = prev.some((x) => x.id === f.id);
+                return exists ? prev : [...prev, f as import("./FindingsPanel").Finding];
+              });
+            }
+          }
+          if (ev.type === "critique" && typeof (ev as any).summary === "string") {
+            appendMilestoneDetail("stage:思考分析", `\n\n【自我审查】\n${String((ev as any).summary)}\n`);
+          }
+          if (ev.type === "pass_done") {
+            const fc = (ev as any).finding_count;
+            appendMilestoneDetail("stage:呈现结果", `\n审查完成，发现 ${Number(fc) || 0} 个问题。\n`);
+          }
           if (ev.type === "final") {
+            const rawFindings = (ev as any).findings;
+            if (Array.isArray(rawFindings) && rawFindings.length) {
+              setSessionFindings((prev) => {
+                const newOnes = (rawFindings as import("./FindingsPanel").Finding[]).filter(
+                  (f) => !prev.some((x) => x.id === f.id)
+                );
+                return newOnes.length ? [...prev, ...newOnes] : prev;
+              });
+            }
             const md = typeof (ev as any).markdown === "string" ? String((ev as any).markdown) : "";
             const rawMem = (ev as { memory_files_injected?: unknown }).memory_files_injected;
             if (Array.isArray(rawMem) && rawMem.length) {
@@ -3716,6 +3750,59 @@ export default function App() {
                     </div>
                   </div>
                 ) : null}
+
+                {/* Findings panel */}
+                {sessionFindings.length > 0 ? (
+                  <div style={{ padding: "0 0 12px 0" }}>
+                    {(() => {
+                      const { FindingsPanel } = require("./FindingsPanel") as typeof import("./FindingsPanel");
+                      const handleStatusChange = async (findingId: string, status: import("./FindingsPanel").Finding["status"]) => {
+                        if (selectedId == null || selectedConversationId == null) return;
+                        try {
+                          await fetch(
+                            `/api/v1/projects/${selectedId}/conversations/${selectedConversationId}/findings/${findingId}`,
+                            { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }) }
+                          );
+                          setSessionFindings((prev) => prev.map((f) => (f.id === findingId ? { ...f, status } : f)));
+                        } catch {
+                          // ignore
+                        }
+                      };
+                      const handleGenerateReport = async () => {
+                        if (selectedId == null || selectedConversationId == null) return;
+                        setReportLoading(true);
+                        try {
+                          const res = await fetch(
+                            `/api/v1/projects/${selectedId}/conversations/${selectedConversationId}/generate-report`,
+                            { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: null, include_resolved: false }) }
+                          );
+                          const json = await res.json();
+                          if (json?.data?.report_markdown) {
+                            const md = String(json.data.report_markdown);
+                            pushOutputEntry({ kind: "analyze", convId: selectedConversationId, title: "正式评审报告", markdown: md });
+                            setFinalMarkdown(md);
+                          } else {
+                            import("antd").then(({ message: msg }) => msg.error(json?.error || "生成报告失败"));
+                          }
+                        } catch (e) {
+                          import("antd").then(({ message: msg }) => msg.error(String(e)));
+                        } finally {
+                          setReportLoading(false);
+                        }
+                      };
+                      return (
+                        <FindingsPanel
+                          projectId={selectedId}
+                          conversationId={selectedConversationId}
+                          findings={sessionFindings}
+                          onStatusChange={(id, s) => void handleStatusChange(id, s)}
+                          onGenerateReport={() => void handleGenerateReport()}
+                          reportLoading={reportLoading}
+                        />
+                      );
+                    })()}
+                  </div>
+                ) : null}
               </div>
             </>
           ) : null}
@@ -3962,7 +4049,29 @@ export default function App() {
                         或在设置 → 审查域中查看说明。
                       </Text>
                     ) : null}
-                    {/* 输入框下方路径提示：按需移除（用户反馈冗余） */}
+                    {/* 深度模式开关 */}
+                    <Tooltip
+                      title={deepMode ? "⚡深度模式已开启：分析后追加自我审查，约消耗 2-3x tokens" : "开启深度模式（自我审查）"}
+                    >
+                      <span
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                          cursor: "pointer",
+                          padding: "0 6px",
+                          borderRadius: 4,
+                          background: deepMode ? "#fff7e6" : "transparent",
+                          border: deepMode ? "1px solid #faad14" : "1px solid transparent",
+                          fontSize: 12,
+                          color: deepMode ? "#d46b08" : "#8c8c8c",
+                          userSelect: "none",
+                        }}
+                        onClick={() => setDeepMode((v) => !v)}
+                      >
+                        ⚡{deepMode ? " 深度" : ""}
+                      </span>
+                    </Tooltip>
                   </div>
                   <div className="composer-right composer-run-actions">
                     {pipelineRunning ? (
