@@ -77,12 +77,20 @@ from backend.skills import (
     read_manifest,
     skill_packages_root,
 )
+from backend.skills.packages import focus_points_dir, is_v2_package, package_dir
+from backend.skills.focus_point_io import (
+    evolve_focus_point,
+    list_focus_points,
+    load_focus_point,
+    migrate_from_review_domain,
+)
 from backend.skills.review_domain_io import (
     derive_focus_presets_from_combo_tips,
     extract_focus_combo_tips_from_domain_text,
     merge_preset_review_into_derived,
     read_composer_hint_from_domain_text,
     read_settings_from_domain_text,
+    read_settings_from_package_dir,
     write_review_domain_file,
 )
 
@@ -457,19 +465,18 @@ def _build_settings_payload(conn: Any) -> dict[str, Any]:
 
 
 def _read_settings_from_review_domain() -> tuple[dict[str, Any] | None, str | None]:
-    """从当前活动审查技能包的 review_domain.md 读取。"""
-    p = _active_review_domain_path()
+    """从当前活动审查技能包读取 focus points（v2 focus-points/*.md 优先，否则 v1 review_domain.md）。"""
+    from backend.skills.review_domain_io import read_settings_from_package_dir
+    rr = repository_root()
     pid = _get_active_skill_package_id()
-    if not p.is_file():
-        return (
-            None,
-            f"审查技能包「{pid}」的 review_domain.md 不存在：{p}。请检查 review_skill_packages 目录或使用恢复模板接口。",
-        )
-    text = p.read_text(encoding="utf-8", errors="replace")
-    parsed, err = read_settings_from_domain_text(text)
+    ensure_default_skill_package(rr)
+    pkg_d = package_dir(rr, pid)
+    parsed, err = read_settings_from_package_dir(pkg_d)
     if parsed and not err:
         return parsed, None
-    return None, f"review_domain.md（包 {pid}）解析失败：{err}"
+    if err:
+        return None, f"review_domain.md（包 {pid}）解析失败：{err}"
+    return None, f"review_domain.md（包 {pid}）解析失败：无法读取关注点"
 
 
 def _domain_text_aligned_with_focus_parse() -> str | None:
@@ -999,6 +1006,91 @@ def migrate_legacy_markdown_file_to_active_package(payload: dict[str, Any]) -> J
     out = _build_settings_payload(conn)
     out["review_domain_error"] = None
     return JSONResponse(ok(out))
+
+
+@app.post("/api/v1/skill-packages/{package_id}/focus-points/migrate")
+def migrate_focus_points_to_files(package_id: str, payload: dict[str, Any]) -> JSONResponse:
+    """将 review_domain.md 中的关注点块拆分为 focus-points/*.md 独立文件。"""
+    rr = repository_root()
+    ensure_default_skill_package(rr)
+    pkg_d = package_dir(rr, package_id)
+    domain_f = domain_path(rr, package_id)
+    if not domain_f.is_file():
+        return JSONResponse(err("review_domain.md not found for this package"), status_code=404)
+    overwrite = bool(payload.get("overwrite", False))
+    text = domain_f.read_text(encoding="utf-8", errors="replace")
+    try:
+        created = migrate_from_review_domain(text, pkg_d, overwrite=overwrite)
+    except Exception as e:
+        return JSONResponse(err(f"migration failed: {e}"), status_code=500)
+    if created:
+        # Bump manifest to schema_version 2
+        mp = rr / "review_skill_packages" / package_id / "manifest.json"
+        try:
+            m = read_manifest(rr, package_id) or {}
+            m["schema_version"] = "2"
+            if "focus_refs" not in m:
+                m["focus_refs"] = [{"id": fid} for fid in created]
+            mp.write_text(json.dumps(m, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+    return JSONResponse(ok({"created": created, "count": len(created)}))
+
+
+@app.get("/api/v1/skill-packages/{package_id}/focus-points")
+def list_package_focus_points(package_id: str) -> JSONResponse:
+    """列出技能包的所有 focus-points/*.md 文件（v2 格式）。"""
+    rr = repository_root()
+    ensure_default_skill_package(rr)
+    pkg_d = package_dir(rr, package_id)
+    fps = list_focus_points(pkg_d)
+    return JSONResponse(ok({
+        "package_id": package_id,
+        "is_v2": is_v2_package(rr, package_id),
+        "focus_points": [
+            {
+                "id": fp.id,
+                "name": fp.name,
+                "version": fp.version,
+                "updated_at": fp.updated_at,
+                "prompt": fp.prompt,
+            }
+            for fp in fps
+        ],
+    }))
+
+
+class EvolveFocusPointBody(BaseModel):
+    prompt: str = Field(..., description="新的 Prompt 正文")
+    note: str = Field(default="", description="本次变更说明")
+
+
+@app.put("/api/v1/skill-packages/{package_id}/focus-points/{focus_id}")
+def evolve_focus_point_endpoint(package_id: str, focus_id: str, body: EvolveFocusPointBody) -> JSONResponse:
+    """更新（进化）指定关注点的 Prompt，版本号递增，旧版本归档到 .aika/focus-history/。"""
+    rr = repository_root()
+    ensure_default_skill_package(rr)
+    pkg_d = package_dir(rr, package_id)
+    fp_path = focus_points_dir(rr, package_id) / f"focus-{focus_id}.md"
+    fp = load_focus_point(fp_path)
+    if fp is None:
+        return JSONResponse(err(f"focus point {focus_id} not found in package {package_id}"), status_code=404)
+    try:
+        new_fp = evolve_focus_point(
+            fp,
+            new_prompt=body.prompt,
+            note=body.note,
+            package_dir=pkg_d,
+            repo_root=rr,
+        )
+    except Exception as e:
+        return JSONResponse(err(str(e)), status_code=500)
+    return JSONResponse(ok({
+        "id": new_fp.id,
+        "name": new_fp.name,
+        "version": new_fp.version,
+        "updated_at": new_fp.updated_at,
+    }))
 
 
 @app.post("/api/v1/settings/review-domain/restore-default-skills-template")

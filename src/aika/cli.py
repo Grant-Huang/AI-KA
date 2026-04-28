@@ -188,6 +188,81 @@ def cmd_annotation_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _skill_packages_root() -> Path:
+    import os
+    raw = (os.environ.get("AIKA_REVIEW_SKILL_PACKAGES_ROOT") or "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return (_repo_root() / "review_skill_packages").resolve()
+
+
+def cmd_skill_evolve(args: argparse.Namespace) -> int:
+    import sys
+    pkg_root = _skill_packages_root() / str(args.package)
+    fp_path = pkg_root / "focus-points" / f"focus-{args.focus_id}.md"
+    if not fp_path.is_file():
+        print(f"[error] focus point file not found: {fp_path}", file=sys.stderr)
+        return 2
+
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "web"))
+    from backend.skills.focus_point_io import evolve_focus_point, load_focus_point
+
+    fp = load_focus_point(fp_path)
+    if fp is None:
+        print(f"[error] could not parse {fp_path}", file=sys.stderr)
+        return 2
+
+    if args.prompt_file:
+        new_prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+    else:
+        print(f"Enter new prompt for focus:{fp.id} (end with Ctrl-D / EOF):")
+        new_prompt = sys.stdin.read()
+
+    new_fp = evolve_focus_point(
+        fp,
+        new_prompt=new_prompt,
+        note=args.note or "",
+        package_dir=pkg_root,
+        repo_root=_repo_root(),
+    )
+    print(f"[ok] focus:{new_fp.id} evolved to v{new_fp.version}")
+    return 0
+
+
+def cmd_skill_list(args: argparse.Namespace) -> int:
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "web"))
+    from backend.skills.focus_point_io import list_focus_points
+
+    pkg_root = _skill_packages_root() / str(args.package)
+    fps = list_focus_points(pkg_root)
+    if not fps:
+        print("(no focus-points/*.md files — package may be v1 format)")
+        return 0
+    for fp in fps:
+        print(f"  focus:{fp.id}\tv{fp.version}\t{fp.name}")
+    return 0
+
+
+def cmd_skill_migrate(args: argparse.Namespace) -> int:
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "web"))
+    from backend.skills.focus_point_io import migrate_from_review_domain
+
+    pkg_root = _skill_packages_root() / str(args.package)
+    domain_f = pkg_root / "review_domain.md"
+    if not domain_f.is_file():
+        print(f"[error] review_domain.md not found: {domain_f}", file=sys.stderr)
+        return 2
+    text = domain_f.read_text(encoding="utf-8", errors="replace")
+    created = migrate_from_review_domain(text, pkg_root, overwrite=bool(args.overwrite))
+    if created:
+        print(f"[ok] created {len(created)} focus-point files: {', '.join(created)}")
+    else:
+        print("[ok] no new files created (all exist; use --overwrite to force)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aika")
     sp = p.add_subparsers(dest="cmd", required=True)
@@ -253,6 +328,25 @@ def build_parser() -> argparse.ArgumentParser:
     ann_list.add_argument("--type", required=False, default=None)
     ann_list.add_argument("--limit", required=False, default=200)
     ann_list.set_defaults(func=cmd_annotation_list)
+
+    skill = sp.add_parser("skill")
+    skill_sp = skill.add_subparsers(dest="subcmd", required=True)
+
+    skill_evolve = skill_sp.add_parser("evolve", help="Evolve a focus point by bumping version and writing new prompt")
+    skill_evolve.add_argument("focus_id", help="Focus point id (e.g. req)")
+    skill_evolve.add_argument("--package", required=False, default="package-general", help="Skill package id")
+    skill_evolve.add_argument("--note", required=False, default="", help="Change note")
+    skill_evolve.add_argument("--prompt-file", required=False, default=None, help="Read new prompt from file (default: stdin)")
+    skill_evolve.set_defaults(func=cmd_skill_evolve)
+
+    skill_list = skill_sp.add_parser("list", help="List focus points in a package")
+    skill_list.add_argument("--package", required=False, default="package-general")
+    skill_list.set_defaults(func=cmd_skill_list)
+
+    skill_migrate = skill_sp.add_parser("migrate", help="Migrate review_domain.md to focus-points/*.md")
+    skill_migrate.add_argument("--package", required=False, default="package-general")
+    skill_migrate.add_argument("--overwrite", action="store_true", help="Overwrite existing focus-*.md files")
+    skill_migrate.set_defaults(func=cmd_skill_migrate)
 
     return p
 
