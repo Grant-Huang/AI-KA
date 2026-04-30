@@ -7,6 +7,7 @@ import shutil
 from typing import Any, Iterator
 from pathlib import Path
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,6 +39,36 @@ from backend.routers.conversations import router as conversations_router
 from backend.routers.outputs import router as outputs_router
 from backend.run_metadata import build_run_metadata, sha256_short
 from backend.memory_recall import iter_memory_candidate_files, memory_root_under_repo, recall_memory_snippets
+from backend.conversation_models import (
+    ConversationMode, MessageMetadata, collect_findings_from_conversation,
+    FindingStatus,
+)
+from backend.intent_classifier import classify_intent
+from backend.finding_parser import (
+    FINDING_INSTRUCTION, extract_findings_from_markdown, extract_evolve_hints,
+    deduplicate_findings,
+)
+from backend.context_builder import (
+    build_rolling_context, format_open_findings_for_prompt,
+    collect_open_findings, collect_all_findings,
+)
+from backend.conversation_fsm import transition as fsm_transition, mark_awaiting
+from backend.embedding_service import (
+    configure as configure_embeddings,
+    content_hash as emb_content_hash,
+    embed_text,
+    is_configured as embeddings_configured,
+    vec_to_bytes,
+)
+from backend.personal_memory import (
+    add_memory_suggestion,
+    approve_memory_suggestion,
+    dismiss_memory_suggestion,
+    ensure_personal_dirs,
+    list_memory_suggestions,
+    load_personal_focus_override,
+    recall_personal_memory,
+)
 from backend.hooks import register_builtin_hooks, run_after_analyze_hooks, run_before_analyze_hooks
 from backend.hooks.registry import list_hook_names
 from backend.services.outputs_files_service import (
@@ -55,12 +86,20 @@ from backend.skills import (
     read_manifest,
     skill_packages_root,
 )
+from backend.skills.packages import focus_points_dir, is_v2_package, package_dir
+from backend.skills.focus_point_io import (
+    evolve_focus_point,
+    list_focus_points,
+    load_focus_point,
+    migrate_from_review_domain,
+)
 from backend.skills.review_domain_io import (
     derive_focus_presets_from_combo_tips,
     extract_focus_combo_tips_from_domain_text,
     merge_preset_review_into_derived,
     read_composer_hint_from_domain_text,
     read_settings_from_domain_text,
+    read_settings_from_package_dir,
     write_review_domain_file,
 )
 
@@ -87,7 +126,17 @@ def _message_rows_to_prior_tuples(rows: list[Any]) -> list[tuple[str, str]]:
     return [(str(r.role), _truncate_message_for_context(r.content)) for r in rows]
 
 
-app = FastAPI(title="AI-KA Web", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    try:
+        ensure_personal_dirs()
+    except Exception:
+        pass
+    _reload_embedding_config()
+    yield
+
+
+app = FastAPI(title="AI-KA Web", version="0.1.0", lifespan=_lifespan)
 _settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
@@ -191,7 +240,97 @@ def upsert_project_memory_file(project_id: int, payload: dict[str, Any]) -> JSON
         dest.write_text(content, encoding="utf-8")
     except OSError as e:
         return JSONResponse(err(str(e)), status_code=500)
-    return JSONResponse(ok({"path": rel, "written": True}))
+
+    # Lazily embed the written file if embedding is configured
+    embed_status = "skipped"
+    if embeddings_configured():
+        try:
+            from backend.embedding_service import bytes_to_vec  # noqa: F401 (verify import)
+            h = emb_content_hash(content)
+            existing = dbm.get_memory_embedding(conn, path=rel, content_hash=h)
+            if existing is None:
+                vec = embed_text(content[:8000])
+                dbm.upsert_memory_embedding(
+                    conn,
+                    path=rel,
+                    embedding_bytes=vec_to_bytes(vec),
+                    content_hash=h,
+                    embed_model=_get_embedding_model(),
+                )
+            embed_status = "ok"
+        except Exception:
+            embed_status = "error"
+
+    return JSONResponse(ok({"path": rel, "written": True, "embed": embed_status}))
+
+
+# ---------------------------------------------------------------------------
+# Personal memory endpoints (~/.aika/)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/personal/memory/suggestions")
+def get_personal_memory_suggestions() -> JSONResponse:
+    return JSONResponse(ok(list_memory_suggestions()))
+
+
+class MemorySuggestionBody(BaseModel):
+    title: str = Field(..., description="Memory file title (no extension)")
+    content: str = Field(..., description="Markdown content for the memory file")
+    reason: str = Field(default="", description="Why this memory is suggested")
+
+
+@app.post("/api/v1/personal/memory/suggestions")
+def create_personal_memory_suggestion(body: MemorySuggestionBody) -> JSONResponse:
+    """Add a pending memory suggestion (never auto-writes to memory/)."""
+    add_memory_suggestion({"title": body.title, "content": body.content, "reason": body.reason})
+    return JSONResponse(ok({"queued": True}))
+
+
+@app.post("/api/v1/personal/memory/suggestions/{index}/approve")
+def approve_personal_memory_suggestion(index: int) -> JSONResponse:
+    result = approve_memory_suggestion(index)
+    if result is None:
+        return JSONResponse(err("suggestion not found or empty"), status_code=404)
+    return JSONResponse(ok(result))
+
+
+@app.post("/api/v1/personal/memory/suggestions/{index}/dismiss")
+def dismiss_personal_memory_suggestion(index: int) -> JSONResponse:
+    ok_flag = dismiss_memory_suggestion(index)
+    return JSONResponse(ok({"dismissed": ok_flag}))
+
+
+@app.get("/api/v1/personal/focus-overrides")
+def list_personal_focus_override_files() -> JSONResponse:
+    from backend.personal_memory import list_personal_focus_overrides
+    return JSONResponse(ok(list_personal_focus_overrides()))
+
+
+class PersonalFocusOverrideBody(BaseModel):
+    prompt: str = Field(..., description="Override prompt text for this focus point")
+
+
+@app.put("/api/v1/personal/focus-overrides/{focus_id}")
+def upsert_personal_focus_override(focus_id: str, body: PersonalFocusOverrideBody) -> JSONResponse:
+    from backend.personal_memory import personal_focus_overrides_dir
+    d = personal_focus_overrides_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    dest = d / f"focus-{focus_id}.md"
+    try:
+        dest.write_text(body.prompt, encoding="utf-8")
+    except OSError as e:
+        return JSONResponse(err(str(e)), status_code=500)
+    return JSONResponse(ok({"focus_id": focus_id, "written": True}))
+
+
+@app.delete("/api/v1/personal/focus-overrides/{focus_id}")
+def delete_personal_focus_override(focus_id: str) -> JSONResponse:
+    from backend.personal_memory import personal_focus_overrides_dir
+    dest = personal_focus_overrides_dir() / f"focus-{focus_id}.md"
+    if not dest.is_file():
+        return JSONResponse(err("override not found"), status_code=404)
+    dest.unlink()
+    return JSONResponse(ok({"focus_id": focus_id, "deleted": True}))
 
 
 def _get_active_skill_package_id() -> str:
@@ -348,6 +487,7 @@ def _write_app_settings_md(payload: dict[str, Any]) -> None:
         "llm_settings": merged.get("llm_settings") if isinstance(merged.get("llm_settings"), dict) else {},
         "llm_text_api_key": str(merged.get("llm_text_api_key") or ""),
         "llm_vl_api_key": str(merged.get("llm_vl_api_key") or ""),
+        "embedding_model": str(merged.get("embedding_model") or ""),
     }
     aid = merged.get("active_skill_package_id")
     if isinstance(aid, str) and aid.strip():
@@ -359,6 +499,17 @@ def _write_app_settings_md(payload: dict[str, Any]) -> None:
         obj["focus_preset_review_overlay"] = ovr
     text = "# 应用设置\n\n```json\n" + json.dumps(obj, ensure_ascii=False, indent=2) + "\n```\n"
     p.write_text(text, encoding="utf-8")
+
+def _reload_embedding_config() -> None:
+    """Re-configure embedding singleton from current app_settings.md. Non-fatal."""
+    try:
+        em = _get_embed_model_from_llm_settings()
+        base = _get_embed_base_url_from_llm_settings()
+        if em and base:
+            configure_embeddings(base_url=base, model=em)
+    except Exception:
+        pass
+
 
 def _helpme_md_path() -> Path:
     root = repository_root()
@@ -391,23 +542,23 @@ def _build_settings_payload(conn: Any) -> dict[str, Any]:
         "review_domain_path": str(domain_path(rr, sp_id)),
         "focus_combo_tips": _read_focus_combo_tips_from_review_domain(),
         "composer_hint": _read_composer_hint_from_review_domain(),
+        "embedding_model": _get_embedding_model(),
     }
 
 
 def _read_settings_from_review_domain() -> tuple[dict[str, Any] | None, str | None]:
-    """从当前活动审查技能包的 review_domain.md 读取。"""
-    p = _active_review_domain_path()
+    """从当前活动审查技能包读取 focus points（v2 focus-points/*.md 优先，否则 v1 review_domain.md）。"""
+    from backend.skills.review_domain_io import read_settings_from_package_dir
+    rr = repository_root()
     pid = _get_active_skill_package_id()
-    if not p.is_file():
-        return (
-            None,
-            f"审查技能包「{pid}」的 review_domain.md 不存在：{p}。请检查 review_skill_packages 目录或使用恢复模板接口。",
-        )
-    text = p.read_text(encoding="utf-8", errors="replace")
-    parsed, err = read_settings_from_domain_text(text)
+    ensure_default_skill_package(rr)
+    pkg_d = package_dir(rr, pid)
+    parsed, err = read_settings_from_package_dir(pkg_d)
     if parsed and not err:
         return parsed, None
-    return None, f"review_domain.md（包 {pid}）解析失败：{err}"
+    if err:
+        return None, f"review_domain.md（包 {pid}）解析失败：{err}"
+    return None, f"review_domain.md（包 {pid}）解析失败：无法读取关注点"
 
 
 def _domain_text_aligned_with_focus_parse() -> str | None:
@@ -570,6 +721,32 @@ def _get_vl_base_url() -> str:
     return str(get_settings().llm_base_url or "").strip()
 
 
+def _get_embedding_model() -> str:
+    app_cfg, _ = _read_app_settings_md()
+    v = app_cfg.get("embedding_model") if isinstance(app_cfg, dict) else None
+    return str(v).strip() if isinstance(v, str) and v.strip() else ""
+
+
+def _get_embed_model_from_llm_settings() -> str:
+    app_cfg, _ = _read_app_settings_md()
+    llm = app_cfg.get("llm_settings") if isinstance(app_cfg, dict) else {}
+    if isinstance(llm, dict):
+        v = llm.get("embed_model")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def _get_embed_base_url_from_llm_settings() -> str:
+    app_cfg, _ = _read_app_settings_md()
+    llm = app_cfg.get("llm_settings") if isinstance(app_cfg, dict) else {}
+    if isinstance(llm, dict):
+        v = llm.get("embed_base_url")
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
 def _get_llm_settings() -> dict[str, Any]:
     return {
         "text_provider": _get_text_provider(),
@@ -577,6 +754,8 @@ def _get_llm_settings() -> dict[str, Any]:
         "text_model": _get_text_model(),
         "vl_model": _get_vl_model(),
         "vl_base_url": _get_vl_base_url(),
+        "embed_model": _get_embed_model_from_llm_settings(),
+        "embed_base_url": _get_embed_base_url_from_llm_settings(),
         "has_text_api_key": bool(_get_text_llm_api_key_effective()),
         "has_vl_api_key": bool(_get_vl_llm_api_key_effective()),
     }
@@ -774,12 +953,16 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
         text_model = str(raw_llm.get("text_model") or "").strip() or DEFAULT_TEXT_MODEL
         vl_model = str(raw_llm.get("vl_model") or "").strip() or DEFAULT_VL_MODEL
         vl_base_url = str(raw_llm.get("vl_base_url") or "").strip()
+        embed_model = str(raw_llm.get("embed_model") or "").strip()
+        embed_base_url = str(raw_llm.get("embed_base_url") or "").strip()
         current["llm_settings"] = {
             "text_provider": text_provider,
             "text_base_url": text_base_url,
             "text_model": text_model,
             "vl_model": vl_model,
             "vl_base_url": vl_base_url,
+            "embed_model": embed_model,
+            "embed_base_url": embed_base_url,
             # 先占位，后面会根据 payload 覆盖
             "has_text_api_key": bool(_get_text_llm_api_key_effective()),
             "has_vl_api_key": bool(_get_vl_llm_api_key_effective()),
@@ -790,7 +973,11 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
             "text_model": text_model,
             "vl_model": vl_model,
             "vl_base_url": vl_base_url,
+            "embed_model": embed_model,
+            "embed_base_url": embed_base_url,
         }
+        if embed_model and embed_base_url:
+            configure_embeddings(base_url=embed_base_url, model=embed_model)
 
     # API Key: 随 app_settings.md 等持久化（不再写数据库业务表）
     text_key = None
@@ -901,6 +1088,200 @@ def migrate_legacy_markdown_file_to_active_package(payload: dict[str, Any]) -> J
     out = _build_settings_payload(conn)
     out["review_domain_error"] = None
     return JSONResponse(ok(out))
+
+
+@app.post("/api/v1/skill-packages/{package_id}/focus-points/migrate")
+def migrate_focus_points_to_files(package_id: str, payload: dict[str, Any]) -> JSONResponse:
+    """将 review_domain.md 中的关注点块拆分为 focus-points/*.md 独立文件。"""
+    rr = repository_root()
+    ensure_default_skill_package(rr)
+    pkg_d = package_dir(rr, package_id)
+    domain_f = domain_path(rr, package_id)
+    if not domain_f.is_file():
+        return JSONResponse(err("review_domain.md not found for this package"), status_code=404)
+    overwrite = bool(payload.get("overwrite", False))
+    text = domain_f.read_text(encoding="utf-8", errors="replace")
+    try:
+        created = migrate_from_review_domain(text, pkg_d, overwrite=overwrite)
+    except Exception as e:
+        return JSONResponse(err(f"migration failed: {e}"), status_code=500)
+    if created:
+        # Bump manifest to schema_version 2
+        mp = rr / "review_skill_packages" / package_id / "manifest.json"
+        try:
+            m = read_manifest(rr, package_id) or {}
+            m["schema_version"] = "2"
+            if "focus_refs" not in m:
+                m["focus_refs"] = [{"id": fid} for fid in created]
+            mp.write_text(json.dumps(m, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+    return JSONResponse(ok({"created": created, "count": len(created)}))
+
+
+@app.get("/api/v1/skill-packages/{package_id}/focus-points")
+def list_package_focus_points(package_id: str) -> JSONResponse:
+    """列出技能包的所有 focus-points/*.md 文件（v2 格式）。"""
+    rr = repository_root()
+    ensure_default_skill_package(rr)
+    pkg_d = package_dir(rr, package_id)
+    fps = list_focus_points(pkg_d)
+    return JSONResponse(ok({
+        "package_id": package_id,
+        "is_v2": is_v2_package(rr, package_id),
+        "focus_points": [
+            {
+                "id": fp.id,
+                "name": fp.name,
+                "version": fp.version,
+                "updated_at": fp.updated_at,
+                "prompt": fp.prompt,
+            }
+            for fp in fps
+        ],
+    }))
+
+
+class EvolveFocusPointBody(BaseModel):
+    prompt: str = Field(..., description="新的 Prompt 正文")
+    note: str = Field(default="", description="本次变更说明")
+
+
+@app.put("/api/v1/skill-packages/{package_id}/focus-points/{focus_id}")
+def evolve_focus_point_endpoint(package_id: str, focus_id: str, body: EvolveFocusPointBody) -> JSONResponse:
+    """更新（进化）指定关注点的 Prompt，版本号递增，旧版本归档到 .aika/focus-history/。"""
+    rr = repository_root()
+    ensure_default_skill_package(rr)
+    pkg_d = package_dir(rr, package_id)
+    fp_path = focus_points_dir(rr, package_id) / f"focus-{focus_id}.md"
+    fp = load_focus_point(fp_path)
+    if fp is None:
+        return JSONResponse(err(f"focus point {focus_id} not found in package {package_id}"), status_code=404)
+    try:
+        new_fp = evolve_focus_point(
+            fp,
+            new_prompt=body.prompt,
+            note=body.note,
+            package_dir=pkg_d,
+            repo_root=rr,
+        )
+    except Exception as e:
+        return JSONResponse(err(str(e)), status_code=500)
+    return JSONResponse(ok({
+        "id": new_fp.id,
+        "name": new_fp.name,
+        "version": new_fp.version,
+        "updated_at": new_fp.updated_at,
+    }))
+
+
+@app.get("/api/v1/skill-packages/{package_id}/focus-points/{focus_id}/hints")
+def list_focus_point_hints(package_id: str, focus_id: str) -> JSONResponse:
+    """List queued evolution hints for a focus point (S7-2 backend)."""
+    from backend.evolution_queue import list_hints_for_focus
+    rr = repository_root()
+    hints = list_hints_for_focus(rr, focus_id)
+    return JSONResponse(ok({"focus_id": focus_id, "hints": hints, "count": len(hints)}))
+
+
+@app.delete("/api/v1/skill-packages/{package_id}/focus-points/{focus_id}/hints")
+def clear_focus_point_hints(package_id: str, focus_id: str) -> JSONResponse:
+    """Clear the evolution hint queue for a focus point."""
+    from backend.evolution_queue import clear_hints_for_focus
+    rr = repository_root()
+    n = clear_hints_for_focus(rr, focus_id)
+    return JSONResponse(ok({"focus_id": focus_id, "cleared": n}))
+
+
+@app.get("/api/v1/evolution-hints")
+def list_all_evolution_hints() -> JSONResponse:
+    """List all focus IDs with pending evolution hints."""
+    from backend.evolution_queue import list_all_hint_focus_ids, list_hints_for_focus
+    rr = repository_root()
+    focus_ids = list_all_hint_focus_ids(rr)
+    return JSONResponse(ok({
+        "focus_ids": focus_ids,
+        "total_focuses": len(focus_ids),
+    }))
+
+
+class ImprovePromptBody(BaseModel):
+    dry_run: bool = Field(default=True, description="If true, return suggested prompt without saving")
+    note: str = Field(default="", description="Change note")
+
+
+@app.post("/api/v1/skill-packages/{package_id}/focus-points/{focus_id}/improve")
+def improve_focus_point_with_llm(package_id: str, focus_id: str, body: ImprovePromptBody) -> JSONResponse:
+    """
+    LLM-assisted focus point rewrite using accumulated evolve-hints (S7-3).
+    Reads hints from queue, generates improved prompt, optionally saves.
+    """
+    from backend.evolution_queue import clear_hints_for_focus, list_hints_for_focus
+    rr = repository_root()
+    hints = list_hints_for_focus(rr, focus_id)
+    if not hints:
+        return JSONResponse(err("no evolution hints found for this focus point"), status_code=400)
+
+    ensure_default_skill_package(rr)
+    pkg_d = package_dir(rr, package_id)
+    fp_path = focus_points_dir(rr, package_id) / f"focus-{focus_id}.md"
+    fp = load_focus_point(fp_path)
+    if fp is None:
+        return JSONResponse(err(f"focus point {focus_id} not found in package {package_id}"), status_code=404)
+
+    hints_text = "\n".join(f"- {h['suggestion']}" for h in hints)
+    improve_prompt = (
+        f"你是一名AI评审专家，负责改进以下审查关注点的 Prompt。\n\n"
+        f"当前 Prompt（focus:{fp.id} - {fp.name} v{fp.version}）：\n\n"
+        f"{fp.prompt}\n\n"
+        f"使用者反馈的改进建议：\n{hints_text}\n\n"
+        f"请根据以上建议，重写这个 Prompt。要求：\n"
+        f"1. 保留原有的分析步骤框架\n"
+        f"2. 融入反馈中有价值的改进点\n"
+        f"3. 保持简洁专业，用中文输出\n"
+        f"4. 只输出新的 Prompt 正文，不要包含任何解释"
+    )
+
+    try:
+        cfg = _build_text_llm_config(_conn(), timeout_s=60.0)
+        provider = get_provider(cfg.provider)
+        result = provider.chat(
+            system="你是一名专业AI系统设计师，专注于审查类Prompt工程。",
+            user=improve_prompt,
+            config=cfg,
+        )
+        new_prompt = result.text.strip()
+    except Exception as e:
+        return JSONResponse(err(f"LLM call failed: {e}"), status_code=500)
+
+    if body.dry_run:
+        return JSONResponse(ok({
+            "focus_id": focus_id,
+            "dry_run": True,
+            "current_version": fp.version,
+            "suggested_prompt": new_prompt,
+            "hints_used": len(hints),
+        }))
+
+    # Save the improved focus point
+    try:
+        new_fp = evolve_focus_point(
+            fp,
+            new_prompt=new_prompt,
+            note=body.note or f"LLM-improved using {len(hints)} hint(s)",
+            package_dir=pkg_d,
+            repo_root=rr,
+        )
+        clear_hints_for_focus(rr, focus_id)
+    except Exception as e:
+        return JSONResponse(err(str(e)), status_code=500)
+
+    return JSONResponse(ok({
+        "focus_id": focus_id,
+        "dry_run": False,
+        "new_version": new_fp.version,
+        "hints_cleared": len(hints),
+    }))
 
 
 @app.post("/api/v1/settings/review-domain/restore-default-skills-template")
@@ -1070,7 +1451,7 @@ def delete_project(project_id: int) -> JSONResponse:
     prj = dbm.get_project_by_id(conn, project_id)
     if prj is None:
         return JSONResponse(err("project not found"), status_code=404)
-    # 只允许删除“已初始化但没有审查记录”的项目
+    # 只允许删除"已初始化但没有审查记录"的项目
     if int(dbm.count_project_completed_outputs(conn, project_id=prj.id)) > 0:
         return JSONResponse(
             err("项目已有已完成审查产物（conversation_outputs），为保护历史不可删除"),
@@ -1318,6 +1699,10 @@ class AnalyzeStreamBody(BaseModel):
     skill_meta: dict[str, Any] | None = Field(default=None)
     memory_query: str | None = Field(default=None)
     already_surfaced: list[str] | None = Field(default=None)
+    # Sprint 2+5: multi-turn + deferred doc
+    deferred_doc: bool = Field(default=False)   # True = 不自动生成文档，仅存发现到 metadata
+    deep_mode: bool = Field(default=False)       # True = 分析后追加自我批评轮次
+    user_message: str | None = Field(default=None)  # 用户原始输入，用于意图分类
 
 
 class FollowupStreamBody(BaseModel):
@@ -1386,13 +1771,13 @@ def _resolve_focus_definitions_for_subset(conn: Any, focus_names: list[str]) -> 
         if n not in by_name:
             return [], f"未知关注点：{n}（请从设置中已加载的关注点中选择）"
         d = by_name[n]
-        out.append(
-            {
-                "id": str(d["id"]),
-                "name": str(d["name"]),
-                "prompt": str(d.get("prompt") or ""),
-            }
-        )
+        fid = str(d["id"])
+        prompt = str(d.get("prompt") or "")
+        # Apply personal focus override if present (S6-3)
+        personal_override = load_personal_focus_override(fid)
+        if personal_override:
+            prompt = personal_override
+        out.append({"id": fid, "name": str(d["name"]), "prompt": prompt})
     return out, None
 
 
@@ -1436,6 +1821,42 @@ def convert_md_stream(project_id: int) -> StreamingResponse:
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+def _embed_project_chunks(conn: Any, project_id: int, batch_size: int = 50) -> int:
+    """
+    Embed any document chunks that lack embeddings. Returns count of newly embedded chunks.
+    Silently skips on embedding errors to keep indexing non-fatal.
+    """
+    if not embeddings_configured():
+        return 0
+    em = _get_embedding_model()
+    rows = conn.execute(
+        """
+        SELECT c.id, c.text FROM document_chunks c
+        JOIN documents d ON d.id = c.document_id
+        WHERE d.project_id=? AND (c.embedding IS NULL OR c.embed_model != ?)
+        LIMIT ?
+        """,
+        (int(project_id), em, batch_size),
+    ).fetchall()
+    count = 0
+    for r in rows:
+        try:
+            text = str(r["text"] or "")
+            vec = embed_text(text[:4000])
+            dbm.update_chunk_embedding(
+                conn,
+                chunk_id=int(r["id"]),
+                embedding_bytes=vec_to_bytes(vec),
+                embed_model=em,
+            )
+            count += 1
+        except Exception:
+            continue
+    if count:
+        conn.commit()
+    return count
+
+
 @app.post("/api/v1/projects/{project_id}/index-md")
 def index_md(project_id: int) -> JSONResponse:
     conn = _conn()
@@ -1452,7 +1873,10 @@ def index_md(project_id: int) -> JSONResponse:
         chunk_strategy=_get_chunk_strategy(),
         full_resync=_get_md_index_mode() == MD_INDEX_MODE_FULL,
     )
-    return JSONResponse(ok({"indexed_documents": n}))
+    embedded_chunks = 0
+    if embeddings_configured():
+        embedded_chunks = _embed_project_chunks(conn, project_id)
+    return JSONResponse(ok({"indexed_documents": n, "embedded_chunks": embedded_chunks}))
 
 
 def _safe_slug(text: str) -> str:
@@ -1503,20 +1927,37 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
             surf.add(sid)
     fq = " ".join(str(x) for x in payload.focus_points)
     mq = (payload.memory_query or fq).strip()
+    embed_query_vec: list[float] | None = None
+    if embeddings_configured() and mq:
+        try:
+            embed_query_vec = embed_text(mq[:500])
+        except Exception:
+            embed_query_vec = None
     recalled = recall_memory_snippets(
         memory_root=mem_root,
         project_id=project_id,
         query=mq,
         already_surfaced=surf,
-        limit=5,
+        limit=4,
+        db_conn=conn,
+        embed_query_vec=embed_query_vec,
     )
+    # Also recall from personal memory (~/.aika/memory/)
+    personal_recalled = recall_personal_memory(
+        mq,
+        already_surfaced=surf | {str(s.get("id") or "") for s in recalled},
+        limit=2,
+        embed_query_vec=embed_query_vec,
+    )
+    recalled = recalled + personal_recalled
     snippets.extend(recalled)
     _recalled_meta = [
         {
             "id": str(s.get("id") or ""),
             "title": str(s.get("title") or ""),
-            "score": int(s.get("score") or 0),
+            "score": float(s.get("score") or 0),
             "excerpt": str(s.get("body") or "")[:240],
+            "source": str(s.get("source") or "project"),
         }
         for s in recalled
         if isinstance(s, dict) and str(s.get("id") or "").strip()
@@ -1551,6 +1992,25 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
                 }
             )
 
+    # --- Intent classification & state machine ---
+    user_msg = (payload.user_message or payload.incremental_user_notes or "").strip()
+    intent = classify_intent(user_msg) if user_msg else None
+    if intent is not None:
+        fsm_transition(conn, conversation_id=conversation_id, intent=intent, deep_mode=payload.deep_mode)
+
+    # --- Rolling context: collect prior messages for multi-turn ---
+    all_prior_rows = dbm.list_recent_messages(
+        conn, conversation_id=conversation_id, limit=_MULTITURN_RECENT_LIMIT
+    )
+    prior_tuples = build_rolling_context(all_prior_rows)
+
+    # --- Collect existing open findings to inject into system prompt ---
+    open_findings = collect_open_findings(all_prior_rows)
+    findings_ctx = format_open_findings_for_prompt(open_findings)
+
+    # --- Focus IDs for finding extraction ---
+    focus_ids_used = [str(d.get("id") or "") for d in resolved]
+
     cfg = _build_text_llm_config(conn, timeout_s=300.0)
     system = build_system_prompt(
         None,
@@ -1561,23 +2021,23 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
         memory_snippets=snippets or None,
         skill_meta=skill_meta_payload or None,
     )
+    # Append findings context + finding instruction to system prompt
+    if findings_ctx:
+        system = system + "\n\n" + findings_ctx
+    system = system + "\n\n" + FINDING_INSTRUCTION
+
     user, used_entries = build_user_prompt_from_entries(entries)
     idx_lines_md = format_chunk_index_lines_markdown(used_entries)
     notes = (payload.incremental_user_notes or "").strip()
     if notes:
         user = "【用户补充说明（含重新审查时的增量信息）】\n" + notes + "\n\n" + user
 
-    prior_rows = dbm.list_recent_messages(
-        conn, conversation_id=conversation_id, limit=_MULTITURN_RECENT_LIMIT
-    )
-    prior_tuples = _message_rows_to_prior_tuples(prior_rows)
-
-    # 记录“本次运行”的用户侧请求（便于历史追溯）
+    # 记录"本次运行"的用户侧请求（便于历史追溯）
     dbm.insert_message(
         conn,
         conversation_id=conversation_id,
         role="system",
-        content=f"分析请求：focus_points={json.dumps(payload.focus_points, ensure_ascii=False)}; chunk_limit={int(payload.chunk_limit)}",
+        content=f"分析请求：focus_points={json.dumps(payload.focus_points, ensure_ascii=False)}; chunk_limit={int(payload.chunk_limit)}; deep_mode={payload.deep_mode}",
     )
 
     exp_dir = project_export_dir(project_id)
@@ -1690,7 +2150,50 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
             append_milestone_event(milestones_path, ev)
             yield _sse_stage("呈现结果", "start")
             body = _normalize_model_markdown("".join(acc))
-            out_path.write_text(body, encoding="utf-8")
+
+            # --- Extract structured findings from LLM output ---
+            new_findings = extract_findings_from_markdown(body, open_findings, focus_ids_used)
+            for f in new_findings:
+                yield _sse_line({"type": "finding", "finding": f.to_dict()})
+            # Extract evolve hints and write to evolution queue (S7-1)
+            evolve_hints = extract_evolve_hints(body)
+            if evolve_hints:
+                from backend.evolution_queue import append_evolve_hint
+                turn_n = dbm.count_messages(conn, conversation_id=conversation_id) if hasattr(dbm, "count_messages") else 0
+                for hint in evolve_hints:
+                    try:
+                        append_evolve_hint(
+                            repository_root(),
+                            focus_id=hint["focus_id"],
+                            suggestion=hint["suggestion"],
+                            conversation_id=conversation_id,
+                            turn=turn_n,
+                        )
+                    except Exception:
+                        pass
+
+            # --- deep mode: self-critique pass ---
+            critique_summary: str | None = None
+            if payload.deep_mode and new_findings:
+                yield _sse_line({"type": "status", "msg": "深度模式：正在进行自我审查…"})
+                try:
+                    critique_prompt = (
+                        "请审查上述分析，指出：1) 可能的遗漏；2) 证据不足的发现；3) 过度解读的地方。"
+                        "如分析已足够充分，回复\"分析已充分\"。请用一段话简短回复。"
+                    )
+                    critique_parts: list[str] = []
+                    for piece in provider.chat_stream(
+                        system="你是一名严谨的项目评审专家，负责对已完成的分析进行质量审查。",
+                        user=body[:3000] + "\n\n" + critique_prompt,
+                        config=cfg,
+                        prior_messages=None,
+                    ):
+                        critique_parts.append(piece)
+                    critique_summary = "".join(critique_parts).strip()
+                    yield _sse_line({"type": "critique", "summary": critique_summary})
+                except Exception:
+                    pass
+
             run_meta = build_run_metadata(
                 skill_id=payload.skill_id,
                 skill_version=payload.skill_version,
@@ -1702,58 +2205,115 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
                     "package_manifest_version": pkg_ver,
                     "review_domain_ref": rules_fn,
                     "package_version_hash": rules_hash,
+                    "findings_count": len(new_findings),
+                    "deep_mode": payload.deep_mode,
                 },
             )
-            dbm.insert_analysis_run(
-                conn,
-                conversation_id=conversation_id,
-                job_id=None,
-                focus_points=list(payload.focus_points),
-                chunk_limit=int(payload.chunk_limit),
-                chunk_strategy=_get_chunk_strategy(),
-                used_entries=list(used_entries),
-                output_markdown_path=str(out_path),
-                run_metadata=run_meta,
+
+            # --- Store findings in message metadata ---
+            msg_metadata = MessageMetadata(
+                mode=conv.mode,
+                focus_points_used=focus_ids_used,
+                findings=new_findings,
+                refinement_round=0,
+                self_critique_summary=critique_summary,
+                deep_mode=payload.deep_mode,
             )
-            run_after_analyze_hooks(
-                {
-                    "project_id": project_id,
-                    "conversation_id": conversation_id,
-                    "focus_points": list(payload.focus_points),
-                    "run_metadata": run_meta,
-                    "output_markdown_path": str(out_path),
-                }
-            )
-            dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=body)
-            dbm.insert_conversation_output(
-                conn,
-                conversation_id=conversation_id,
-                kind=kind,
-                final_filename=files.final_filename,
-                milestones_filename=files.milestones_filename,
-                fragments_index_filename=files.fragments_index_filename,
-            )
-            append_milestone_event(
-                milestones_path,
-                {
-                    "type": "final",
-                    "output_markdown_path": str(out_path),
-                    "output_fragments_index_path": (
-                        str(fragments_index_path) if fragments_index_path is not None else None
-                    ),
-                },
-            )
-            yield _sse_line(
-                {
-                    "type": "final",
-                    "markdown": body,
-                    "output_markdown_path": str(out_path),
-                    "output_fragments_index_path": (
-                        str(fragments_index_path) if fragments_index_path is not None else None
-                    ),
-                    "memory_files_injected": run_meta.get("memory_files_injected") or [],
-                }
-            )
+
+            if payload.deferred_doc:
+                # 延迟文档生成模式：只存发现，不写文件
+                dbm.insert_analysis_run(
+                    conn,
+                    conversation_id=conversation_id,
+                    job_id=None,
+                    focus_points=list(payload.focus_points),
+                    chunk_limit=int(payload.chunk_limit),
+                    chunk_strategy=_get_chunk_strategy(),
+                    used_entries=list(used_entries),
+                    output_markdown_path="",   # 无文件
+                    run_metadata=run_meta,
+                )
+                dbm.insert_message(
+                    conn, conversation_id=conversation_id, role="assistant",
+                    content=body, metadata=msg_metadata.to_dict()
+                )
+                mark_awaiting(conn, conversation_id=conversation_id)
+                append_milestone_event(milestones_path, {"type": "final", "deferred": True})
+                yield _sse_line(
+                    {
+                        "type": "final",
+                        "markdown": body,
+                        "deferred_doc": True,
+                        "findings": [f.to_dict() for f in new_findings],
+                        "memory_files_injected": run_meta.get("memory_files_injected") or [],
+                    }
+                )
+            else:
+                # 传统模式：写文件 + 生成 conversation_output（向后兼容）
+                out_path.write_text(body, encoding="utf-8")
+                dbm.insert_analysis_run(
+                    conn,
+                    conversation_id=conversation_id,
+                    job_id=None,
+                    focus_points=list(payload.focus_points),
+                    chunk_limit=int(payload.chunk_limit),
+                    chunk_strategy=_get_chunk_strategy(),
+                    used_entries=list(used_entries),
+                    output_markdown_path=str(out_path),
+                    run_metadata=run_meta,
+                )
+                run_after_analyze_hooks(
+                    {
+                        "project_id": project_id,
+                        "conversation_id": conversation_id,
+                        "focus_points": list(payload.focus_points),
+                        "run_metadata": run_meta,
+                        "output_markdown_path": str(out_path),
+                    }
+                )
+                dbm.insert_message(
+                    conn, conversation_id=conversation_id, role="assistant",
+                    content=body, metadata=msg_metadata.to_dict()
+                )
+                dbm.insert_conversation_output(
+                    conn,
+                    conversation_id=conversation_id,
+                    kind=kind,
+                    final_filename=files.final_filename,
+                    milestones_filename=files.milestones_filename,
+                    fragments_index_filename=files.fragments_index_filename,
+                )
+                append_milestone_event(
+                    milestones_path,
+                    {"type": "final", "output_markdown_path": str(out_path)},
+                )
+                yield _sse_line(
+                    {
+                        "type": "final",
+                        "markdown": body,
+                        "output_markdown_path": str(out_path),
+                        "output_fragments_index_path": (
+                            str(fragments_index_path) if fragments_index_path is not None else None
+                        ),
+                        "findings": [f.to_dict() for f in new_findings],
+                        "memory_files_injected": run_meta.get("memory_files_injected") or [],
+                    }
+                )
+
+            # Token cost estimation (S7-5): Chinese ~2 chars/token, other ~4 chars/token
+            def _estimate_tokens(s: str) -> int:
+                cn = sum(1 for c in s if "一" <= c <= "鿿")
+                rest = len(s) - cn
+                return max(1, cn // 2 + rest // 4)
+
+            input_text = system + user
+            token_est = {
+                "input_approx": _estimate_tokens(input_text),
+                "output_approx": _estimate_tokens(body),
+                "total_approx": _estimate_tokens(input_text + body),
+                "deep_mode": payload.deep_mode,
+            }
+            yield _sse_line({"type": "pass_done", "pass": 1, "finding_count": len(new_findings), "token_est": token_est})
             ev = {"type": "stage", "stage": "呈现结果", "status": "end"}
             append_milestone_event(milestones_path, ev)
             yield _sse_stage("呈现结果", "end")
@@ -1813,11 +2373,11 @@ def followup_conversation_stream(project_id: int, conversation_id: int, payload:
     if len(prev_excerpt) > 6000:
         prev_excerpt = prev_excerpt[:6000] + "\n\n（上次结果已截断）\n"
 
-    # 追问不再按关注点清单展开，改为通用“证据驱动”问答
+    # 追问不再按关注点清单展开，改为通用"证据驱动"问答
     system = (
         "你是资深 IT 实施与项目评审顾问。用户将基于上一轮分析结果进行追问。\n"
         "要求：只输出可渲染的 Markdown 正文；必须使用简体中文（专有名词/缩写除外）。\n"
-        "若引用证据，请标注片段编号（例如：片段 12），并与片段块头一致；若无证据，说明“未在片段中发现”。\n"
+        "若引用证据，请标注片段编号（例如：片段 12），并与片段块头一致；若无证据，说明\"未在片段中发现\"。\n"
     )
 
     chunks_prompt, used_for_prompt = build_user_prompt_from_entries(used_entries)
@@ -2089,7 +2649,7 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
         # 3) execute analyze/followup（第一版：默认 analyze；followup 需要存在 last_run）
         last_run = dbm.get_latest_analysis_run(conn, conversation_id=conversation_id)
         if intent == "followup" and last_run is not None:
-            # 复用 followup：直接调用现有 followup 逻辑太重，这里先用“追问”系统提示+上次结论片段
+            # 复用 followup：直接调用现有 followup 逻辑太重，这里先用"追问"系统提示+上次结论片段
             q = msg
             try:
                 used_entries = json.loads(last_run.used_entries_json or "[]")
@@ -2145,7 +2705,17 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
         fq = " ".join(focus_ids)
         mq = (memory_query or fq).strip()
         mem_root = memory_root_under_repo(repository_root())
-        recalled = recall_memory_snippets(memory_root=mem_root, project_id=project_id, query=mq, already_surfaced=set(), limit=5)
+        _eq_vec: list[float] | None = None
+        if embeddings_configured() and mq:
+            try:
+                _eq_vec = embed_text(mq[:500])
+            except Exception:
+                pass
+        recalled = recall_memory_snippets(
+            memory_root=mem_root, project_id=project_id, query=mq,
+            already_surfaced=set(), limit=5,
+            db_conn=conn, embed_query_vec=_eq_vec,
+        )
 
         system = build_system_prompt(None, focus_definitions=resolved, memory_snippets=recalled or None, skill_meta=skill_meta_payload)
         user, used_entries = build_user_prompt_from_entries(entries)
@@ -2253,6 +2823,142 @@ def export_docx(project_id: int, payload: dict[str, Any]) -> JSONResponse:
             }
         )
     )
+
+
+class GenerateReportBody(BaseModel):
+    title: str | None = Field(default=None)
+    include_resolved: bool = Field(default=False)
+
+
+@app.post("/api/v1/projects/{project_id}/conversations/{conversation_id}/generate-report")
+def generate_conversation_report(
+    project_id: int, conversation_id: int, payload: GenerateReportBody
+) -> JSONResponse:
+    """
+    聚合本 conversation 的所有结构化发现，由 LLM 生成正式评审报告。
+    只在用户显式触发时调用，不自动生成。
+    """
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    conv = dbm.get_conversation(conn, conversation_id)
+    if conv is None or conv.project_id != project_id:
+        return JSONResponse(err("conversation not found"), status_code=404)
+
+    messages = dbm.list_messages(conn, conversation_id=conversation_id)
+    all_findings = collect_all_findings(messages)
+    if not payload.include_resolved:
+        all_findings = [f for f in all_findings if f.status != FindingStatus.RESOLVED]
+    all_findings = deduplicate_findings(all_findings)
+
+    if not all_findings:
+        return JSONResponse(err("本次审查暂无发现，无法生成报告"), status_code=400)
+
+    # 按严重程度排序：high → medium → low，再按 focus_id 分组
+    severity_order = {"high": 0, "medium": 1, "low": 2}
+    all_findings.sort(key=lambda f: (severity_order.get(f.severity, 9), f.focus_id))
+
+    findings_text = "\n".join(
+        f"- [{f.severity.upper()}] [{f.focus_id}] {f.title}：{f.evidence}"
+        for f in all_findings
+    )
+    report_title = (payload.title or f"{conv.title} 评审报告").strip()
+
+    report_system = (
+        "你是一名专业项目评审报告撰写专家。"
+        "请将以下结构化发现整理为正式的项目评审报告，使用规范的文档语气（非对话语气），"
+        "按严重程度分节，每条发现展开说明影响和建议，输出标准 Markdown 格式。"
+    )
+    report_user = f"# {report_title}\n\n以下是本次审查发现的问题清单：\n\n{findings_text}\n\n请生成完整评审报告。"
+
+    cfg = _build_text_llm_config(conn, timeout_s=300.0)
+    provider = get_provider(cfg.provider)
+    try:
+        report_parts: list[str] = []
+        for piece in provider.chat_stream(
+            system=report_system, user=report_user, config=cfg, prior_messages=None
+        ):
+            report_parts.append(piece)
+        report_body = _normalize_model_markdown("".join(report_parts))
+    except LLMError as e:
+        return JSONResponse(err(f"LLM error: {e}"), status_code=500)
+
+    exp_dir = project_export_dir(project_id)
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    base = _safe_slug(report_title)
+    files = make_outputs_filenames(kind="report", safe_base=base, ts=ts, include_fragments_index=False)
+    out_path = exp_dir / files.final_filename
+    milestones_path = exp_dir / files.milestones_filename
+    out_path.write_text(report_body, encoding="utf-8")
+    init_milestones_file(milestones_path)
+    finalize_milestones_file(milestones_path)
+
+    dbm.insert_conversation_output(
+        conn,
+        conversation_id=conversation_id,
+        kind="report",
+        final_filename=files.final_filename,
+        milestones_filename=files.milestones_filename,
+    )
+
+    return JSONResponse(
+        ok(
+            {
+                "report_markdown": report_body,
+                "output_markdown_path": str(out_path),
+                "findings_count": len(all_findings),
+                "download_path": f"/api/v1/outputs/{conversation_id}/download/{files.final_filename}",
+            }
+        )
+    )
+
+
+@app.get("/api/v1/projects/{project_id}/conversations/{conversation_id}/findings")
+def get_conversation_findings(project_id: int, conversation_id: int) -> JSONResponse:
+    """返回本 conversation 所有累积发现（供前端 findings 面板使用）。"""
+    conn = _conn()
+    conv = dbm.get_conversation(conn, conversation_id)
+    if conv is None or conv.project_id != project_id:
+        return JSONResponse(err("conversation not found"), status_code=404)
+    messages = dbm.list_messages(conn, conversation_id=conversation_id)
+    findings = collect_all_findings(messages)
+    findings = deduplicate_findings(findings)
+    return JSONResponse(ok({"findings": [f.to_dict() for f in findings], "total": len(findings)}))
+
+
+class UpdateFindingBody(BaseModel):
+    status: str = Field(pattern="^(open|acknowledged|resolved)$")
+
+
+@app.patch("/api/v1/projects/{project_id}/conversations/{conversation_id}/findings/{finding_id}")
+def update_finding_status(
+    project_id: int, conversation_id: int, finding_id: str, payload: UpdateFindingBody
+) -> JSONResponse:
+    """更新某条发现的状态（open → acknowledged → resolved）。"""
+    conn = _conn()
+    conv = dbm.get_conversation(conn, conversation_id)
+    if conv is None or conv.project_id != project_id:
+        return JSONResponse(err("conversation not found"), status_code=404)
+
+    messages = dbm.list_messages(conn, conversation_id=conversation_id)
+    updated = False
+    for msg in messages:
+        if getattr(msg, "role", None) != "assistant":
+            continue
+        meta = MessageMetadata.from_json(getattr(msg, "metadata_json", None))
+        for f in meta.findings:
+            if f.id == finding_id:
+                f.status = payload.status
+                updated = True
+        if updated:
+            dbm.update_message_metadata(conn, message_id=msg.id, metadata=meta.to_dict())
+            break
+
+    if not updated:
+        return JSONResponse(err(f"finding {finding_id} not found"), status_code=404)
+    return JSONResponse(ok({"finding_id": finding_id, "status": payload.status}))
 
 
 # 开发/本机部署：优先使用仓库内 `web/frontend/dist`（npm run build），避免 editable 安装仍沿用 wheel 里旧的 frontend_dist。

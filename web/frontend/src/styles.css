@@ -213,6 +213,11 @@ body {
   border-radius: 12px !important;
 }
 
+.side-nav-btn--active {
+  background: rgba(47, 58, 50, 0.12) !important;
+  color: #2f3a32 !important;
+}
+
 .app-shell {
   max-width: 1200px;
   margin: 0 auto;

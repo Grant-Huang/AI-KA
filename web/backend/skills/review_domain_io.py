@@ -312,6 +312,32 @@ def read_composer_hint_from_domain_text(text: str) -> str | None:
     return hint or None
 
 
+def read_settings_from_package_dir(package_dir: "Path") -> tuple[dict[str, Any] | None, str | None]:
+    """
+    Read focus points from a skill package directory.
+    Prefers focus-points/*.md (v2) if present; falls back to review_domain.md (v1).
+    """
+    from pathlib import Path as _Path
+    from backend.skills.focus_point_io import list_focus_points
+
+    fps_dir = package_dir / "focus-points"
+    if fps_dir.is_dir() and any(fps_dir.glob("focus-*.md")):
+        fps = list_focus_points(package_dir)
+        if fps:
+            return {
+                "focus_points": [
+                    {"id": fp.id, "name": fp.name, "prompt": fp.prompt}
+                    for fp in fps
+                ]
+            }, None
+
+    domain_f = package_dir / "review_domain.md"
+    if not domain_f.is_file():
+        return None, "review_domain.md not found and no focus-points/ files"
+    text = domain_f.read_text(encoding="utf-8", errors="replace")
+    return read_settings_from_domain_text(text)
+
+
 def read_settings_from_domain_text(text: str) -> tuple[dict[str, Any] | None, str | None]:
     strict_err = review_domain_strict_schema_error(text)
     if strict_err:

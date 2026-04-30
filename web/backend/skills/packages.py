@@ -1,5 +1,5 @@
 """
-审查技能包：唯一配置源为 review_skill_packages/<package_id>/review_domain.md。
+审查技能包：支持 v1（review_domain.md）和 v2（focus-points/*.md + manifest.json）格式。
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from typing import Any
 DOMAIN_FILENAME = "review_domain.md"
 MANIFEST_FILENAME = "manifest.json"
 DEFAULT_PACKAGE_ID = "package-general"
+FOCUS_POINTS_SUBDIR = "focus-points"
 
 
 def skill_packages_root(repo_root: Path) -> Path:
@@ -31,6 +32,18 @@ def domain_path(repo_root: Path, package_id: str) -> Path:
 
 def manifest_path(repo_root: Path, package_id: str) -> Path:
     return package_dir(repo_root, package_id) / MANIFEST_FILENAME
+
+
+def focus_points_dir(repo_root: Path, package_id: str) -> Path:
+    return package_dir(repo_root, package_id) / FOCUS_POINTS_SUBDIR
+
+
+def is_v2_package(repo_root: Path, package_id: str) -> bool:
+    """A package is v2 if it has a focus-points/ directory with at least one focus-*.md."""
+    d = focus_points_dir(repo_root, package_id)
+    if not d.is_dir():
+        return False
+    return any(d.glob("focus-*.md"))
 
 
 def read_manifest(repo_root: Path, package_id: str) -> dict[str, Any] | None:
@@ -53,15 +66,19 @@ def list_skill_packages(repo_root: Path) -> list[dict[str, Any]]:
         if not child.is_dir() or child.name.startswith("."):
             continue
         pid = child.name
-        if not (child / DOMAIN_FILENAME).is_file():
+        has_domain = (child / DOMAIN_FILENAME).is_file()
+        has_focus_points = is_v2_package(repo_root, pid)
+        if not has_domain and not has_focus_points:
             continue
         m = read_manifest(repo_root, pid) or {}
+        schema_ver = str(m.get("schema_version") or "1")
         out.append(
             {
                 "id": pid,
                 "name": str(m.get("name") or pid),
                 "version": str(m.get("version") or ""),
                 "description": str(m.get("description") or ""),
+                "schema_version": schema_ver,
                 "path": str(domain_path(repo_root, pid)),
             }
         )

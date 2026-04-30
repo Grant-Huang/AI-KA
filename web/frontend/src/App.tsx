@@ -35,6 +35,8 @@ import {
   UserOutlined,
   SearchOutlined,
   FolderOpenOutlined,
+  AuditOutlined,
+  BulbOutlined,
 } from "@ant-design/icons";
 import {
   apiJson,
@@ -171,6 +173,8 @@ type LlmSettings = {
   text_model: string;
   vl_model: string;
   vl_base_url: string;
+  embed_model?: string;
+  embed_base_url?: string;
   has_text_api_key?: boolean;
   has_vl_api_key?: boolean;
 };
@@ -462,6 +466,7 @@ export default function App() {
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [appMode, setAppMode] = useState<"review" | "extraction">("review");
   const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain">("analyze");
   const [projectIngest, setProjectIngest] = useState<
     Record<number, { initialized: boolean; chunk_count: number; md_out_exists: boolean; has_review_records?: boolean }>
@@ -606,6 +611,10 @@ export default function App() {
   }, [replay.milestones]);
 
   const [chunkLimit, setChunkLimit] = useState(40);
+  // Sprint 2+5: multi-turn conversation state
+  const [deepMode, setDeepMode] = useState(false);
+  const [sessionFindings, setSessionFindings] = useState<import("./FindingsPanel").Finding[]>([]);
+  const [reportLoading, setReportLoading] = useState(false);
   const [nativePickerAvailable, setNativePickerAvailable] = useState(true);
   const [pickLoading, setPickLoading] = useState(false);
   const [manualRootInput, setManualRootInput] = useState("");
@@ -622,6 +631,7 @@ export default function App() {
     setConversationMessages([]);
     setConversationDownloads([]);
     setCorpusStaleReason("");
+    setSessionFindings([]);
     void (async () => {
       if (selectedId == null || selectedConversationId == null) return;
       try {
@@ -1730,6 +1740,10 @@ export default function App() {
     if (pg) analyzeBody.review_goals_principles = pg;
     const po = (preset?.output_requirements ?? "").trim();
     if (po) analyzeBody.output_requirements = po;
+    // Sprint 2+5: multi-turn flags
+    (analyzeBody as Record<string, unknown>).deferred_doc = true;
+    (analyzeBody as Record<string, unknown>).deep_mode = deepMode;
+    if (draftText.trim()) (analyzeBody as Record<string, unknown>).user_message = draftText.trim();
     setFragmentIndexMd("");
     setMilestones((prev) => prev.filter((m) => m.id !== STAGE_FRAGMENT_INDEX));
 
@@ -1803,7 +1817,32 @@ export default function App() {
               setMilestoneStatus(key, "done");
             }
           }
+          if (ev.type === "finding") {
+            const f = (ev as any).finding;
+            if (f && typeof f === "object" && f.id) {
+              setSessionFindings((prev) => {
+                const exists = prev.some((x) => x.id === f.id);
+                return exists ? prev : [...prev, f as import("./FindingsPanel").Finding];
+              });
+            }
+          }
+          if (ev.type === "critique" && typeof (ev as any).summary === "string") {
+            appendMilestoneDetail("stage:思考分析", `\n\n【自我审查】\n${String((ev as any).summary)}\n`);
+          }
+          if (ev.type === "pass_done") {
+            const fc = (ev as any).finding_count;
+            appendMilestoneDetail("stage:呈现结果", `\n审查完成，发现 ${Number(fc) || 0} 个问题。\n`);
+          }
           if (ev.type === "final") {
+            const rawFindings = (ev as any).findings;
+            if (Array.isArray(rawFindings) && rawFindings.length) {
+              setSessionFindings((prev) => {
+                const newOnes = (rawFindings as import("./FindingsPanel").Finding[]).filter(
+                  (f) => !prev.some((x) => x.id === f.id)
+                );
+                return newOnes.length ? [...prev, ...newOnes] : prev;
+              });
+            }
             const md = typeof (ev as any).markdown === "string" ? String((ev as any).markdown) : "";
             const rawMem = (ev as { memory_files_injected?: unknown }).memory_files_injected;
             if (Array.isArray(rawMem) && rawMem.length) {
@@ -2611,6 +2650,31 @@ export default function App() {
                 </Space>
               </div>
             </Space>
+            <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid #f0f0f0" }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
+                语义召回（Embedding）— 配置后可提升记忆与文档片段的召回准确率
+              </Typography.Text>
+              <Space wrap>
+                <Input
+                  style={{ width: 360 }}
+                  addonBefore="Embed Base URL"
+                  placeholder="OpenAI 兼容 Embeddings 接口 URL"
+                  value={settingsDraft.llm_settings?.embed_base_url ?? ""}
+                  onChange={(e) =>
+                    setSettingsDraft((s) => ({ ...s, llm_settings: { ...s.llm_settings, embed_base_url: e.target.value } }))
+                  }
+                />
+                <Input
+                  style={{ width: 280 }}
+                  addonBefore="Embed 模型"
+                  placeholder="例如 text-embedding-ada-002"
+                  value={settingsDraft.llm_settings?.embed_model ?? ""}
+                  onChange={(e) =>
+                    setSettingsDraft((s) => ({ ...s, llm_settings: { ...s.llm_settings, embed_model: e.target.value } }))
+                  }
+                />
+              </Space>
+            </div>
                 </div>
               ),
             },
@@ -3052,41 +3116,73 @@ export default function App() {
       <div className="side-nav">
         <Button
           type="text"
-          className="side-nav-btn"
-          icon={<PlusOutlined />}
-          title="新对话"
-          onClick={startNewConversationPage}
+          className={`side-nav-btn${appMode === "review" ? " side-nav-btn--active" : ""}`}
+          icon={<AuditOutlined />}
+          title="项目审查"
+          onClick={() => setAppMode("review")}
         />
         <Button
           type="text"
-          className="side-nav-btn"
-          icon={<CommentOutlined />}
-          title="审查历史"
-          onClick={() => setChatsOpen(true)}
+          className={`side-nav-btn${appMode === "extraction" ? " side-nav-btn--active" : ""}`}
+          icon={<BulbOutlined />}
+          title="知识提取"
+          onClick={() => {
+            setAppMode("extraction");
+            setChatsOpen(false);
+          }}
         />
         <div className="side-nav-separator" aria-hidden="true" />
-        <Button
-          type="text"
-          className="side-nav-btn"
-          icon={<FolderOpenOutlined />}
-          title="项目初始化"
-          onClick={() => {
-            setChatsOpen(false);
-            setMainPanel("ingest");
-          }}
-        />
-        <Button
-          type="text"
-          className="side-nav-btn"
-          icon={<FileSearchOutlined />}
-          title="审查域设定"
-          onClick={() => {
-            setChatsOpen(false);
-            setMainPanel("review_domain");
-            // 进入独立页面时刷新一次，避免显示旧值
-            void loadSettings({ snapshot_chunk_strategy: true });
-          }}
-        />
+        {appMode === "review" ? (
+          <>
+            <Button
+              type="text"
+              className="side-nav-btn"
+              icon={<PlusOutlined />}
+              title="新审查会话"
+              onClick={startNewConversationPage}
+            />
+            <Button
+              type="text"
+              className="side-nav-btn"
+              icon={<CommentOutlined />}
+              title="审查历史"
+              onClick={() => setChatsOpen(true)}
+            />
+            <div className="side-nav-separator" aria-hidden="true" />
+            <Button
+              type="text"
+              className="side-nav-btn"
+              icon={<FolderOpenOutlined />}
+              title="项目初始化"
+              onClick={() => {
+                setChatsOpen(false);
+                setMainPanel("ingest");
+              }}
+            />
+            <Button
+              type="text"
+              className="side-nav-btn"
+              icon={<FileSearchOutlined />}
+              title="审查域设定"
+              onClick={() => {
+                setChatsOpen(false);
+                setMainPanel("review_domain");
+                // 进入独立页面时刷新一次，避免显示旧值
+                void loadSettings({ snapshot_chunk_strategy: true });
+              }}
+            />
+          </>
+        ) : (
+          <>
+            <Button
+              type="text"
+              className="side-nav-btn"
+              icon={<PlusOutlined />}
+              title="新提取会话"
+              onClick={() => message.info("知识提取功能建设中，敬请期待")}
+            />
+          </>
+        )}
         <div className="side-nav-spacer" />
         <div className="side-nav-bottom">
           <Button
@@ -3127,7 +3223,7 @@ export default function App() {
             />
           ) : null}
 
-          {chatsOpen ? (
+          {chatsOpen && appMode === "review" ? (
             <div className="chat-history-page">
               <div className="chat-history-toolbar">
                 <Title level={4} className="chat-history-title">
@@ -3227,7 +3323,7 @@ export default function App() {
             </div>
           ) : null}
 
-          {!chatsOpen && mainPanel === "ingest" ? (
+          {!chatsOpen && appMode === "review" && mainPanel === "ingest" ? (
             <div style={{ maxWidth: 980, margin: "0 auto", padding: "10px 10px 18px" }}>
               <Title level={4} style={{ margin: "6px 0 10px" }}>
                 项目初始化
@@ -3378,9 +3474,9 @@ export default function App() {
                 ) : null}
               </Space>
             </div>
-          ) : !chatsOpen && mainPanel === "review_domain" ? (
+          ) : !chatsOpen && appMode === "review" && mainPanel === "review_domain" ? (
             reviewDomainPageNode
-          ) : !chatsOpen && showMainOutput ? (
+          ) : !chatsOpen && appMode === "review" && showMainOutput ? (
             <>
               <div className="pipeline-output-panel pipeline-output-panel--footer-clear">
                 {pipelineRunning && lastSubmittedUserMessage?.text ? (
@@ -3716,6 +3812,59 @@ export default function App() {
                     </div>
                   </div>
                 ) : null}
+
+                {/* Findings panel */}
+                {sessionFindings.length > 0 ? (
+                  <div style={{ padding: "0 0 12px 0" }}>
+                    {(() => {
+                      const { FindingsPanel } = require("./FindingsPanel") as typeof import("./FindingsPanel");
+                      const handleStatusChange = async (findingId: string, status: import("./FindingsPanel").Finding["status"]) => {
+                        if (selectedId == null || selectedConversationId == null) return;
+                        try {
+                          await fetch(
+                            `/api/v1/projects/${selectedId}/conversations/${selectedConversationId}/findings/${findingId}`,
+                            { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }) }
+                          );
+                          setSessionFindings((prev) => prev.map((f) => (f.id === findingId ? { ...f, status } : f)));
+                        } catch {
+                          // ignore
+                        }
+                      };
+                      const handleGenerateReport = async () => {
+                        if (selectedId == null || selectedConversationId == null) return;
+                        setReportLoading(true);
+                        try {
+                          const res = await fetch(
+                            `/api/v1/projects/${selectedId}/conversations/${selectedConversationId}/generate-report`,
+                            { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: null, include_resolved: false }) }
+                          );
+                          const json = await res.json();
+                          if (json?.data?.report_markdown) {
+                            const md = String(json.data.report_markdown);
+                            pushOutputEntry({ kind: "analyze", convId: selectedConversationId, title: "正式评审报告", markdown: md });
+                            setFinalMarkdown(md);
+                          } else {
+                            import("antd").then(({ message: msg }) => msg.error(json?.error || "生成报告失败"));
+                          }
+                        } catch (e) {
+                          import("antd").then(({ message: msg }) => msg.error(String(e)));
+                        } finally {
+                          setReportLoading(false);
+                        }
+                      };
+                      return (
+                        <FindingsPanel
+                          projectId={selectedId}
+                          conversationId={selectedConversationId}
+                          findings={sessionFindings}
+                          onStatusChange={(id, s) => void handleStatusChange(id, s)}
+                          onGenerateReport={() => void handleGenerateReport()}
+                          reportLoading={reportLoading}
+                        />
+                      );
+                    })()}
+                  </div>
+                ) : null}
               </div>
             </>
           ) : null}
@@ -3902,7 +4051,17 @@ export default function App() {
         </div>
       </div>
 
-      {!chatsOpen && mainPanel === "analyze" ? (
+      {appMode === "extraction" ? (
+        <div className="composer-overlay composer-overlay-center">
+          <div className="composer-overlay-inner">
+            <div className="welcome">
+              <div className="welcome-title">知识提取</div>
+              <div className="welcome-subtitle">隐性知识显化功能建设中，敬请期待</div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {!chatsOpen && appMode === "review" && mainPanel === "analyze" ? (
         <div
           className={`composer-overlay ${
             // 打开会话时输入框固定底部；空白页可居中
@@ -3962,7 +4121,29 @@ export default function App() {
                         或在设置 → 审查域中查看说明。
                       </Text>
                     ) : null}
-                    {/* 输入框下方路径提示：按需移除（用户反馈冗余） */}
+                    {/* 深度模式开关 */}
+                    <Tooltip
+                      title={deepMode ? "⚡深度模式已开启：分析后追加自我审查，约消耗 2-3x tokens" : "开启深度模式（自我审查）"}
+                    >
+                      <span
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                          cursor: "pointer",
+                          padding: "0 6px",
+                          borderRadius: 4,
+                          background: deepMode ? "#fff7e6" : "transparent",
+                          border: deepMode ? "1px solid #faad14" : "1px solid transparent",
+                          fontSize: 12,
+                          color: deepMode ? "#d46b08" : "#8c8c8c",
+                          userSelect: "none",
+                        }}
+                        onClick={() => setDeepMode((v) => !v)}
+                      >
+                        ⚡{deepMode ? " 深度" : ""}
+                      </span>
+                    </Tooltip>
                   </div>
                   <div className="composer-right composer-run-actions">
                     {pipelineRunning ? (
