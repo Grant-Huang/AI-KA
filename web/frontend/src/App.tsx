@@ -59,6 +59,7 @@ import { parseMemoryInjectedItemsFromMilestonesRaw, useConversationReplay } from
 import SimpleMarkdown from "./SimpleMarkdown";
 import HelpPage from "./pages/help";
 import SystemSettingPage from "./pages/system_setting";
+import ExtractionPage from "./ExtractionPage";
 
 const { Text, Title } = Typography;
 
@@ -3173,15 +3174,7 @@ export default function App() {
             />
           </>
         ) : (
-          <>
-            <Button
-              type="text"
-              className="side-nav-btn"
-              icon={<PlusOutlined />}
-              title="新提取会话"
-              onClick={() => message.info("知识提取功能建设中，敬请期待")}
-            />
-          </>
+          <></>
         )}
         <div className="side-nav-spacer" />
         <div className="side-nav-bottom">
@@ -4052,13 +4045,8 @@ export default function App() {
       </div>
 
       {appMode === "extraction" ? (
-        <div className="composer-overlay composer-overlay-center">
-          <div className="composer-overlay-inner">
-            <div className="welcome">
-              <div className="welcome-title">知识提取</div>
-              <div className="welcome-subtitle">隐性知识显化功能建设中，敬请期待</div>
-            </div>
-          </div>
+        <div className="extraction-overlay">
+          <ExtractionPage />
         </div>
       ) : null}
       {!chatsOpen && appMode === "review" && mainPanel === "analyze" ? (

@@ -368,3 +368,95 @@ export function waitConvertStream(
     }, 600_000);
   });
 }
+
+// ── Extraction module ──────────────────────────────────────────────────────
+
+export type ExpertProfileData = { domains: string[]; background: string; updated_at?: string };
+export type ReviewQueueItem = {
+  id: string; focus_id: string; suggestion: string; status: string;
+  occurrences: number; source_role: string; source_type: string;
+  project_id?: string | null; conversation_id?: number | null; created_at: string;
+};
+export type PendingRuleItem = {
+  id: string; extraction_focus_id: string; title: string; content: string;
+  confidence: string; status: string; source_role: string; source_type: string;
+  has_conflicts: boolean; conflict_with: Array<{focus_id: string; reason: string}>;
+  scope_note?: string; created_at: string;
+};
+
+export async function getExpertProfile(): Promise<ExpertProfileData> {
+  return apiJson("/api/v1/expert-profile");
+}
+export async function putExpertProfile(data: Partial<ExpertProfileData>): Promise<ExpertProfileData> {
+  return apiJson("/api/v1/expert-profile", { method: "PUT", body: JSON.stringify(data) });
+}
+export async function getReviewQueue(): Promise<{ items: ReviewQueueItem[]; total: number }> {
+  return apiJson("/api/v1/review-queue");
+}
+export async function patchReviewQueueItem(id: string, data: { status: string }): Promise<ReviewQueueItem> {
+  return apiJson(`/api/v1/review-queue/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(data) });
+}
+export async function deleteReviewQueueItem(id: string): Promise<{ deleted: boolean }> {
+  return apiJson(`/api/v1/review-queue/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+export async function getPendingRules(): Promise<{ items: PendingRuleItem[]; total: number }> {
+  return apiJson("/api/v1/pending-rules");
+}
+export async function approvePendingRule(kid: string, body: { note?: string }): Promise<{ approved: string; written_to?: string }> {
+  return apiJson(`/api/v1/pending-rules/${encodeURIComponent(kid)}/approve`, { method: "POST", body: JSON.stringify(body) });
+}
+export async function rejectPendingRule(kid: string, body: { reason: string }): Promise<{ rejected: string }> {
+  return apiJson(`/api/v1/pending-rules/${encodeURIComponent(kid)}/reject`, { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function uploadExtractionMaterial(
+  file: File,
+  title?: string,
+): Promise<{ material_id: string; original_name: string; size_bytes: number; path: string }> {
+  const fd = new FormData();
+  fd.append("file", file);
+  if (title) fd.append("title", title);
+  const r = await fetch(`${BASE}/api/v1/extraction/upload-material`, { method: "POST", body: fd });
+  const text = await r.text();
+  let j: Record<string, unknown>;
+  try { j = JSON.parse(text); } catch { throw new Error(`Upload failed HTTP ${r.status}: ${text.slice(0, 120)}`); }
+  if ((j as any).status === "error") throw new Error(String((j as any).message || "upload error"));
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return (j as any).data;
+}
+
+export async function postActiveExtractionStream(
+  body: { user_input: string; strategy: string; review_queue_item_id?: string | null; prior_messages?: Array<{role: string; content: string}>; round_number?: number },
+  onEvent: (ev: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const r = await fetch(`${BASE}/api/v1/extraction/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!r.ok) {
+    const j = (await r.json().catch(() => ({}))) as ApiErr;
+    throw new Error(j.message || `HTTP ${r.status}`);
+  }
+  await consumeSseFromResponse(r, onEvent, signal);
+}
+
+export async function postDocExtractionStream(
+  body: { material_id: string; user_input?: string; strategy?: string; prior_messages?: Array<{role: string; content: string}> },
+  onEvent: (ev: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const r = await fetch(`${BASE}/api/v1/extraction/doc-stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!r.ok) {
+    const j = (await r.json().catch(() => ({}))) as ApiErr;
+    throw new Error(j.message || `HTTP ${r.status}`);
+  }
+  await consumeSseFromResponse(r, onEvent, signal);
+}
