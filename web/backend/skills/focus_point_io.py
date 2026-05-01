@@ -45,6 +45,9 @@ class FocusPoint:
     created_at: str = ""
     updated_at: str = ""
     history: list[dict[str, Any]] = field(default_factory=list)
+    applicable_when: dict[str, Any] = field(default_factory=dict)
+    not_applicable_when: dict[str, Any] = field(default_factory=dict)
+    scope_note: str = ""
 
     def to_md(self) -> str:
         now = self.updated_at or datetime.utcnow().isoformat()
@@ -57,6 +60,28 @@ class FocusPoint:
             f"created_at: {self.created_at or now}",
             f"updated_at: {now}",
         ]
+        if self.applicable_when:
+            try:
+                import yaml as _yaml
+                aw_str = _yaml.dump(
+                    {"applicable_when": self.applicable_when},
+                    allow_unicode=True, default_flow_style=False,
+                ).strip()
+                fm_lines.append(aw_str)
+            except Exception:
+                pass
+        if self.not_applicable_when:
+            try:
+                import yaml as _yaml
+                naw_str = _yaml.dump(
+                    {"not_applicable_when": self.not_applicable_when},
+                    allow_unicode=True, default_flow_style=False,
+                ).strip()
+                fm_lines.append(naw_str)
+            except Exception:
+                pass
+        if self.scope_note:
+            fm_lines.append(f"scope_note: \"{self.scope_note}\"")
         if self.history:
             fm_lines.append("history:")
             for h in self.history:
@@ -111,6 +136,13 @@ def load_focus_point(path: Path) -> FocusPoint | None:
     if not isinstance(history, list):
         history = []
     prompt = text[m.end():].strip()
+    applicable_when = fm.get("applicable_when") or {}
+    not_applicable_when = fm.get("not_applicable_when") or {}
+    if not isinstance(applicable_when, dict):
+        applicable_when = {}
+    if not isinstance(not_applicable_when, dict):
+        not_applicable_when = {}
+    scope_note = str(fm.get("scope_note") or "").strip()
     return FocusPoint(
         id=fid,
         name=name,
@@ -119,6 +151,9 @@ def load_focus_point(path: Path) -> FocusPoint | None:
         created_at=created_at,
         updated_at=updated_at,
         history=history,
+        applicable_when=applicable_when,
+        not_applicable_when=not_applicable_when,
+        scope_note=scope_note,
     )
 
 
