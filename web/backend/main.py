@@ -2163,27 +2163,15 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
             new_findings = extract_findings_from_markdown(body, open_findings, focus_ids_used)
             for f in new_findings:
                 yield _sse_line({"type": "finding", "finding": f.to_dict()})
-            # Extract evolve hints and write to evolution queue (S7-1)
+            # Extract evolve hints and write to review_queue DB table
             evolve_hints = extract_evolve_hints(body)
             if evolve_hints:
-                from backend.evolution_queue import append_evolve_hint, _current_user_role
+                from backend.evolution_queue import _current_user_role
                 import uuid as _uuid
                 from aika import db as _dbm_eq
-                turn_n = dbm.count_messages(conn, conversation_id=conversation_id) if hasattr(dbm, "count_messages") else 0
                 _user_role = _current_user_role()
                 for hint in evolve_hints:
                     try:
-                        append_evolve_hint(
-                            repository_root(),
-                            focus_id=hint["focus_id"],
-                            suggestion=hint["suggestion"],
-                            source_role=_user_role,
-                            source_type="evolve_hint",
-                            project_id=project_id,
-                            conversation_id=conversation_id,
-                            turn=turn_n,
-                        )
-                        # Also upsert into the review_queue DB table
                         rq_id = f"rq-{_uuid.uuid4().hex[:12]}"
                         _dbm_eq.upsert_review_queue_item(
                             conn,

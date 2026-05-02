@@ -239,12 +239,15 @@ def _build_post_review_system_prompt(
     findings_summary: list[dict[str, Any]] | None,
     expert_profile: ExpertProfile,
     existing_ki_count: int,
+    domain_intro: str = "",
 ) -> str:
     profile_str = ""
     if expert_profile.domains:
         profile_str = f"专家领域：{', '.join(expert_profile.domains)}\n"
     if expert_profile.background:
         profile_str += f"背景：{expert_profile.background}\n"
+
+    domain_str = f"【当前审查域背景】\n{domain_intro}\n\n" if domain_intro else ""
 
     findings_str = ""
     if findings_summary:
@@ -258,7 +261,7 @@ def _build_post_review_system_prompt(
     return f"""你是知识工程师，负责从资深顾问的反馈中提取隐性知识并结构化为可复用规则。
 
 {profile_str}
-{findings_str}你的任务：
+{domain_str}{findings_str}你的任务：
 1. 了解顾问认为本次审查遗漏了哪些问题，以及 LLM 为什么没有发现
 2. 从遗漏原因中提炼出可泛化的规则（适用于未来类似项目的规则）
 3. 区分"这个项目特有的情况"和"可复用的行业/领域规律"
@@ -287,6 +290,7 @@ def post_review_extraction_stream(
     existing_items = dbm.list_knowledge_items(
         conn, project_id=project_id, limit=50
     )
+    domain_intro, _ = _get_domain_context()
 
     def gen() -> Iterator[str]:
         try:
@@ -296,7 +300,8 @@ def post_review_extraction_stream(
             return
 
         system_prompt = _build_post_review_system_prompt(
-            body.findings_summary, expert_profile, len(existing_items)
+            body.findings_summary, expert_profile, len(existing_items),
+            domain_intro=domain_intro,
         )
         prior: list[tuple[str, str]] = []
         if body.prior_messages:
@@ -400,6 +405,7 @@ def _build_active_extraction_system_prompt(
     expert_profile: ExpertProfile,
     existing_ki_count: int,
     current_rules_summary: str,
+    domain_intro: str = "",
 ) -> str:
     strategy_hint = _EXTRACTION_STRATEGIES.get(strategy, _EXTRACTION_STRATEGIES["gap_based"])
     profile_str = ""
@@ -407,6 +413,10 @@ def _build_active_extraction_system_prompt(
         profile_str = f"专家领域：{', '.join(expert_profile.domains)}\n"
     if expert_profile.background:
         profile_str += f"背景：{expert_profile.background}\n"
+
+    domain_str = ""
+    if domain_intro:
+        domain_str = f"【当前审查域背景】\n{domain_intro}\n\n"
 
     rq_str = ""
     if rq_item:
@@ -419,7 +429,7 @@ def _build_active_extraction_system_prompt(
     return f"""你是知识工程师，专门从资深顾问的陈述中提取隐性知识，结构化为可复用的审查规则。
 
 {profile_str}
-{rq_str}【现有相关规则摘要】
+{domain_str}{rq_str}【现有相关规则摘要】
 {current_rules_summary or '（暂无相关规则）'}
 
 {strategy_hint}
@@ -452,8 +462,7 @@ def active_extraction_stream(body: ActiveExtractionBody) -> StreamingResponse:
     if body.review_queue_item_id:
         rq_item = dbm.get_review_queue_item(conn, body.review_queue_item_id)
 
-    # Get a brief summary of current rules for gap_based strategy
-    current_rules_summary = _get_current_rules_summary()
+    domain_intro, current_rules_summary = _get_domain_context()
 
     def gen() -> Iterator[str]:
         try:
@@ -465,6 +474,7 @@ def active_extraction_stream(body: ActiveExtractionBody) -> StreamingResponse:
         system_prompt = _build_active_extraction_system_prompt(
             rq_item, body.strategy, expert_profile,
             len(existing_items), current_rules_summary,
+            domain_intro=domain_intro,
         )
         prior: list[tuple[str, str]] = []
         if body.prior_messages:
@@ -541,27 +551,46 @@ def active_extraction_stream(body: ActiveExtractionBody) -> StreamingResponse:
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
-def _get_current_rules_summary() -> str:
-    """Get a brief summary of current active focus points for gap_based strategy."""
+def _get_domain_context() -> tuple[str, str]:
+    """Return (domain_intro, rules_summary) from the active skill package."""
     try:
         from backend.skills import skill_packages_root, list_skill_packages
-        from backend.skills.review_domain_io import read_settings_from_package_dir
+        from backend.skills.review_domain_io import (
+            read_settings_from_package_dir, extract_domain_intro_preamble
+        )
         from backend.skills.packages import package_dir
 
         root = skill_packages_root()
         packages = list_skill_packages(root)
         if not packages:
-            return ""
+            return "", ""
         pkg = packages[0]
         pkg_dir = package_dir(root, pkg["id"])
-        settings = read_settings_from_package_dir(pkg_dir)
-        fps = settings.get("focus_points", [])
+
+        # Try to read preamble from review_domain.md
+        domain_intro = ""
+        domain_f = pkg_dir / "review_domain.md"
+        if domain_f.is_file():
+            text = domain_f.read_text(encoding="utf-8", errors="replace")
+            preamble = extract_domain_intro_preamble(text)
+            if preamble:
+                domain_intro = preamble[:600].strip()
+
+        settings, _ = read_settings_from_package_dir(pkg_dir)
+        if not settings:
+            return domain_intro, ""
+        fps = (settings or {}).get("focus_points", [])
         if not fps:
-            return ""
-        lines = [f"- {fp.get('id', '')}: {fp.get('name', '')}" for fp in fps[:10]]
-        return "\n".join(lines)
+            return domain_intro, ""
+        lines = [f"- {fp.get('id', '')}: {fp.get('name', '')}" for fp in fps[:12]]
+        return domain_intro, "\n".join(lines)
     except Exception:
-        return ""
+        return "", ""
+
+
+def _get_current_rules_summary() -> str:
+    _, summary = _get_domain_context()
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -631,7 +660,7 @@ def doc_extraction_stream(body: DocExtractionBody) -> StreamingResponse:
     conn = get_conn()
     expert_profile = _load_expert_profile()
     existing_items = dbm.list_knowledge_items(conn, limit=100)
-    current_rules_summary = _get_current_rules_summary()
+    domain_intro, current_rules_summary = _get_domain_context()
 
     def gen() -> Iterator[str]:
         if material_path is None or not material_path.is_file():
@@ -655,11 +684,12 @@ def doc_extraction_stream(body: DocExtractionBody) -> StreamingResponse:
         profile_str = ""
         if expert_profile.domains:
             profile_str = f"专家领域：{', '.join(expert_profile.domains)}\n"
+        domain_str = f"【当前审查域背景】\n{domain_intro}\n\n" if domain_intro else ""
 
         system_prompt = f"""你是知识工程师，负责从规则文档中提取隐性知识并对照现有规则进行澄清。
 
 {profile_str}
-【现有相关规则摘要】
+{domain_str}【现有相关规则摘要】
 {current_rules_summary or '（暂无相关规则）'}
 
 {strategy_hint}
