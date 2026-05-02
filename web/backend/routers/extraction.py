@@ -24,7 +24,7 @@ Expert Profile:
 from __future__ import annotations
 
 import json
-import os
+
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -85,17 +85,19 @@ def _sse_line(obj: dict[str, Any]) -> str:
 
 
 def _get_llm_provider():
+    """Build LLM provider + config from app_settings.md (same source as analysis routes)."""
     from aika.llm import LLMConfig, get_provider
-    settings_json = os.environ.get("AIKA_LLM_SETTINGS", "")
-    provider_name = os.environ.get("AIKA_LLM_PROVIDER", "openai")
-    model = os.environ.get("AIKA_MODEL", "")
-    base_url = os.environ.get("AIKA_BASE_URL", "") or None
-    api_key = os.environ.get("AIKA_API_KEY", "") or None
+    from backend.main import (  # reuse the same readers used by analysis routes
+        _get_text_provider,
+        _get_text_model,
+        _get_text_base_url,
+        _get_text_llm_api_key_effective,
+    )
     cfg = LLMConfig(
-        provider=provider_name,
-        model=model,
-        base_url=base_url,
-        api_key=api_key,
+        provider=_get_text_provider(),
+        model=_get_text_model(),
+        base_url=_get_text_base_url() or None,
+        api_key=_get_text_llm_api_key_effective(),
         timeout_s=120.0,
     )
     return get_provider(cfg.provider), cfg
