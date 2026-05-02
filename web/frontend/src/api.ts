@@ -460,3 +460,26 @@ export async function postDocExtractionStream(
   }
   await consumeSseFromResponse(r, onEvent, signal);
 }
+
+export async function postReviewExtractionStream(
+  projectId: number,
+  conversationId: number,
+  body: { user_input: string; prior_messages?: Array<{role: string; content: string}>; findings_summary?: Array<Record<string, unknown>> },
+  onEvent: (ev: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const r = await fetch(
+    `${BASE}/api/v1/projects/${projectId}/conversations/${conversationId}/post-review-extraction/stream`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  if (!r.ok) {
+    const j = (await r.json().catch(() => ({}))) as ApiErr;
+    throw new Error(j.message || `HTTP ${r.status}`);
+  }
+  await consumeSseFromResponse(r, onEvent, signal);
+}

@@ -15,7 +15,8 @@ import type {
 import {
   approvePendingRule, deleteReviewQueueItem, getExpertProfile,
   getPendingRules, getReviewQueue, patchReviewQueueItem, postActiveExtractionStream,
-  postDocExtractionStream, putExpertProfile, rejectPendingRule, uploadExtractionMaterial,
+  postDocExtractionStream, postReviewExtractionStream, putExpertProfile, rejectPendingRule,
+  uploadExtractionMaterial,
 } from "./api";
 import SimpleMarkdown from "./SimpleMarkdown";
 
@@ -304,7 +305,13 @@ function ChatArea({ messages, streaming }: { messages: ChatMsg[]; streaming: boo
 
 // ── ActiveExtractionTab ──────────────────────────────────────────────────────
 
-function ActiveExtractionTab({ initialRQItem }: { initialRQItem: ReviewQueueItem | null }) {
+function ActiveExtractionTab({
+  initialRQItem,
+  postReviewCtx,
+}: {
+  initialRQItem: ReviewQueueItem | null;
+  postReviewCtx: { projectId: number; conversationId: number } | null;
+}) {
   const [strategy, setStrategy] = useState("gap_based");
   const [rqItem, setRqItem] = useState<ReviewQueueItem | null>(initialRQItem);
   const [rqItems, setRqItems] = useState<ReviewQueueItem[]>([]);
@@ -314,6 +321,7 @@ function ActiveExtractionTab({ initialRQItem }: { initialRQItem: ReviewQueueItem
   const [roundNumber, setRoundNumber] = useState(1);
   const [newKiIds, setNewKiIds] = useState<string[]>([]);
   const abortRef = useRef<AbortController | null>(null);
+  const isPostReview = postReviewCtx != null;
 
   useEffect(() => {
     if (initialRQItem) {
@@ -322,6 +330,16 @@ function ActiveExtractionTab({ initialRQItem }: { initialRQItem: ReviewQueueItem
       setRoundNumber(1);
     }
   }, [initialRQItem]);
+
+  useEffect(() => {
+    if (postReviewCtx) {
+      setMessages([{
+        role: "status",
+        content: `已关联审查对话（项目 #${postReviewCtx.projectId}，会话 #${postReviewCtx.conversationId}）。请描述您认为本次审查遗漏了哪些问题，或直接点击「开始提取」。`,
+      }]);
+      setRoundNumber(1);
+    }
+  }, [postReviewCtx]);
 
   useEffect(() => {
     getReviewQueue().then(({ items }) => setRqItems(items)).catch(() => {});
@@ -342,14 +360,29 @@ function ActiveExtractionTab({ initialRQItem }: { initialRQItem: ReviewQueueItem
     let assistantText = "";
 
     try {
-      await postActiveExtractionStream(
-        {
-          user_input: text,
-          strategy,
-          review_queue_item_id: rqItem?.id ?? null,
-          prior_messages: priorMessages,
-          round_number: roundNumber,
-        },
+      const streamFn = isPostReview
+        ? (ev: Parameters<typeof postReviewExtractionStream>[3]) =>
+            postReviewExtractionStream(
+              postReviewCtx!.projectId,
+              postReviewCtx!.conversationId,
+              { user_input: text, prior_messages: priorMessages },
+              ev,
+              abortRef.current!.signal,
+            )
+        : (ev: Parameters<typeof postActiveExtractionStream>[1]) =>
+            postActiveExtractionStream(
+              {
+                user_input: text,
+                strategy,
+                review_queue_item_id: rqItem?.id ?? null,
+                prior_messages: priorMessages,
+                round_number: roundNumber,
+              },
+              ev,
+              abortRef.current!.signal,
+            );
+
+      await streamFn(
         (ev) => {
           if (ev.type === "status") {
             setMessages((prev) => [...prev, { role: "status", content: String(ev.msg ?? "") }]);
@@ -387,7 +420,6 @@ function ActiveExtractionTab({ initialRQItem }: { initialRQItem: ReviewQueueItem
             setRoundNumber((n) => n + 1);
           }
         },
-        abortRef.current.signal,
       );
     } catch (e) {
       if ((e as Error)?.name !== "AbortError") {
@@ -412,59 +444,71 @@ function ActiveExtractionTab({ initialRQItem }: { initialRQItem: ReviewQueueItem
 
   return (
     <div style={{ padding: "16px 0" }}>
-      <div style={{ display: "flex", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
-        {/* Strategy */}
-        <Card size="small" style={{ flex: "0 0 auto", minWidth: 260 }}>
-          <div style={{ marginBottom: 8 }}>
-            <Text strong>提取策略</Text>
+      {isPostReview ? (
+        <Card size="small" style={{ marginBottom: 16, background: "#f0f9f2", borderColor: "#b7eb8f" }}>
+          <Text strong style={{ color: "#389e0d" }}>审查后提取模式</Text>
+          <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+            项目 #{postReviewCtx!.projectId} · 会话 #{postReviewCtx!.conversationId}
+          </Text>
+          <div style={{ marginTop: 4, fontSize: 12, color: "#555" }}>
+            描述本次审查的遗漏或补充发现，LLM 将帮您提炼为可复用规则。
           </div>
-          <Radio.Group
-            value={strategy}
-            onChange={(e) => setStrategy(e.target.value)}
-            style={{ display: "flex", flexDirection: "column", gap: 6 }}
-          >
-            {STRATEGY_OPTIONS.map((opt) => (
-              <Radio key={opt.value} value={opt.value}>
-                <span style={{ fontWeight: 500 }}>{opt.label}</span>
-                <br />
-                <span style={{ fontSize: 11, color: "#888" }}>{opt.desc}</span>
-              </Radio>
-            ))}
-          </Radio.Group>
         </Card>
-        {/* RQ Item selector */}
-        <Card size="small" style={{ flex: 1, minWidth: 200 }}>
-          <div style={{ marginBottom: 8 }}>
-            <Text strong>关联队列条目（可选）</Text>
-          </div>
-          <Select
-            value={rqItem?.id ?? null}
-            onChange={(val) => setRqItem(rqItems.find((x) => x.id === val) ?? null)}
-            placeholder="选择 Review Queue 条目..."
-            style={{ width: "100%" }}
-            allowClear
-            onClear={() => setRqItem(null)}
-            options={rqItems
-              .filter((x) => x.status !== "rejected" && x.status !== "archived")
-              .map((x) => ({
-                value: x.id,
-                label: `[${x.focus_id}] ${x.suggestion.slice(0, 50)}… (×${x.occurrences})`,
-              }))}
-          />
-          {rqItem && (
-            <div style={{ marginTop: 8 }}>
+      ) : (
+        <div style={{ display: "flex", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
+          {/* Strategy */}
+          <Card size="small" style={{ flex: "0 0 auto", minWidth: 260 }}>
+            <div style={{ marginBottom: 8 }}>
+              <Text strong>提取策略</Text>
+            </div>
+            <Radio.Group
+              value={strategy}
+              onChange={(e) => setStrategy(e.target.value)}
+              style={{ display: "flex", flexDirection: "column", gap: 6 }}
+            >
+              {STRATEGY_OPTIONS.map((opt) => (
+                <Radio key={opt.value} value={opt.value}>
+                  <span style={{ fontWeight: 500 }}>{opt.label}</span>
+                  <br />
+                  <span style={{ fontSize: 11, color: "#888" }}>{opt.desc}</span>
+                </Radio>
+              ))}
+            </Radio.Group>
+          </Card>
+          {/* RQ Item selector */}
+          <Card size="small" style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ marginBottom: 8 }}>
+              <Text strong>关联队列条目（可选）</Text>
+            </div>
+            <Select
+              value={rqItem?.id ?? null}
+              onChange={(val) => setRqItem(rqItems.find((x) => x.id === val) ?? null)}
+              placeholder="选择 Review Queue 条目..."
+              style={{ width: "100%" }}
+              allowClear
+              onClear={() => setRqItem(null)}
+              options={rqItems
+                .filter((x) => x.status !== "rejected" && x.status !== "archived")
+                .map((x) => ({
+                  value: x.id,
+                  label: `[${x.focus_id}] ${x.suggestion.slice(0, 50)}… (×${x.occurrences})`,
+                }))}
+            />
+            {rqItem && (
+              <div style={{ marginTop: 8 }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {rqItem.suggestion}
+                </Text>
+              </div>
+            )}
+            <div style={{ marginTop: 12 }}>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                {rqItem.suggestion}
+                第 {roundNumber} 轮 · 满意度 ≥ 85% 或最多 5 轮后自动生成知识条目
               </Text>
             </div>
-          )}
-          <div style={{ marginTop: 12 }}>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              第 {roundNumber} 轮 · 满意度 ≥ 85% 或最多 5 轮后自动生成知识条目
-            </Text>
-          </div>
-        </Card>
-      </div>
+          </Card>
+        </div>
+      )}
 
       {newKiIds.length > 0 && (
         <Alert
@@ -487,19 +531,68 @@ function ActiveExtractionTab({ initialRQItem }: { initialRQItem: ReviewQueueItem
               void handleSend();
             }
           }}
-          placeholder="输入您的想法或回答 LLM 的问题（Shift+Enter 换行）"
+          placeholder={isPostReview ? "描述遗漏的问题或补充发现（Shift+Enter 换行）" : "输入您的想法或回答 LLM 的问题（Shift+Enter 换行）"}
           autoSize={{ minRows: 2, maxRows: 6 }}
           disabled={streaming}
           style={{ flex: 1 }}
         />
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <Button
-            type="primary"
-            onClick={handleSend}
-            disabled={!input.trim() || streaming}
-          >
-            发送
-          </Button>
+          {isPostReview && !streaming && messages.filter((m) => m.role !== "status").length === 0 ? (
+            <Button
+              type="primary"
+              onClick={() => {
+                setInput("");
+                void (async () => {
+                  setMessages((prev) => [...prev, { role: "user", content: "请开始分析，帮我识别可以提炼的知识" }]);
+                  setStreaming(true);
+                  abortRef.current = new AbortController();
+                  try {
+                    await postReviewExtractionStream(
+                      postReviewCtx!.projectId,
+                      postReviewCtx!.conversationId,
+                      { user_input: "请开始分析，帮我识别可以提炼的知识", prior_messages: [] },
+                      (ev) => {
+                        if (ev.type === "text") {
+                          const chunk = String(ev.text ?? "");
+                          setMessages((prev) => {
+                            const last = prev[prev.length - 1];
+                            if (last?.role === "assistant") {
+                              return [...prev.slice(0, -1), { role: "assistant", content: last.content + chunk }];
+                            }
+                            return [...prev, { role: "assistant", content: chunk }];
+                          });
+                        } else if (ev.type === "ki") {
+                          const kid = String((ev as any).kid ?? "");
+                          if (kid) setNewKiIds((prev) => (prev.includes(kid) ? prev : [...prev, kid]));
+                        } else if (ev.type === "final") {
+                          const kiCount = Number((ev as any).new_ki_count ?? 0);
+                          if (kiCount > 0) setMessages((prev) => [...prev, { role: "status", content: `✓ 生成 ${kiCount} 条知识条目。` }]);
+                          setRoundNumber((n) => n + 1);
+                        }
+                      },
+                      abortRef.current.signal,
+                    );
+                  } catch (e) {
+                    if ((e as Error)?.name !== "AbortError") {
+                      message.error(`提取失败: ${e instanceof Error ? e.message : String(e)}`);
+                    }
+                  } finally {
+                    setStreaming(false);
+                  }
+                })();
+              }}
+            >
+              开始提取
+            </Button>
+          ) : (
+            <Button
+              type="primary"
+              onClick={handleSend}
+              disabled={!input.trim() || streaming}
+            >
+              发送
+            </Button>
+          )}
           {streaming ? (
             <Button danger onClick={handleStop}>停止</Button>
           ) : (
@@ -843,6 +936,22 @@ export default function ExtractionPage() {
   const [profile, setProfile] = useState<ExpertProfileData | null>(null);
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [rqItemForExtraction, setRqItemForExtraction] = useState<ReviewQueueItem | null>(null);
+  const [postReviewCtx, setPostReviewCtx] = useState<{ projectId: number; conversationId: number } | null>(null);
+
+  useEffect(() => {
+    // Check if we were opened from "提取知识" on review results page
+    const raw = window.sessionStorage.getItem("aika_post_review_ctx");
+    if (raw) {
+      try {
+        const ctx = JSON.parse(raw) as { projectId: number; conversationId: number };
+        window.sessionStorage.removeItem("aika_post_review_ctx");
+        setPostReviewCtx(ctx);
+        setActiveTab("extract");
+      } catch {
+        // ignore malformed
+      }
+    }
+  }, []);
 
   useEffect(() => {
     getExpertProfile()
@@ -873,7 +982,12 @@ export default function ExtractionPage() {
     {
       key: "extract",
       label: "主动提取",
-      children: <ActiveExtractionTab initialRQItem={activeTab === "extract" ? rqItemForExtraction : null} />,
+      children: (
+        <ActiveExtractionTab
+          initialRQItem={activeTab === "extract" ? rqItemForExtraction : null}
+          postReviewCtx={activeTab === "extract" ? postReviewCtx : null}
+        />
+      ),
     },
     {
       key: "upload",

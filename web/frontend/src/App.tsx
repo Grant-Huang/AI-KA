@@ -3766,6 +3766,26 @@ export default function App() {
                       >
                         审查报告
                       </Button>
+                      <Button
+                        type="default"
+                        size="small"
+                        icon={<BulbOutlined />}
+                        disabled={selectedId == null || selectedConversationId == null}
+                        onClick={() => {
+                          setAppMode("extraction");
+                          // Pass context so ExtractionPage opens in post-review mode
+                          window.sessionStorage.setItem(
+                            "aika_post_review_ctx",
+                            JSON.stringify({
+                              projectId: selectedId,
+                              conversationId: selectedConversationId,
+                            })
+                          );
+                        }}
+                        title="将本次审查结果发送到知识提取"
+                      >
+                        提取知识
+                      </Button>
                     </div>
                     <div className="result-actions-bar-divider" aria-hidden="true" />
                     <div className="result-output-actions">

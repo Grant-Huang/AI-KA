@@ -185,6 +185,42 @@ def _write_rule_to_skill_package(item: dict[str, Any], note: str = "") -> dict[s
             )
             dest = save_focus_point(new_fp, pkg_d)
 
+        # Sync back to review_domain.md so analysis routing picks up the change
+        _sync_to_review_domain(new_fp, pkg_d)
+
         return {"ok": True, "path": str(dest)}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def _sync_to_review_domain(fp: Any, pkg_d: "Path") -> None:
+    """Write the updated focus point prompt back into review_domain.md."""
+    try:
+        from backend.skills.review_domain_io import (
+            read_settings_from_domain_text,
+            write_review_domain_file,
+        )
+
+        domain_f = pkg_d / "review_domain.md"
+        if not domain_f.is_file():
+            return
+
+        text = domain_f.read_text(encoding="utf-8", errors="replace")
+        settings, err = read_settings_from_domain_text(text)
+        if err or not settings:
+            return
+
+        fps = settings.get("focus_points", [])
+        found = False
+        for existing in fps:
+            if existing.get("id") == fp.id:
+                existing["prompt"] = fp.prompt
+                existing["name"] = fp.name
+                found = True
+                break
+        if not found:
+            fps.append({"id": fp.id, "name": fp.name, "prompt": fp.prompt})
+
+        write_review_domain_file(domain_f, {"focus_points": fps}, fps)
+    except Exception:
+        pass  # sync failure is non-fatal
