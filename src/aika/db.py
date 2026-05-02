@@ -206,6 +206,59 @@ CREATE TABLE IF NOT EXISTS knowledge_items (
 
 CREATE INDEX IF NOT EXISTS idx_knowledge_items_status ON knowledge_items(status);
 CREATE INDEX IF NOT EXISTS idx_knowledge_items_focus ON knowledge_items(extraction_focus_id);
+
+CREATE TABLE IF NOT EXISTS review_phases (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  order_index INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS review_focus_points_ext (
+  id TEXT PRIMARY KEY,
+  phase_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  order_index INTEGER NOT NULL DEFAULT 0,
+  is_required INTEGER NOT NULL DEFAULT 1,
+  package_id TEXT,
+  FOREIGN KEY(phase_id) REFERENCES review_phases(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rfpe_phase ON review_focus_points_ext(phase_id);
+
+CREATE TABLE IF NOT EXISTS review_categories (
+  id TEXT PRIMARY KEY,
+  focus_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  order_index INTEGER NOT NULL DEFAULT 0,
+  is_conditional INTEGER NOT NULL DEFAULT 0,
+  condition_note TEXT,
+  FOREIGN KEY(focus_id) REFERENCES review_focus_points_ext(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rcat_focus ON review_categories(focus_id);
+
+CREATE TABLE IF NOT EXISTS review_presets_ext (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  phase_id TEXT,
+  review_role TEXT,
+  review_goals TEXT,
+  output_requirements TEXT,
+  pass_threshold REAL,
+  package_id TEXT,
+  order_index INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS preset_focus_members (
+  preset_id TEXT NOT NULL,
+  focus_id TEXT NOT NULL,
+  order_index INTEGER NOT NULL DEFAULT 0,
+  is_prerequisite INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (preset_id, focus_id)
+);
 """
 
 
@@ -329,6 +382,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _migrate_messages_metadata(conn)
     _migrate_chunks_embedding(conn)
     _migrate_review_queue_columns(conn)
+    _migrate_review_knowledge_tables(conn)
 
 
 def _table_column_names(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -408,6 +462,11 @@ def _migrate_review_queue_columns(conn: sqlite3.Connection) -> None:
     """Ensure review_queue and knowledge_items tables exist (created by SCHEMA_SQL if new DB)."""
     # Tables are already created by SCHEMA_SQL via CREATE TABLE IF NOT EXISTS.
     # This migration only handles adding columns to pre-existing DBs that lack the tables.
+    pass
+
+
+def _migrate_review_knowledge_tables(conn: sqlite3.Connection) -> None:
+    """Review knowledge structure tables are created by SCHEMA_SQL. No-op stub."""
     pass
 
 
@@ -1815,3 +1874,143 @@ def _row_to_ki(r: sqlite3.Row) -> dict[str, Any]:
         "created_at": str(r["created_at"]),
         "updated_at": str(r["updated_at"]),
     }
+
+
+# ── Review Knowledge Structure ─────────────────────────────────────────────
+
+def upsert_review_phase(conn: sqlite3.Connection, *, id: str, name: str, description: str = "", order_index: int = 0) -> None:
+    conn.execute(
+        "INSERT INTO review_phases(id,name,description,order_index) VALUES(?,?,?,?)"
+        " ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description, order_index=excluded.order_index",
+        (id, name, description, order_index),
+    )
+    conn.commit()
+
+
+def upsert_review_focus_point_ext(
+    conn: sqlite3.Connection,
+    *,
+    id: str,
+    phase_id: str,
+    name: str,
+    description: str = "",
+    order_index: int = 0,
+    is_required: bool = True,
+    package_id: str = "",
+) -> None:
+    conn.execute(
+        "INSERT INTO review_focus_points_ext(id,phase_id,name,description,order_index,is_required,package_id)"
+        " VALUES(?,?,?,?,?,?,?)"
+        " ON CONFLICT(id) DO UPDATE SET phase_id=excluded.phase_id, name=excluded.name,"
+        "   description=excluded.description, order_index=excluded.order_index,"
+        "   is_required=excluded.is_required, package_id=excluded.package_id",
+        (id, phase_id, name, description, order_index, int(is_required), package_id),
+    )
+    conn.commit()
+
+
+def upsert_review_category(
+    conn: sqlite3.Connection,
+    *,
+    id: str,
+    focus_id: str,
+    name: str,
+    description: str = "",
+    order_index: int = 0,
+    is_conditional: bool = False,
+    condition_note: str = "",
+) -> None:
+    conn.execute(
+        "INSERT INTO review_categories(id,focus_id,name,description,order_index,is_conditional,condition_note)"
+        " VALUES(?,?,?,?,?,?,?)"
+        " ON CONFLICT(id) DO UPDATE SET focus_id=excluded.focus_id, name=excluded.name,"
+        "   description=excluded.description, order_index=excluded.order_index,"
+        "   is_conditional=excluded.is_conditional, condition_note=excluded.condition_note",
+        (id, focus_id, name, description, order_index, int(is_conditional), condition_note),
+    )
+    conn.commit()
+
+
+def upsert_review_preset_ext(
+    conn: sqlite3.Connection,
+    *,
+    id: str,
+    name: str,
+    phase_id: str = "",
+    review_role: str = "",
+    review_goals: str = "",
+    output_requirements: str = "",
+    pass_threshold: float | None = None,
+    package_id: str = "",
+    order_index: int = 0,
+) -> None:
+    conn.execute(
+        "INSERT INTO review_presets_ext(id,name,phase_id,review_role,review_goals,output_requirements,pass_threshold,package_id,order_index)"
+        " VALUES(?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(id) DO UPDATE SET name=excluded.name, phase_id=excluded.phase_id,"
+        "   review_role=excluded.review_role, review_goals=excluded.review_goals,"
+        "   output_requirements=excluded.output_requirements, pass_threshold=excluded.pass_threshold,"
+        "   package_id=excluded.package_id, order_index=excluded.order_index",
+        (id, name, phase_id, review_role, review_goals, output_requirements, pass_threshold, package_id, order_index),
+    )
+    conn.commit()
+
+
+def upsert_preset_focus_member(
+    conn: sqlite3.Connection,
+    *,
+    preset_id: str,
+    focus_id: str,
+    order_index: int = 0,
+    is_prerequisite: bool = False,
+) -> None:
+    conn.execute(
+        "INSERT INTO preset_focus_members(preset_id,focus_id,order_index,is_prerequisite)"
+        " VALUES(?,?,?,?)"
+        " ON CONFLICT(preset_id,focus_id) DO UPDATE SET order_index=excluded.order_index,"
+        "   is_prerequisite=excluded.is_prerequisite",
+        (preset_id, focus_id, order_index, int(is_prerequisite)),
+    )
+    conn.commit()
+
+
+def list_review_phases(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute("SELECT * FROM review_phases ORDER BY order_index").fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_review_focus_points_ext(conn: sqlite3.Connection, phase_id: str | None = None) -> list[dict]:
+    if phase_id:
+        rows = conn.execute(
+            "SELECT * FROM review_focus_points_ext WHERE phase_id=? ORDER BY order_index", (phase_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM review_focus_points_ext ORDER BY order_index").fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_review_categories(conn: sqlite3.Connection, focus_id: str | None = None) -> list[dict]:
+    if focus_id:
+        rows = conn.execute(
+            "SELECT * FROM review_categories WHERE focus_id=? ORDER BY order_index", (focus_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM review_categories ORDER BY order_index").fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_review_presets_ext(conn: sqlite3.Connection, package_id: str | None = None) -> list[dict]:
+    if package_id:
+        rows = conn.execute(
+            "SELECT * FROM review_presets_ext WHERE package_id=? ORDER BY order_index", (package_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM review_presets_ext ORDER BY order_index").fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_preset_focus_members(conn: sqlite3.Connection, preset_id: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM preset_focus_members WHERE preset_id=? ORDER BY order_index", (preset_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
