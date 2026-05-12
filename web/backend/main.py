@@ -37,6 +37,8 @@ from backend.repo_paths import project_export_dir, project_md_out_dir, repositor
 from backend.response import err, ok
 from backend.routers.conversations import router as conversations_router
 from backend.routers.outputs import router as outputs_router
+from backend.routers.auth import router as auth_router
+from backend.routers.expert_profile import router as expert_profile_router
 from backend.run_metadata import build_run_metadata, sha256_short
 from backend.memory_recall import iter_memory_candidate_files, memory_root_under_repo, recall_memory_snippets
 from backend.conversation_models import (
@@ -147,6 +149,8 @@ app.add_middleware(
 )
 app.include_router(outputs_router)
 app.include_router(conversations_router)
+app.include_router(auth_router)
+app.include_router(expert_profile_router)
 
 register_builtin_hooks()
 

@@ -160,6 +160,35 @@ CREATE TABLE IF NOT EXISTS memory_file_embeddings (
   embed_model  TEXT NOT NULL,
   updated_at   TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL UNIQUE,
+  display_name TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS expert_profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL UNIQUE,
+  industries_json TEXT NOT NULL DEFAULT '[]',
+  production_modes_json TEXT NOT NULL DEFAULT '[]',
+  functional_modules_json TEXT NOT NULL DEFAULT '[]',
+  focus_areas_json TEXT NOT NULL DEFAULT '[]',
+  profile_completed INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  token TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL,
+  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
 """
 
 
@@ -266,6 +295,25 @@ class ConversationOutputRow:
     created_at: str
 
 
+@dataclass(frozen=True)
+class UserRow:
+    id: int
+    username: str
+    display_name: str
+    password_hash: str
+
+
+@dataclass(frozen=True)
+class ExpertProfileRow:
+    id: int
+    user_id: int
+    industries: list[str]
+    production_modes: list[str]
+    functional_modules: list[str]
+    focus_areas: list[str]
+    profile_completed: bool
+
+
 def connect(db_file: Path) -> sqlite3.Connection:
     db_file.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_file))
@@ -282,6 +330,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _migrate_conversations_mode_state(conn)
     _migrate_messages_metadata(conn)
     _migrate_chunks_embedding(conn)
+    _migrate_users_tables(conn)
 
 
 def _table_column_names(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -354,6 +403,40 @@ def _migrate_chunks_embedding(conn: sqlite3.Connection) -> None:
         conn.commit()
     if "embed_model" not in cols:
         conn.execute("ALTER TABLE document_chunks ADD COLUMN embed_model TEXT")
+        conn.commit()
+
+
+def _migrate_users_tables(conn: sqlite3.Connection) -> None:
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "users" not in tables:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              username TEXT NOT NULL UNIQUE,
+              display_name TEXT NOT NULL,
+              password_hash TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE IF NOT EXISTS expert_profiles (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id INTEGER NOT NULL UNIQUE,
+              industries_json TEXT NOT NULL DEFAULT '[]',
+              production_modes_json TEXT NOT NULL DEFAULT '[]',
+              functional_modules_json TEXT NOT NULL DEFAULT '[]',
+              focus_areas_json TEXT NOT NULL DEFAULT '[]',
+              profile_completed INTEGER NOT NULL DEFAULT 0,
+              updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+              FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+              token TEXT PRIMARY KEY,
+              user_id INTEGER NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              expires_at TEXT NOT NULL,
+              FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+        """)
         conn.commit()
 
 
@@ -1479,4 +1562,77 @@ def set_app_setting_json(conn: sqlite3.Connection, key: str, value: Any) -> None
         (key, json.dumps(value, ensure_ascii=False)),
     )
     conn.commit()
+
+
+def open_db(db_file: Path) -> sqlite3.Connection:
+    return connect(db_file)
+
+
+# ── User & Auth ──────────────────────────────────────────────
+
+def create_user(conn, *, username: str, display_name: str, password_hash: str) -> UserRow:
+    cur = conn.execute(
+        "INSERT INTO users(username, display_name, password_hash) VALUES (?,?,?)",
+        (username, display_name, password_hash),
+    )
+    conn.commit()
+    return get_user_by_id(conn, int(cur.lastrowid))
+
+def get_user_by_id(conn, user_id: int) -> UserRow | None:
+    r = conn.execute("SELECT id,username,display_name,password_hash FROM users WHERE id=?", (user_id,)).fetchone()
+    if r is None: return None
+    return UserRow(id=int(r["id"]), username=str(r["username"]), display_name=str(r["display_name"]), password_hash=str(r["password_hash"]))
+
+def get_user_by_username(conn, username: str) -> UserRow | None:
+    r = conn.execute("SELECT id,username,display_name,password_hash FROM users WHERE username=?", (username,)).fetchone()
+    if r is None: return None
+    return UserRow(id=int(r["id"]), username=str(r["username"]), display_name=str(r["display_name"]), password_hash=str(r["password_hash"]))
+
+def create_auth_session(conn, *, user_id: int, token: str, expires_at: str) -> None:
+    conn.execute("INSERT INTO auth_sessions(token,user_id,expires_at) VALUES (?,?,?)", (token, user_id, expires_at))
+    conn.commit()
+
+def get_session_user_id(conn, token: str) -> int | None:
+    r = conn.execute(
+        "SELECT user_id FROM auth_sessions WHERE token=? AND expires_at > datetime('now')",
+        (token,)
+    ).fetchone()
+    return int(r["user_id"]) if r else None
+
+def delete_auth_session(conn, token: str) -> None:
+    conn.execute("DELETE FROM auth_sessions WHERE token=?", (token,))
+    conn.commit()
+
+
+# ── Expert Profile ────────────────────────────────────────────
+
+def get_expert_profile(conn, user_id: int) -> ExpertProfileRow | None:
+    r = conn.execute("SELECT * FROM expert_profiles WHERE user_id=?", (user_id,)).fetchone()
+    if r is None: return None
+    return ExpertProfileRow(
+        id=int(r["id"]), user_id=int(r["user_id"]),
+        industries=json.loads(r["industries_json"] or "[]"),
+        production_modes=json.loads(r["production_modes_json"] or "[]"),
+        functional_modules=json.loads(r["functional_modules_json"] or "[]"),
+        focus_areas=json.loads(r["focus_areas_json"] or "[]"),
+        profile_completed=bool(r["profile_completed"]),
+    )
+
+def upsert_expert_profile(conn, *, user_id: int, industries: list, production_modes: list, functional_modules: list, focus_areas: list, profile_completed: bool = True) -> ExpertProfileRow:
+    from datetime import datetime as _dt
+    conn.execute("""
+        INSERT INTO expert_profiles(user_id,industries_json,production_modes_json,functional_modules_json,focus_areas_json,profile_completed,updated_at)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(user_id) DO UPDATE SET
+          industries_json=excluded.industries_json,
+          production_modes_json=excluded.production_modes_json,
+          functional_modules_json=excluded.functional_modules_json,
+          focus_areas_json=excluded.focus_areas_json,
+          profile_completed=excluded.profile_completed,
+          updated_at=excluded.updated_at
+    """, (user_id, json.dumps(industries, ensure_ascii=False), json.dumps(production_modes, ensure_ascii=False),
+          json.dumps(functional_modules, ensure_ascii=False), json.dumps(focus_areas, ensure_ascii=False),
+          int(profile_completed), _dt.utcnow().isoformat()))
+    conn.commit()
+    return get_expert_profile(conn, user_id)
 
