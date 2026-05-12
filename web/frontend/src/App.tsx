@@ -49,6 +49,7 @@ import {
   LogoutOutlined,
   TagOutlined,
   PaperClipOutlined,
+  UnorderedListOutlined,
 } from "@ant-design/icons";
 import {
   apiJson,
@@ -79,6 +80,8 @@ import SimpleMarkdown from "./SimpleMarkdown";
 import HelpPage from "./pages/help";
 import SystemSettingPage from "./pages/system_setting";
 import ExtractionPage from "./ExtractionPage";
+import { ReviewQueueDrawer, useReviewQueueCount } from "./ReviewQueueDrawer";
+import type { ReviewQueueItem } from "./api";
 
 const { Text, Title } = Typography;
 
@@ -504,6 +507,8 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [appMode, setAppMode] = useState<"review" | "extraction">("review");
+  const [reviewQueueDrawerOpen, setReviewQueueDrawerOpen] = useState(false);
+  const reviewQueueCount = useReviewQueueCount();
   const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain">("analyze");
   const [projectIngest, setProjectIngest] = useState<
     Record<number, { initialized: boolean; chunk_count: number; md_out_exists: boolean; has_review_records?: boolean }>
@@ -924,6 +929,12 @@ export default function App() {
     } finally {
       setProfileSaving(false);
     }
+  };
+
+  const handleStartFromReviewQueue = (item: ReviewQueueItem) => {
+    window.sessionStorage.setItem("aika_initial_rq_item", JSON.stringify(item));
+    setAppMode("extraction");
+    setChatsOpen(false);
   };
 
   const loadProjects = useCallback(async () => {
@@ -3252,6 +3263,26 @@ export default function App() {
               title="审查历史"
               onClick={() => setChatsOpen(true)}
             />
+            <div style={{ position: "relative", display: "inline-flex" }}>
+              <Button
+                type="text"
+                className="side-nav-btn"
+                icon={<UnorderedListOutlined />}
+                title="审查队列（来自项目审查的知识线索）"
+                onClick={() => setReviewQueueDrawerOpen(true)}
+              />
+              {reviewQueueCount > 0 && (
+                <span style={{
+                  position: "absolute", top: 4, right: 4,
+                  background: "#fa8c16", color: "#fff", borderRadius: "50%",
+                  width: 14, height: 14, fontSize: 9, display: "flex",
+                  alignItems: "center", justifyContent: "center", fontWeight: 700,
+                  pointerEvents: "none",
+                }}>
+                  {reviewQueueCount > 9 ? "9+" : reviewQueueCount}
+                </span>
+              )}
+            </div>
             <div className="side-nav-separator" aria-hidden="true" />
             <Button
               type="text"
@@ -4184,6 +4215,13 @@ export default function App() {
           <ExtractionPage />
         </div>
       ) : null}
+
+      {/* ── Review Queue Drawer (accessible from review mode) ── */}
+      <ReviewQueueDrawer
+        open={reviewQueueDrawerOpen}
+        onClose={() => setReviewQueueDrawerOpen(false)}
+        onStartExtraction={handleStartFromReviewQueue}
+      />
 
       {/* ── Expert Profile Modal ── */}
       <Modal

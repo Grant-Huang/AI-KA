@@ -1,13 +1,13 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert, Badge, Button, Card, Divider, Empty, Input,
-  Modal, Radio, Select, Space, Spin, Table, Tag,
+  Modal, Progress, Segmented, Select, Space, Spin, Steps, Table, Tag,
   Tooltip, Typography, Upload, message,
 } from "antd";
-
 import {
-  CheckOutlined, CloseOutlined, DeleteOutlined, InboxOutlined,
-  ReloadOutlined, UserOutlined, WarningOutlined,
+  CheckOutlined, CloseOutlined, DeleteOutlined, FileTextOutlined,
+  InboxOutlined, MessageOutlined, ReloadOutlined, UnorderedListOutlined,
+  UserOutlined, WarningOutlined,
 } from "@ant-design/icons";
 import type {
   ExpertProfileData, KnowledgeItem, PendingRuleItem, ReviewQueueItem,
@@ -31,8 +31,16 @@ const DOMAIN_OPTIONS = [
   "供应链管理", "客户服务", "财务管理", "风险管理",
 ];
 
+// Map focus_id prefixes to domain labels for dynamic suggestions
+const FOCUS_ID_DOMAIN_MAP: Record<string, string> = {
+  req: "需求分析", risk: "风险管理", gap: "项目管理",
+  int: "系统集成", qa: "质量保证", sec: "安全合规",
+  ops: "运维管理", pm: "项目管理", data: "数据分析",
+  prod: "产品设计", proc: "供应链管理", cs: "客户服务",
+};
+
 const STRATEGY_OPTIONS = [
-  { value: "gap_based", label: "规则差距", desc: "对比 Review Queue 与现有规则，识别空白" },
+  { value: "gap_based", label: "规则差距", desc: "对比审查队列与现有规则，识别空白" },
   { value: "fuzzy_signal", label: "模糊信号", desc: "澄清模糊印象，转化为清晰规则" },
   { value: "critical_incident", label: "关键事件", desc: "从具体案例提炼可复用规律" },
   { value: "reverse_validation", label: "反向验证", desc: "验证或反驳现有规则的适用边界" },
@@ -45,7 +53,8 @@ const CONFIDENCE_COLOR: Record<string, string> = {
 // ── Types ────────────────────────────────────────────────────────────────────
 
 type ChatMsg = { role: "user" | "assistant" | "status"; content: string };
-type ActiveTab = "queue" | "extract" | "upload" | "pending";
+type ActiveTab = "workbench" | "pending";
+type StartMode = "queue" | "free" | "doc";
 type KiItemState = {
   kid: string;
   item: KnowledgeItem;
@@ -53,207 +62,6 @@ type KiItemState = {
   editedTitle?: string;
   editedContent?: string;
 };
-
-// ── ExpertProfileModal ───────────────────────────────────────────────────────
-
-function ExpertProfileModal({
-  open, profile, onSave, onClose,
-}: {
-  open: boolean;
-  profile: ExpertProfileData | null;
-  onSave: (p: ExpertProfileData) => Promise<void>;
-  onClose: () => void;
-}) {
-  const [domains, setDomains] = useState<string[]>(profile?.domains ?? []);
-  const [background, setBackground] = useState(profile?.background ?? "");
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (open) {
-      setDomains(profile?.domains ?? []);
-      setBackground(profile?.background ?? "");
-    }
-  }, [open, profile]);
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      await onSave({ domains, background });
-      onClose();
-    } catch (e) {
-      message.error(`保存失败: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Modal
-      title="专家背景设置"
-      open={open}
-      onCancel={onClose}
-      onOk={handleSave}
-      okText="保存"
-      cancelText="取消"
-      confirmLoading={saving}
-      width={480}
-    >
-      <div style={{ marginBottom: 16 }}>
-        <Text type="secondary" style={{ fontSize: 13 }}>
-          填写您的专业领域与背景，LLM 将据此优化提问策略。
-        </Text>
-      </div>
-      <div style={{ marginBottom: 12 }}>
-        <div style={{ marginBottom: 6 }}>
-          <Text strong>擅长领域（多选）</Text>
-        </div>
-        <Select
-          mode="multiple"
-          value={domains}
-          onChange={setDomains}
-          options={DOMAIN_OPTIONS.map((d) => ({ value: d, label: d }))}
-          placeholder="选择领域..."
-          style={{ width: "100%" }}
-          allowClear
-        />
-      </div>
-      <div>
-        <div style={{ marginBottom: 6 }}>
-          <Text strong>背景描述</Text>
-        </div>
-        <TextArea
-          value={background}
-          onChange={(e) => setBackground(e.target.value)}
-          placeholder="简要描述您的工作经验与专长（可选）"
-          rows={4}
-          showCount
-          maxLength={500}
-        />
-      </div>
-    </Modal>
-  );
-}
-
-// ── ReviewQueueTab ────────────────────────────────────────────────────────────
-
-function ReviewQueueTab({
-  onStartExtraction,
-}: {
-  onStartExtraction: (item: ReviewQueueItem) => void;
-}) {
-  const [items, setItems] = useState<ReviewQueueItem[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const { items: data } = await getReviewQueue();
-      setItems(data);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { void load(); }, [load]);
-
-  const handleDelete = async (id: string) => {
-    try {
-      await deleteReviewQueueItem(id);
-      setItems((prev) => prev.filter((x) => x.id !== id));
-      message.success("已删除");
-    } catch (e) {
-      message.error(`删除失败: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
-
-  const handleStatus = async (id: string, status: string) => {
-    try {
-      await patchReviewQueueItem(id, { status });
-      setItems((prev) => prev.map((x) => (x.id === id ? { ...x, status } : x)));
-    } catch (e) {
-      message.error(`更新失败: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
-
-  const STATUS_COLOR: Record<string, string> = {
-    pending_review: "default", in_review: "processing",
-    approved: "success", rejected: "error", archived: "warning",
-  };
-  const STATUS_LABEL: Record<string, string> = {
-    pending_review: "待审查", in_review: "审查中",
-    approved: "已批准", rejected: "已拒绝", archived: "已归档",
-  };
-
-  const columns = [
-    { title: "关注点", dataIndex: "focus_id", width: 100, render: (v: string) => <Tag>{v}</Tag> },
-    { title: "知识线索", dataIndex: "suggestion", ellipsis: true },
-    {
-      title: "出现次数", dataIndex: "occurrences", width: 80, align: "center" as const,
-      render: (v: number) => <Badge count={v} color={v >= 3 ? "red" : v >= 2 ? "orange" : "blue"} showZero />,
-    },
-    {
-      title: "状态", dataIndex: "status", width: 90,
-      render: (v: string) => <Tag color={STATUS_COLOR[v] || "default"}>{STATUS_LABEL[v] || v}</Tag>,
-    },
-    {
-      title: "操作", width: 180,
-      render: (_: unknown, row: ReviewQueueItem) => (
-        <Space size={4}>
-          <Button
-            type="link" size="small"
-            onClick={() => onStartExtraction(row)}
-            disabled={row.status === "approved" || row.status === "rejected"}
-          >
-            开始提取
-          </Button>
-          <Button
-            type="link" size="small"
-            onClick={() => handleStatus(row.id, row.status === "archived" ? "pending_review" : "archived")}
-          >
-            {row.status === "archived" ? "恢复" : "归档"}
-          </Button>
-          <Button
-            type="link" size="small" danger
-            icon={<DeleteOutlined />}
-            onClick={() => handleDelete(row.id)}
-          />
-        </Space>
-      ),
-    },
-  ];
-
-  return (
-    <div style={{ padding: "16px 0" }}>
-      <div style={{ display: "flex", alignItems: "center", marginBottom: 12, gap: 8 }}>
-        <Title level={5} style={{ margin: 0 }}>审查队列</Title>
-        <Button icon={<ReloadOutlined />} size="small" onClick={load} loading={loading}>刷新</Button>
-        <Text type="secondary" style={{ marginLeft: "auto", fontSize: 12 }}>
-          按出现次数降序 — 高频线索优先提取
-        </Text>
-      </div>
-      {error && <Alert type="error" message={error} style={{ marginBottom: 12 }} />}
-      {!loading && items.length === 0 ? (
-        <Empty
-          description="暂无队列条目。完成一次项目审查后，LLM 会自动提取泛化知识线索到此队列。"
-          style={{ padding: "40px 0" }}
-        />
-      ) : (
-        <Table
-          dataSource={items}
-          columns={columns}
-          rowKey="id"
-          loading={loading}
-          size="small"
-          pagination={{ pageSize: 20, showSizeChanger: false }}
-        />
-      )}
-    </div>
-  );
-}
 
 // ── InlineKnowledgeCards ─────────────────────────────────────────────────────
 
@@ -272,7 +80,9 @@ function InlineKnowledgeCards({
 
   if (items.length === 0) return null;
 
-  const pendingCount = items.filter((i) => i.localStatus === "pending" || i.localStatus === "edited").length;
+  const pendingCount = items.filter(
+    (i) => i.localStatus === "pending" || i.localStatus === "edited",
+  ).length;
 
   const handleApprove = async (kid: string) => {
     setActionKid(kid);
@@ -363,9 +173,7 @@ function InlineKnowledgeCards({
                 isPending ? (
                   <Space size={4}>
                     <Button
-                      size="small"
-                      type="primary"
-                      icon={<CheckOutlined />}
+                      size="small" type="primary" icon={<CheckOutlined />}
                       loading={actionKid === ki.kid}
                       onClick={() => void handleApprove(ki.kid)}
                     >
@@ -373,9 +181,7 @@ function InlineKnowledgeCards({
                     </Button>
                     <Button size="small" onClick={() => openEdit(ki)}>修改</Button>
                     <Button
-                      size="small"
-                      danger
-                      icon={<CloseOutlined />}
+                      size="small" danger icon={<CloseOutlined />}
                       loading={actionKid === ki.kid}
                       onClick={() => void handleReject(ki.kid)}
                     >
@@ -445,7 +251,7 @@ function ChatArea({ messages, streaming }: { messages: ChatMsg[]; streaming: boo
     }}>
       {messages.length === 0 ? (
         <Text type="secondary" style={{ fontSize: 13 }}>
-          选择策略并输入您的想法或问题，LLM 将开始提问。
+          选择开始方式后，LLM 将主动提问，您只需回答。
         </Text>
       ) : (
         messages.map((msg, i) => (
@@ -484,406 +290,243 @@ function ChatArea({ messages, streaming }: { messages: ChatMsg[]; streaming: boo
   );
 }
 
-// ── ActiveExtractionTab ──────────────────────────────────────────────────────
+// ── ExpertOnboarding ─────────────────────────────────────────────────────────
 
-function ActiveExtractionTab({
+function ExpertOnboarding({
+  queueItems,
+  onComplete,
+}: {
+  queueItems: ReviewQueueItem[];
+  onComplete: (profile: ExpertProfileData) => void;
+}) {
+  const [currentStep, setCurrentStep] = useState(0);
+  const [domains, setDomains] = useState<string[]>([]);
+  const [background, setBackground] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  // Derive domain suggestions from queue focus_ids
+  const suggestedOptions = useMemo(() => {
+    const fromQueue = [...new Set(
+      queueItems.map((x) => {
+        const prefix = x.focus_id.split("-")[0].split("_")[0].toLowerCase();
+        return FOCUS_ID_DOMAIN_MAP[prefix] ?? null;
+      }).filter(Boolean),
+    )] as string[];
+    const merged = [...new Set([...fromQueue, ...DOMAIN_OPTIONS])];
+    return merged.slice(0, 12);
+  }, [queueItems]);
+
+  const handleComplete = async () => {
+    setSaving(true);
+    try {
+      const saved = await putExpertProfile({ domains, background });
+      message.success("专家画像已保存，开始知识提取！");
+      onComplete(saved);
+    } catch (e) {
+      message.error(`保存失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const steps = [
+    {
+      title: "专业领域",
+      description: "选择擅长领域",
+    },
+    {
+      title: "工作背景",
+      description: "简述经验与专长",
+    },
+    {
+      title: "确认画像",
+      description: "开始知识提取",
+    },
+  ];
+
+  return (
+    <div style={{
+      maxWidth: 600, margin: "0 auto", padding: "32px 24px",
+    }}>
+      <div style={{ textAlign: "center", marginBottom: 32 }}>
+        <Title level={3} style={{ margin: 0, color: "#527c5e" }}>欢迎使用知识提取</Title>
+        <Paragraph type="secondary" style={{ marginTop: 8 }}>
+          请花 2 分钟完成专家画像，LLM 将据此优化提问策略，让每次提取更高效。
+        </Paragraph>
+        {queueItems.length > 0 && (
+          <Alert
+            type="info"
+            style={{ marginTop: 12, textAlign: "left" }}
+            message={
+              <span>
+                当前审查队列有 <strong>{queueItems.length}</strong> 条线索，
+                涉及关注点：{[...new Set(queueItems.map((x) => x.focus_id))].slice(0, 5).join("、")}
+                {queueItems.length > 5 ? " 等" : ""}。
+                领域建议已根据队列内容动态生成。
+              </span>
+            }
+          />
+        )}
+      </div>
+
+      <Steps current={currentStep} items={steps} style={{ marginBottom: 32 }} size="small" />
+
+      {currentStep === 0 && (
+        <Card title="您擅长哪些业务领域？" size="small">
+          <Paragraph type="secondary" style={{ fontSize: 13 }}>
+            多选，LLM 将优先在这些领域提问；选择越精准，知识提取越有针对性。
+          </Paragraph>
+          <Select
+            mode="multiple"
+            value={domains}
+            onChange={setDomains}
+            options={suggestedOptions.map((d) => ({ value: d, label: d }))}
+            placeholder="从列表选择，或直接输入自定义领域..."
+            style={{ width: "100%", marginBottom: 16 }}
+            allowClear
+          />
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Button
+              type="primary"
+              onClick={() => setCurrentStep(1)}
+              disabled={domains.length === 0}
+            >
+              下一步
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {currentStep === 1 && (
+        <Card title="工作背景（可选）" size="small">
+          <Paragraph type="secondary" style={{ fontSize: 13 }}>
+            描述您的工作年限、典型项目类型、最常遇到的挑战等，帮助 LLM 更好地理解您的视角。
+          </Paragraph>
+          <TextArea
+            value={background}
+            onChange={(e) => setBackground(e.target.value)}
+            placeholder="例：10 年 IT 项目管理经验，主要负责制造业 MES 系统实施，熟悉固定总价合同风险管理…（可跳过）"
+            rows={5}
+            showCount
+            maxLength={500}
+            style={{ marginBottom: 16 }}
+          />
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <Button onClick={() => setCurrentStep(0)}>上一步</Button>
+            <Button type="primary" onClick={() => setCurrentStep(2)}>
+              下一步
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {currentStep === 2 && (
+        <Card title="确认专家画像" size="small">
+          <div style={{ marginBottom: 16 }}>
+            <Text strong>擅长领域：</Text>
+            <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {domains.map((d) => (
+                <Tag key={d} color="green">{d}</Tag>
+              ))}
+            </div>
+          </div>
+          {background && (
+            <div style={{ marginBottom: 16 }}>
+              <Text strong>工作背景：</Text>
+              <Paragraph style={{ marginTop: 4, fontSize: 13, color: "#555" }}>{background}</Paragraph>
+            </div>
+          )}
+          <Alert
+            type="success"
+            message="画像保存后可随时在右上角「专家画像」按钮中修改。"
+            style={{ marginBottom: 16 }}
+          />
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <Button onClick={() => setCurrentStep(1)}>上一步</Button>
+            <Button type="primary" loading={saving} onClick={() => void handleComplete()}>
+              保存并开始提取
+            </Button>
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ── WorkbenchTab ─────────────────────────────────────────────────────────────
+
+function WorkbenchTab({
   initialRQItem,
   postReviewCtx,
 }: {
   initialRQItem: ReviewQueueItem | null;
   postReviewCtx: { projectId: number; conversationId: number } | null;
 }) {
+  const isPostReview = postReviewCtx != null;
+
+  const [startMode, setStartMode] = useState<StartMode>(
+    isPostReview ? "free" : initialRQItem ? "queue" : "free",
+  );
+
+  // Mode-specific state
   const [strategy, setStrategy] = useState("gap_based");
   const [rqItem, setRqItem] = useState<ReviewQueueItem | null>(initialRQItem);
   const [rqItems, setRqItems] = useState<ReviewQueueItem[]>([]);
+  const [materialId, setMaterialId] = useState<string | null>(null);
+  const [docName, setDocName] = useState("");
+  const [uploading, setUploading] = useState(false);
+
+  // Shared conversation state
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [roundNumber, setRoundNumber] = useState(1);
   const [newKiItems, setNewKiItems] = useState<KiItemState[]>([]);
-  const [coachHint, setCoachHint] = useState<{ whisper: string; expert_type_signal?: string; coverage_gaps?: string[]; current_momentum?: string; flag?: string | null } | null>(null);
+  const [satisfaction, setSatisfaction] = useState<number | null>(null);
+  const [itemComplete, setItemComplete] = useState(false);
+  const [coachHint, setCoachHint] = useState<{
+    whisper: string;
+    expert_type_signal?: string;
+    coverage_gaps?: string[];
+    current_momentum?: string;
+    flag?: string | null;
+  } | null>(null);
+
   const abortRef = useRef<AbortController | null>(null);
-  const isPostReview = postReviewCtx != null;
-
-  useEffect(() => {
-    if (initialRQItem) {
-      setRqItem(initialRQItem);
-      setMessages([]);
-      setRoundNumber(1);
-      setNewKiItems([]);
-      setCoachHint(null);
-    }
-  }, [initialRQItem]);
-
-  useEffect(() => {
-    if (postReviewCtx) {
-      setMessages([{
-        role: "status",
-        content: `已关联审查对话（项目 #${postReviewCtx.projectId}，会话 #${postReviewCtx.conversationId}）。请描述您认为本次审查遗漏了哪些问题，或直接点击「开始提取」。`,
-      }]);
-      setRoundNumber(1);
-    }
-  }, [postReviewCtx]);
 
   useEffect(() => {
     getReviewQueue().then(({ items }) => setRqItems(items)).catch(() => {});
   }, []);
 
+  useEffect(() => {
+    if (initialRQItem) {
+      setRqItem(initialRQItem);
+      setStartMode("queue");
+    }
+  }, [initialRQItem]);
+
+  useEffect(() => {
+    if (isPostReview) {
+      setStartMode("free");
+      setMessages([{
+        role: "status",
+        content: `已关联审查会话（项目 #${postReviewCtx!.projectId}，会话 #${postReviewCtx!.conversationId}）。请描述本次审查的遗漏或补充发现。`,
+      }]);
+    }
+  }, [isPostReview, postReviewCtx]);
+
   const priorMessages = messages
     .filter((m) => m.role !== "status")
     .map((m) => ({ role: m.role as string, content: m.content }));
 
-  const handleSend = async () => {
-    const text = input.trim();
-    if (!text || streaming) return;
-    setInput("");
-    setMessages((prev) => [...prev, { role: "user", content: text }]);
-    setStreaming(true);
-
-    abortRef.current = new AbortController();
-    let assistantText = "";
-
-    try {
-      const streamFn = isPostReview
-        ? (ev: Parameters<typeof postReviewExtractionStream>[3]) =>
-            postReviewExtractionStream(
-              postReviewCtx!.projectId,
-              postReviewCtx!.conversationId,
-              { user_input: text, prior_messages: priorMessages },
-              ev,
-              abortRef.current!.signal,
-            )
-        : (ev: Parameters<typeof postActiveExtractionStream>[1]) =>
-            postActiveExtractionStream(
-              {
-                user_input: text,
-                strategy,
-                review_queue_item_id: rqItem?.id ?? null,
-                prior_messages: priorMessages,
-                round_number: roundNumber,
-              },
-              ev,
-              abortRef.current!.signal,
-            );
-
-      await streamFn(
-        (ev) => {
-          if (ev.type === "status") {
-            setMessages((prev) => [...prev, { role: "status", content: String(ev.msg ?? "") }]);
-          } else if (ev.type === "text") {
-            const chunk = String(ev.text ?? "");
-            assistantText += chunk;
-            setMessages((prev) => {
-              const last = prev[prev.length - 1];
-              if (last?.role === "assistant") {
-                return [...prev.slice(0, -1), { role: "assistant", content: last.content + chunk }];
-              }
-              return [...prev, { role: "assistant", content: chunk }];
-            });
-          } else if (ev.type === "ki") {
-            const kid = String((ev as any).kid ?? "");
-            const item = (ev as any).item as KnowledgeItem | undefined;
-            if (kid && item) {
-              setNewKiItems((prev) =>
-                prev.some((x) => x.kid === kid)
-                  ? prev
-                  : [...prev, { kid, item, localStatus: "pending" }],
-              );
-            }
-          } else if (ev.type === "clarify") {
-            const clarify = (ev as any).clarify as { questions?: string[] } | undefined;
-            if (clarify?.questions?.length) {
-              const qs = clarify.questions.map((q, i) => `${i + 1}. ${q}`).join("\n");
-              setMessages((prev) => [
-                ...prev,
-                { role: "status", content: `💡 建议追问方向：\n${qs}` },
-              ]);
-            }
-          } else if (ev.type === "coach_hint") {
-            const hint = ev as any;
-            if (hint.whisper) {
-              setCoachHint({
-                whisper: String(hint.whisper),
-                expert_type_signal: hint.expert_type_signal ? String(hint.expert_type_signal) : undefined,
-                coverage_gaps: Array.isArray(hint.coverage_gaps) ? hint.coverage_gaps.map(String) : undefined,
-                current_momentum: hint.current_momentum ? String(hint.current_momentum) : undefined,
-                flag: hint.flag ? String(hint.flag) : null,
-              });
-            }
-          } else if (ev.type === "final") {
-            const satisfaction = (ev as any).satisfaction as number | null;
-            const autoAdv = Boolean((ev as any).auto_advance);
-            const kiCount = Number((ev as any).new_ki_count ?? 0);
-            let msg = "";
-            if (kiCount > 0) msg += `✓ 生成 ${kiCount} 条知识条目，已发送到「待批准规则」。`;
-            if (autoAdv) msg += "  满意度已达标。";
-            else if (satisfaction !== null) msg += `  满意度 ${Math.round(satisfaction * 100)}%，可继续追问。`;
-            if (msg) setMessages((prev) => [...prev, { role: "status", content: msg }]);
-            setRoundNumber((n) => n + 1);
-          }
-        },
-      );
-    } catch (e) {
-      if ((e as Error)?.name !== "AbortError") {
-        message.error(`提取失败: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    } finally {
-      setStreaming(false);
-    }
-  };
-
-  const handleStop = () => {
-    abortRef.current?.abort();
-    setStreaming(false);
-  };
-
-  const handleKiUpdate = (kid: string, updates: Partial<KiItemState>) => {
-    setNewKiItems((prev) => prev.map((x) => (x.kid === kid ? { ...x, ...updates } : x)));
-  };
-
-  const handleReset = () => {
-    handleStop();
+  const handleModeChange = (mode: StartMode) => {
+    setStartMode(mode);
     setMessages([]);
     setRoundNumber(1);
     setNewKiItems([]);
+    setSatisfaction(null);
+    setItemComplete(false);
     setCoachHint(null);
-  };
-
-  return (
-    <div style={{ padding: "16px 0" }}>
-      {isPostReview ? (
-        <Card size="small" style={{ marginBottom: 16, background: "#f0f9f2", borderColor: "#b7eb8f" }}>
-          <Text strong style={{ color: "#389e0d" }}>审查后提取模式</Text>
-          <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
-            项目 #{postReviewCtx!.projectId} · 会话 #{postReviewCtx!.conversationId}
-          </Text>
-          <div style={{ marginTop: 4, fontSize: 12, color: "#555" }}>
-            描述本次审查的遗漏或补充发现，LLM 将帮您提炼为可复用规则。
-          </div>
-        </Card>
-      ) : (
-        <div style={{ display: "flex", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
-          {/* Strategy */}
-          <Card size="small" style={{ flex: "0 0 auto", minWidth: 260 }}>
-            <div style={{ marginBottom: 8 }}>
-              <Text strong>提取策略</Text>
-            </div>
-            <Radio.Group
-              value={strategy}
-              onChange={(e) => setStrategy(e.target.value)}
-              style={{ display: "flex", flexDirection: "column", gap: 6 }}
-            >
-              {STRATEGY_OPTIONS.map((opt) => (
-                <Radio key={opt.value} value={opt.value}>
-                  <span style={{ fontWeight: 500 }}>{opt.label}</span>
-                  <br />
-                  <span style={{ fontSize: 11, color: "#888" }}>{opt.desc}</span>
-                </Radio>
-              ))}
-            </Radio.Group>
-          </Card>
-          {/* RQ Item selector */}
-          <Card size="small" style={{ flex: 1, minWidth: 200 }}>
-            <div style={{ marginBottom: 8 }}>
-              <Text strong>关联队列条目（可选）</Text>
-            </div>
-            <Select
-              value={rqItem?.id ?? null}
-              onChange={(val) => setRqItem(rqItems.find((x) => x.id === val) ?? null)}
-              placeholder="选择 Review Queue 条目..."
-              style={{ width: "100%" }}
-              allowClear
-              onClear={() => setRqItem(null)}
-              options={rqItems
-                .filter((x) => x.status !== "rejected" && x.status !== "archived")
-                .map((x) => ({
-                  value: x.id,
-                  label: `[${x.focus_id}] ${x.suggestion.slice(0, 50)}… (×${x.occurrences})`,
-                }))}
-            />
-            {rqItem && (
-              <div style={{ marginTop: 8 }}>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  {rqItem.suggestion}
-                </Text>
-              </div>
-            )}
-            <div style={{ marginTop: 12 }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                第 {roundNumber} 轮 · 满意度 ≥ 85% 或最多 5 轮后自动生成知识条目
-              </Text>
-            </div>
-          </Card>
-        </div>
-      )}
-
-      <ChatArea messages={messages} streaming={streaming} />
-
-      {coachHint && (
-        <div style={{
-          marginTop: 8, padding: "8px 12px",
-          background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 6,
-          display: "flex", alignItems: "flex-start", gap: 8,
-        }}>
-          <div style={{ flex: 1 }}>
-            <Text style={{ fontSize: 11, color: "#52c41a", fontWeight: 600 }}>
-              🎯 教练提示（第 {roundNumber - 1} 轮）
-              {coachHint.expert_type_signal && (
-                <Text type="secondary" style={{ fontSize: 11, fontWeight: 400, marginLeft: 6 }}>
-                  {coachHint.expert_type_signal}
-                </Text>
-              )}
-              {coachHint.current_momentum && coachHint.current_momentum !== "good" && (
-                <Tag
-                  color={coachHint.current_momentum === "stuck" ? "error" : "warning"}
-                  style={{ fontSize: 10, marginLeft: 6 }}
-                >
-                  {coachHint.current_momentum === "stuck" ? "对话停滞" : "势头减弱"}
-                </Tag>
-              )}
-            </Text>
-            <div style={{ marginTop: 2 }}>
-              <Text style={{ fontSize: 12 }}>{coachHint.whisper}</Text>
-            </div>
-            {coachHint.coverage_gaps && coachHint.coverage_gaps.length > 0 && (
-              <div style={{ marginTop: 4 }}>
-                <Text type="secondary" style={{ fontSize: 11 }}>
-                  未覆盖：{coachHint.coverage_gaps.join("、")}
-                </Text>
-              </div>
-            )}
-          </div>
-          <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
-            <Button
-              size="small"
-              type="link"
-              style={{ fontSize: 11, padding: "0 4px" }}
-              onClick={() => {
-                // 将建议填入输入框，操作者可修改后发送
-                setInput(coachHint.whisper);
-                setCoachHint(null);
-              }}
-            >
-              采纳建议
-            </Button>
-            <Button
-              size="small"
-              type="text"
-              style={{ fontSize: 11, padding: "0 4px", color: "#999" }}
-              onClick={() => setCoachHint(null)}
-            >
-              忽略
-            </Button>
-          </div>
-        </div>
-      )}
-
-      <InlineKnowledgeCards items={newKiItems} onUpdate={handleKiUpdate} />
-
-      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-        <TextArea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void handleSend();
-            }
-          }}
-          placeholder={isPostReview ? "描述遗漏的问题或补充发现（Shift+Enter 换行）" : "输入您的想法或回答 LLM 的问题（Shift+Enter 换行）"}
-          autoSize={{ minRows: 2, maxRows: 6 }}
-          disabled={streaming}
-          style={{ flex: 1 }}
-        />
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {isPostReview && !streaming && messages.filter((m) => m.role !== "status").length === 0 ? (
-            <Button
-              type="primary"
-              onClick={() => {
-                setInput("");
-                void (async () => {
-                  setMessages((prev) => [...prev, { role: "user", content: "请开始分析，帮我识别可以提炼的知识" }]);
-                  setStreaming(true);
-                  abortRef.current = new AbortController();
-                  try {
-                    await postReviewExtractionStream(
-                      postReviewCtx!.projectId,
-                      postReviewCtx!.conversationId,
-                      { user_input: "请开始分析，帮我识别可以提炼的知识", prior_messages: [] },
-                      (ev) => {
-                        if (ev.type === "text") {
-                          const chunk = String(ev.text ?? "");
-                          setMessages((prev) => {
-                            const last = prev[prev.length - 1];
-                            if (last?.role === "assistant") {
-                              return [...prev.slice(0, -1), { role: "assistant", content: last.content + chunk }];
-                            }
-                            return [...prev, { role: "assistant", content: chunk }];
-                          });
-                        } else if (ev.type === "ki") {
-                          const kid = String((ev as any).kid ?? "");
-                          const item = (ev as any).item as KnowledgeItem | undefined;
-                          if (kid && item) {
-                            setNewKiItems((prev) =>
-                              prev.some((x) => x.kid === kid)
-                                ? prev
-                                : [...prev, { kid, item, localStatus: "pending" }],
-                            );
-                          }
-                        } else if (ev.type === "final") {
-                          const kiCount = Number((ev as any).new_ki_count ?? 0);
-                          if (kiCount > 0) setMessages((prev) => [...prev, { role: "status", content: `✓ 生成 ${kiCount} 条知识条目，请在下方审批。` }]);
-                          setRoundNumber((n) => n + 1);
-                        }
-                      },
-                      abortRef.current.signal,
-                    );
-                  } catch (e) {
-                    if ((e as Error)?.name !== "AbortError") {
-                      message.error(`提取失败: ${e instanceof Error ? e.message : String(e)}`);
-                    }
-                  } finally {
-                    setStreaming(false);
-                  }
-                })();
-              }}
-            >
-              开始提取
-            </Button>
-          ) : (
-            <Button
-              type="primary"
-              onClick={handleSend}
-              disabled={!input.trim() || streaming}
-            >
-              发送
-            </Button>
-          )}
-          {streaming ? (
-            <Button danger onClick={handleStop}>停止</Button>
-          ) : (
-            <Button onClick={handleReset} disabled={messages.length === 0}>清空</Button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── DocUploadTab ─────────────────────────────────────────────────────────────
-
-function DocUploadTab() {
-  const [materialId, setMaterialId] = useState<string | null>(null);
-  const [docName, setDocName] = useState<string>("");
-  const [uploading, setUploading] = useState(false);
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
-  const [input, setInput] = useState("");
-  const [streaming, setStreaming] = useState(false);
-  const [newKiItems, setNewKiItems] = useState<KiItemState[]>([]);
-  const abortRef = useRef<AbortController | null>(null);
-
-  const handleKiUpdate = (kid: string, updates: Partial<KiItemState>) => {
-    setNewKiItems((prev) => prev.map((x) => (x.kid === kid ? { ...x, ...updates } : x)));
   };
 
   const handleUpload = async (file: File) => {
@@ -900,117 +543,433 @@ function DocUploadTab() {
     } finally {
       setUploading(false);
     }
-    return false; // prevent antd default upload
   };
 
-  const sendText = async (text: string) => {
-    if (!materialId || streaming || !text.trim()) return;
-    setInput("");
+  const handleSend = async (overrideText?: string) => {
+    const text = (overrideText ?? input).trim();
+    if (!text || streaming) return;
+    if (startMode === "doc" && !materialId) {
+      message.warning("请先上传文档");
+      return;
+    }
+    if (overrideText === undefined) setInput("");
     setMessages((prev) => [...prev, { role: "user", content: text }]);
     setStreaming(true);
+    setItemComplete(false);
     abortRef.current = new AbortController();
-    const currentPrior = messages
-      .filter((m) => m.role !== "status")
-      .map((m) => ({ role: m.role as string, content: m.content }));
+    let assistantText = "";
+
+    const handleEvent = (ev: Record<string, unknown>) => {
+      if (ev.type === "status") {
+        setMessages((prev) => [...prev, { role: "status", content: String(ev.msg ?? "") }]);
+      } else if (ev.type === "text") {
+        const chunk = String(ev.text ?? "");
+        assistantText += chunk;
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last?.role === "assistant") {
+            return [...prev.slice(0, -1), { role: "assistant", content: last.content + chunk }];
+          }
+          return [...prev, { role: "assistant", content: chunk }];
+        });
+      } else if (ev.type === "ki") {
+        const kid = String((ev as any).kid ?? "");
+        const item = (ev as any).item as KnowledgeItem | undefined;
+        if (kid && item) {
+          setNewKiItems((prev) =>
+            prev.some((x) => x.kid === kid)
+              ? prev
+              : [...prev, { kid, item, localStatus: "pending" }],
+          );
+        }
+      } else if (ev.type === "clarify") {
+        const clarify = (ev as any).clarify as { questions?: string[] } | undefined;
+        if (clarify?.questions?.length) {
+          const qs = clarify.questions.map((q: string, i: number) => `${i + 1}. ${q}`).join("\n");
+          setMessages((prev) => [...prev, { role: "status", content: `💡 建议追问方向：\n${qs}` }]);
+        }
+      } else if (ev.type === "coach_hint") {
+        const hint = ev as any;
+        if (hint.whisper) {
+          setCoachHint({
+            whisper: String(hint.whisper),
+            expert_type_signal: hint.expert_type_signal ? String(hint.expert_type_signal) : undefined,
+            coverage_gaps: Array.isArray(hint.coverage_gaps) ? hint.coverage_gaps.map(String) : undefined,
+            current_momentum: hint.current_momentum ? String(hint.current_momentum) : undefined,
+            flag: hint.flag ? String(hint.flag) : null,
+          });
+        }
+      } else if (ev.type === "final") {
+        const sat = (ev as any).satisfaction as number | null;
+        const autoAdv = Boolean((ev as any).auto_advance);
+        const kiCount = Number((ev as any).new_ki_count ?? 0);
+        if (sat !== null) setSatisfaction(sat);
+        if (autoAdv) setItemComplete(true);
+        let msg = "";
+        if (kiCount > 0) msg += `✓ 生成 ${kiCount} 条知识条目，请在下方审批。`;
+        if (autoAdv) msg += "  本条知识已完整提炼。";
+        else if (sat !== null && sat < 0.85) msg += `  当前满意度 ${Math.round(sat * 100)}%，可继续追问。`;
+        if (msg) setMessages((prev) => [...prev, { role: "status", content: msg }]);
+        setRoundNumber((n) => n + 1);
+      }
+    };
 
     try {
-      await postDocExtractionStream(
-        { material_id: materialId, user_input: text, strategy: "gap_based", prior_messages: currentPrior },
-        (ev) => {
-          if (ev.type === "status") {
-            setMessages((prev) => [...prev, { role: "status", content: String(ev.msg ?? "") }]);
-          } else if (ev.type === "text") {
-            const chunk = String(ev.text ?? "");
-            setMessages((prev) => {
-              const last = prev[prev.length - 1];
-              if (last?.role === "assistant") {
-                return [...prev.slice(0, -1), { role: "assistant", content: last.content + chunk }];
-              }
-              return [...prev, { role: "assistant", content: chunk }];
-            });
-          } else if (ev.type === "ki") {
-            const kid = String((ev as any).kid ?? "");
-            const item = (ev as any).item as KnowledgeItem | undefined;
-            if (kid && item) {
-              setNewKiItems((prev) =>
-                prev.some((x) => x.kid === kid)
-                  ? prev
-                  : [...prev, { kid, item, localStatus: "pending" }],
-              );
-            }
-          } else if (ev.type === "final") {
-            const kiCount = Number((ev as any).new_ki_count ?? 0);
-            if (kiCount > 0) {
-              setMessages((prev) => [
-                ...prev,
-                { role: "status", content: `✓ 生成 ${kiCount} 条知识条目，请在下方审批。` },
-              ]);
-            }
-          }
-        },
-        abortRef.current.signal,
-      );
+      if (isPostReview) {
+        await postReviewExtractionStream(
+          postReviewCtx!.projectId,
+          postReviewCtx!.conversationId,
+          { user_input: text, prior_messages: priorMessages },
+          handleEvent as any,
+          abortRef.current.signal,
+        );
+      } else if (startMode === "doc") {
+        await postDocExtractionStream(
+          { material_id: materialId!, user_input: text, strategy: "gap_based", prior_messages: priorMessages },
+          handleEvent as any,
+          abortRef.current.signal,
+        );
+      } else {
+        await postActiveExtractionStream(
+          {
+            user_input: text,
+            strategy,
+            review_queue_item_id: startMode === "queue" ? (rqItem?.id ?? null) : null,
+            prior_messages: priorMessages,
+            round_number: roundNumber,
+          },
+          handleEvent as any,
+          abortRef.current.signal,
+        );
+      }
     } catch (e) {
       if ((e as Error)?.name !== "AbortError") {
         message.error(`提取失败: ${e instanceof Error ? e.message : String(e)}`);
       }
     } finally {
       setStreaming(false);
+      abortRef.current = null;
     }
   };
 
-  const handleSend = () => sendText(input.trim());
+  const handleStop = () => {
+    abortRef.current?.abort();
+    setStreaming(false);
+  };
+
+  const handleReset = () => {
+    handleStop();
+    setMessages([]);
+    setRoundNumber(1);
+    setNewKiItems([]);
+    setSatisfaction(null);
+    setItemComplete(false);
+    setCoachHint(null);
+  };
+
+  const handleKiUpdate = (kid: string, updates: Partial<KiItemState>) => {
+    setNewKiItems((prev) => prev.map((x) => (x.kid === kid ? { ...x, ...updates } : x)));
+  };
+
+  const canSend = input.trim().length > 0 && !streaming
+    && (startMode !== "doc" || materialId != null);
 
   return (
     <div style={{ padding: "16px 0" }}>
-      <Upload.Dragger
-        accept=".md,.txt,.docx,.pdf"
-        beforeUpload={(file) => { void handleUpload(file); return false; }}
-        showUploadList={false}
-        disabled={uploading}
-        style={{ marginBottom: 16 }}
-      >
-        <p className="ant-upload-drag-icon">
-          {uploading ? <Spin /> : <InboxOutlined style={{ fontSize: 32, color: "#527c5e" }} />}
-        </p>
-        <p>拖拽或点击上传规则文档（.md / .txt / .docx / .pdf）</p>
-        <p style={{ fontSize: 12, color: "#888" }}>上传后 LLM 将基于文档内容做知识澄清</p>
-      </Upload.Dragger>
+      {/* Post-review context banner */}
+      {isPostReview && (
+        <Card size="small" style={{ marginBottom: 16, background: "#f0f9f2", borderColor: "#b7eb8f" }}>
+          <Text strong style={{ color: "#389e0d" }}>审查后提取模式</Text>
+          <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+            项目 #{postReviewCtx!.projectId} · 会话 #{postReviewCtx!.conversationId}
+          </Text>
+          <div style={{ marginTop: 4, fontSize: 12, color: "#555" }}>
+            描述本次审查的遗漏或补充发现，LLM 将帮您提炼为可复用规则。
+          </div>
+        </Card>
+      )}
 
-      {materialId && (
-        <>
-          <Alert
-            type="info"
-            message={`已加载文档：${docName}（material_id: ${materialId}）`}
-            style={{ marginBottom: 12 }}
+      {/* Mode selector */}
+      {!isPostReview && (
+        <div style={{ marginBottom: 16 }}>
+          <Segmented
+            value={startMode}
+            onChange={(v) => handleModeChange(v as StartMode)}
+            options={[
+              { label: "从审查队列", value: "queue", icon: <UnorderedListOutlined /> },
+              { label: "自由提取", value: "free", icon: <MessageOutlined /> },
+              { label: "文档澄清", value: "doc", icon: <FileTextOutlined /> },
+            ]}
           />
+        </div>
+      )}
+
+      {/* Mode-specific config */}
+      {!isPostReview && (
+        <div style={{ marginBottom: 16 }}>
+          {startMode === "queue" && (
+            <Card size="small">
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
+                <div style={{ flex: 1, minWidth: 220 }}>
+                  <Text strong style={{ fontSize: 13 }}>关联审查队列条目</Text>
+                  <Select
+                    value={rqItem?.id ?? null}
+                    onChange={(val) => setRqItem(rqItems.find((x) => x.id === val) ?? null)}
+                    placeholder="选择一条知识线索开始…"
+                    style={{ width: "100%", marginTop: 6 }}
+                    allowClear
+                    onClear={() => setRqItem(null)}
+                    options={rqItems
+                      .filter((x) => x.status !== "rejected" && x.status !== "archived")
+                      .map((x) => ({
+                        value: x.id,
+                        label: `[${x.focus_id}] ${x.suggestion.slice(0, 45)}… (×${x.occurrences})`,
+                      }))}
+                  />
+                  {rqItem && (
+                    <div style={{ marginTop: 8, padding: "6px 8px", background: "#f5f5f5", borderRadius: 4, fontSize: 12 }}>
+                      <Text type="secondary">{rqItem.suggestion}</Text>
+                    </div>
+                  )}
+                </div>
+                <div style={{ minWidth: 180 }}>
+                  <Text strong style={{ fontSize: 13 }}>提取策略</Text>
+                  <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 4 }}>
+                    {STRATEGY_OPTIONS.slice(0, 2).map((opt) => (
+                      <label key={opt.value} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 13 }}>
+                        <input
+                          type="radio"
+                          name="strategy-q"
+                          value={opt.value}
+                          checked={strategy === opt.value}
+                          onChange={() => setStrategy(opt.value)}
+                        />
+                        <span>{opt.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div style={{ marginTop: 8, fontSize: 12, color: "#999" }}>
+                第 {roundNumber} 轮 · 满意度 ≥ 85% 后自动生成知识条目
+              </div>
+            </Card>
+          )}
+
+          {startMode === "free" && (
+            <Card size="small">
+              <Text strong style={{ fontSize: 13 }}>提取策略</Text>
+              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                {STRATEGY_OPTIONS.map((opt) => (
+                  <label key={opt.value} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                    <input
+                      type="radio"
+                      name="strategy-f"
+                      value={opt.value}
+                      checked={strategy === opt.value}
+                      onChange={() => setStrategy(opt.value)}
+                    />
+                    <span style={{ fontWeight: 500, fontSize: 13 }}>{opt.label}</span>
+                    <span style={{ fontSize: 11, color: "#888" }}>{opt.desc}</span>
+                  </label>
+                ))}
+              </div>
+              <div style={{ marginTop: 8, fontSize: 12, color: "#999" }}>
+                第 {roundNumber} 轮 · 满意度 ≥ 85% 后自动生成知识条目
+              </div>
+            </Card>
+          )}
+
+          {startMode === "doc" && !materialId && (
+            <Upload.Dragger
+              accept=".md,.txt,.docx,.pdf"
+              beforeUpload={(file) => { void handleUpload(file); return false; }}
+              showUploadList={false}
+              disabled={uploading}
+            >
+              <p className="ant-upload-drag-icon">
+                {uploading ? <Spin /> : <InboxOutlined style={{ fontSize: 32, color: "#527c5e" }} />}
+              </p>
+              <p>拖拽或点击上传规则文档（.md / .txt / .docx / .pdf）</p>
+              <p style={{ fontSize: 12, color: "#888" }}>上传后 LLM 将基于文档内容做知识澄清</p>
+            </Upload.Dragger>
+          )}
+
+          {startMode === "doc" && materialId && (
+            <Alert
+              type="info"
+              message={
+                <span>
+                  已加载文档：<strong>{docName}</strong>
+                  <Button
+                    type="link"
+                    size="small"
+                    style={{ fontSize: 12, padding: "0 4px" }}
+                    onClick={() => { setMaterialId(null); setDocName(""); handleReset(); }}
+                  >
+                    更换文档
+                  </Button>
+                </span>
+              }
+            />
+          )}
+        </div>
+      )}
+
+      {/* Chat area (shown when doc is uploaded or other modes) */}
+      {(startMode !== "doc" || materialId || isPostReview) && (
+        <>
           <ChatArea messages={messages} streaming={streaming} />
+
+          {/* Satisfaction progress bar */}
+          {satisfaction !== null && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+                <Text style={{ fontSize: 12, color: "#888" }}>满意度进度</Text>
+                <Text style={{ fontSize: 12, fontWeight: 600, color: satisfaction >= 0.85 ? "#52c41a" : "#fa8c16" }}>
+                  {Math.round(satisfaction * 100)}%
+                </Text>
+                {satisfaction >= 0.85 && (
+                  <Tag color="success" style={{ fontSize: 11 }}>已达标</Tag>
+                )}
+              </div>
+              <Progress
+                percent={Math.round(satisfaction * 100)}
+                size="small"
+                strokeColor={satisfaction >= 0.85 ? "#52c41a" : "#fa8c16"}
+                showInfo={false}
+              />
+            </div>
+          )}
+
+          {/* Item completion notification */}
+          {itemComplete && (
+            <Alert
+              type="success"
+              style={{ marginTop: 8, fontSize: 13 }}
+              message="本条知识已完整提炼 ✓ 可在下方审批，然后继续下一条或结束本次会话。"
+              closable
+              onClose={() => setItemComplete(false)}
+            />
+          )}
+
+          {/* Coach hint banner */}
+          {coachHint && (
+            <div style={{
+              marginTop: 8, padding: "8px 12px",
+              background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 6,
+              display: "flex", alignItems: "flex-start", gap: 8,
+            }}>
+              <div style={{ flex: 1 }}>
+                <Text style={{ fontSize: 11, color: "#52c41a", fontWeight: 600 }}>
+                  🎯 场边教练提示（第 {roundNumber - 1} 轮）
+                  {coachHint.expert_type_signal && (
+                    <Text type="secondary" style={{ fontSize: 11, fontWeight: 400, marginLeft: 6 }}>
+                      {coachHint.expert_type_signal}
+                    </Text>
+                  )}
+                  {coachHint.current_momentum && coachHint.current_momentum !== "good" && (
+                    <Tag
+                      color={coachHint.current_momentum === "stuck" ? "error" : "warning"}
+                      style={{ fontSize: 10, marginLeft: 6 }}
+                    >
+                      {coachHint.current_momentum === "stuck" ? "对话停滞" : "势头减弱"}
+                    </Tag>
+                  )}
+                  {coachHint.flag && (
+                    <Tag color="warning" style={{ fontSize: 10, marginLeft: 6 }}>⚠ {coachHint.flag}</Tag>
+                  )}
+                </Text>
+                <div style={{ marginTop: 2 }}>
+                  <Text style={{ fontSize: 12 }}>{coachHint.whisper}</Text>
+                </div>
+                {coachHint.coverage_gaps && coachHint.coverage_gaps.length > 0 && (
+                  <div style={{ marginTop: 4 }}>
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      未覆盖：{coachHint.coverage_gaps.join("、")}
+                    </Text>
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                <Button
+                  size="small"
+                  type="link"
+                  style={{ fontSize: 11, padding: "0 4px" }}
+                  onClick={() => { setInput(coachHint.whisper); setCoachHint(null); }}
+                >
+                  采纳建议
+                </Button>
+                <Button
+                  size="small"
+                  type="text"
+                  style={{ fontSize: 11, padding: "0 4px", color: "#999" }}
+                  onClick={() => setCoachHint(null)}
+                >
+                  忽略
+                </Button>
+              </div>
+            </div>
+          )}
+
           <InlineKnowledgeCards items={newKiItems} onUpdate={handleKiUpdate} />
+
+          {/* Input area */}
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
             <TextArea
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void handleSend(); }
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void handleSend();
+                }
               }}
-              placeholder="输入问题或直接发送「开始提取」（Shift+Enter 换行）"
+              placeholder={
+                isPostReview
+                  ? "描述遗漏的问题或补充发现（Shift+Enter 换行）"
+                  : startMode === "doc"
+                    ? "输入问题或直接发送「开始提取」（Shift+Enter 换行）"
+                    : "输入您的想法或回答 LLM 的问题（Shift+Enter 换行）"
+              }
               autoSize={{ minRows: 2, maxRows: 6 }}
-              disabled={streaming || !materialId}
+              disabled={streaming}
               style={{ flex: 1 }}
             />
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <Button type="primary" onClick={handleSend} disabled={!input.trim() || streaming}>发送</Button>
-              {streaming && <Button danger onClick={() => { abortRef.current?.abort(); setStreaming(false); }}>停止</Button>}
+              {/* Auto-start button for post-review or doc mode with no messages yet */}
+              {!streaming && messages.filter((m) => m.role !== "status").length === 0
+                && (isPostReview || startMode === "doc") ? (
+                <Button
+                  type="primary"
+                  onClick={() => void handleSend(
+                    isPostReview
+                      ? "请开始分析，帮我识别可以提炼的知识"
+                      : "请开始分析文档并提取知识",
+                  )}
+                >
+                  {isPostReview ? "开始提取" : "一键提取"}
+                </Button>
+              ) : (
+                <Button
+                  type="primary"
+                  onClick={() => void handleSend()}
+                  disabled={!canSend}
+                >
+                  发送
+                </Button>
+              )}
+              {streaming ? (
+                <Button danger onClick={handleStop}>停止</Button>
+              ) : (
+                <Button
+                  onClick={handleReset}
+                  disabled={messages.length === 0 && newKiItems.length === 0}
+                >
+                  清空
+                </Button>
+              )}
             </div>
-          </div>
-          <div style={{ marginTop: 8 }}>
-            <Button
-              size="small"
-              onClick={() => void sendText("请开始分析文档并提取知识")}
-              disabled={streaming || !materialId}
-            >
-              一键开始提取
-            </Button>
           </div>
         </>
       )}
@@ -1091,7 +1050,9 @@ function PendingRulesTab() {
       ellipsis: true,
       render: (v: string) => (
         <Tooltip title={<div style={{ maxWidth: 360, whiteSpace: "pre-wrap" }}>{v}</div>} placement="left">
-          <span style={{ cursor: "pointer", color: "#666" }}>{v.slice(0, 80)}{v.length > 80 ? "…" : ""}</span>
+          <span style={{ cursor: "pointer", color: "#666" }}>
+            {v.slice(0, 80)}{v.length > 80 ? "…" : ""}
+          </span>
         </Tooltip>
       ),
     },
@@ -1124,7 +1085,7 @@ function PendingRulesTab() {
           <Button
             type="primary" size="small" icon={<CheckOutlined />}
             loading={actionId === row.id}
-            onClick={() => handleApprove(row.id)}
+            onClick={() => void handleApprove(row.id)}
           >
             批准
           </Button>
@@ -1151,7 +1112,7 @@ function PendingRulesTab() {
       {error && <Alert type="error" message={error} style={{ marginBottom: 12 }} />}
       {!loading && items.length === 0 ? (
         <Empty
-          description="暂无待批准规则。通过主动提取或文档上传生成知识条目后，它们会出现在此处。"
+          description="暂无待批准规则。通过提取工作台生成知识条目后，它们会出现在此处。"
           style={{ padding: "40px 0" }}
         />
       ) : (
@@ -1183,7 +1144,7 @@ function PendingRulesTab() {
         title="拒绝原因"
         open={!!rejectTarget}
         onCancel={() => { setRejectTarget(null); setRejectReason(""); }}
-        onOk={handleReject}
+        onOk={() => void handleReject()}
         okText="确认拒绝"
         okButtonProps={{ danger: true }}
         cancelText="取消"
@@ -1202,74 +1163,113 @@ function PendingRulesTab() {
 // ── ExtractionPage (main) ─────────────────────────────────────────────────────
 
 export default function ExtractionPage() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>("queue");
+  const [activeTab, setActiveTab] = useState<ActiveTab>("workbench");
   const [profile, setProfile] = useState<ExpertProfileData | null>(null);
   const [profileModalOpen, setProfileModalOpen] = useState(false);
-  const [rqItemForExtraction, setRqItemForExtraction] = useState<ReviewQueueItem | null>(null);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(true);
+  const [initialRQItem, setInitialRQItem] = useState<ReviewQueueItem | null>(null);
   const [postReviewCtx, setPostReviewCtx] = useState<{ projectId: number; conversationId: number } | null>(null);
+  const [queueItemsForOnboarding, setQueueItemsForOnboarding] = useState<ReviewQueueItem[]>([]);
+
+  // Profile modal edit state
+  const [editDomains, setEditDomains] = useState<string[]>([]);
+  const [editBackground, setEditBackground] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
 
   useEffect(() => {
-    // Check if we were opened from "提取知识" on review results page
-    const raw = window.sessionStorage.getItem("aika_post_review_ctx");
-    if (raw) {
+    // Check sessionStorage for post-review context
+    const rawCtx = window.sessionStorage.getItem("aika_post_review_ctx");
+    if (rawCtx) {
       try {
-        const ctx = JSON.parse(raw) as { projectId: number; conversationId: number };
+        const ctx = JSON.parse(rawCtx) as { projectId: number; conversationId: number };
         window.sessionStorage.removeItem("aika_post_review_ctx");
         setPostReviewCtx(ctx);
-        setActiveTab("extract");
-      } catch {
-        // ignore malformed
-      }
+      } catch { /* ignore */ }
+    }
+
+    // Check sessionStorage for initial RQ item (from review queue drawer)
+    const rawRQ = window.sessionStorage.getItem("aika_initial_rq_item");
+    if (rawRQ) {
+      try {
+        const item = JSON.parse(rawRQ) as ReviewQueueItem;
+        window.sessionStorage.removeItem("aika_initial_rq_item");
+        setInitialRQItem(item);
+      } catch { /* ignore */ }
     }
   }, []);
 
   useEffect(() => {
-    getExpertProfile()
-      .then((p) => {
+    setProfileLoading(true);
+    Promise.all([
+      getExpertProfile().catch(() => null),
+      getReviewQueue().catch(() => ({ items: [] })),
+    ]).then(([p, q]) => {
+      if (!p || (!p.domains.length && !p.background)) {
+        // No profile — show onboarding
+        setQueueItemsForOnboarding((q as { items: ReviewQueueItem[] }).items);
+        setShowOnboarding(true);
+      } else {
         setProfile(p);
-        if (!p.domains.length && !p.background) setProfileModalOpen(true);
-      })
-      .catch(() => setProfileModalOpen(true));
+      }
+    }).finally(() => setProfileLoading(false));
   }, []);
 
-  const handleSaveProfile = async (data: ExpertProfileData) => {
-    const saved = await putExpertProfile(data);
-    setProfile(saved);
-    message.success("专家背景已保存");
+  const handleOnboardingComplete = (p: ExpertProfileData) => {
+    setProfile(p);
+    setShowOnboarding(false);
   };
 
-  const handleStartExtraction = (item: ReviewQueueItem) => {
-    setRqItemForExtraction(item);
-    setActiveTab("extract");
+  const openProfileEdit = () => {
+    setEditDomains(profile?.domains ?? []);
+    setEditBackground(profile?.background ?? "");
+    setProfileModalOpen(true);
   };
 
-  const tabItems = [
-    {
-      key: "queue",
-      label: `审查队列`,
-      children: <ReviewQueueTab onStartExtraction={handleStartExtraction} />,
-    },
-    {
-      key: "extract",
-      label: "主动提取",
-      children: (
-        <ActiveExtractionTab
-          initialRQItem={activeTab === "extract" ? rqItemForExtraction : null}
-          postReviewCtx={activeTab === "extract" ? postReviewCtx : null}
-        />
-      ),
-    },
-    {
-      key: "upload",
-      label: "文档上传",
-      children: <DocUploadTab />,
-    },
-    {
-      key: "pending",
-      label: "待批准规则",
-      children: <PendingRulesTab />,
-    },
+  const handleSaveProfile = async () => {
+    setEditSaving(true);
+    try {
+      const saved = await putExpertProfile({ domains: editDomains, background: editBackground });
+      setProfile(saved);
+      setProfileModalOpen(false);
+      message.success("专家画像已更新");
+    } catch (e) {
+      message.error(`保存失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const tabItems: { key: ActiveTab; label: string }[] = [
+    { key: "workbench", label: "提取工作台" },
+    { key: "pending", label: "待批准规则" },
   ];
+
+  if (profileLoading) {
+    return (
+      <div className="extraction-page">
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 300 }}>
+          <Spin tip="加载中…" />
+        </div>
+      </div>
+    );
+  }
+
+  if (showOnboarding) {
+    return (
+      <div className="extraction-page">
+        <div className="extraction-page-header">
+          <Title level={4} style={{ margin: 0 }}>知识提取</Title>
+        </div>
+        <div style={{ overflowY: "auto", flex: 1 }}>
+          <ExpertOnboarding
+            queueItems={queueItemsForOnboarding}
+            onComplete={handleOnboardingComplete}
+          />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="extraction-page">
@@ -1284,30 +1284,20 @@ export default function ExtractionPage() {
           <Button
             icon={<UserOutlined />}
             size="small"
-            onClick={() => setProfileModalOpen(true)}
+            onClick={openProfileEdit}
           >
-            专家背景
+            专家画像
           </Button>
         </div>
       </div>
 
-      <div
-        style={{
-          borderBottom: "1px solid var(--color-border, #e0e0d8)",
-          marginBottom: 0,
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            gap: 0,
-            borderBottom: "none",
-          }}
-        >
+      {/* Tab bar */}
+      <div style={{ borderBottom: "1px solid var(--color-border, #e0e0d8)", marginBottom: 0 }}>
+        <div style={{ display: "flex", gap: 0 }}>
           {tabItems.map((tab) => (
             <button
               key={tab.key}
-              onClick={() => setActiveTab(tab.key as ActiveTab)}
+              onClick={() => setActiveTab(tab.key)}
               style={{
                 padding: "8px 20px",
                 border: "none",
@@ -1326,16 +1316,55 @@ export default function ExtractionPage() {
         </div>
       </div>
 
-      <div style={{ padding: "0 4px" }}>
-        {tabItems.find((t) => t.key === activeTab)?.children}
+      {/* Tab content */}
+      <div style={{ overflowY: "auto", flex: 1 }}>
+        <div style={{ padding: "0 20px", display: activeTab === "workbench" ? "block" : "none" }}>
+          <WorkbenchTab
+            initialRQItem={activeTab === "workbench" ? initialRQItem : null}
+            postReviewCtx={activeTab === "workbench" ? postReviewCtx : null}
+          />
+        </div>
+        <div style={{ padding: "0 20px", display: activeTab === "pending" ? "block" : "none" }}>
+          <PendingRulesTab />
+        </div>
       </div>
 
-      <ExpertProfileModal
+      {/* Profile edit modal */}
+      <Modal
+        title="编辑专家画像"
         open={profileModalOpen}
-        profile={profile}
-        onSave={handleSaveProfile}
-        onClose={() => setProfileModalOpen(false)}
-      />
+        onCancel={() => setProfileModalOpen(false)}
+        onOk={() => void handleSaveProfile()}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={editSaving}
+        width={480}
+      >
+        <div style={{ marginBottom: 16 }}>
+          <Text strong>擅长领域（多选）</Text>
+          <Select
+            mode="multiple"
+            value={editDomains}
+            onChange={setEditDomains}
+            options={DOMAIN_OPTIONS.map((d) => ({ value: d, label: d }))}
+            placeholder="选择领域…"
+            style={{ width: "100%", marginTop: 6 }}
+            allowClear
+          />
+        </div>
+        <div>
+          <Text strong>背景描述</Text>
+          <TextArea
+            value={editBackground}
+            onChange={(e) => setEditBackground(e.target.value)}
+            placeholder="简要描述您的工作经验与专长（可选）"
+            rows={4}
+            showCount
+            maxLength={500}
+            style={{ marginTop: 6 }}
+          />
+        </div>
+      </Modal>
     </div>
   );
 }
