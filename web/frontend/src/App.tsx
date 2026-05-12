@@ -595,15 +595,9 @@ export default function App() {
         setCurrentUser(user);
         // Pre-load existing profile if any
         try {
-          const prof = await getExpertProfile();
-          if (prof) {
-            setProfileDraft({
-              industries: prof.industries,
-              production_modes: prof.production_modes,
-              functional_modules: prof.functional_modules,
-              focus_areas: prof.focus_areas,
-            });
-          }
+          const prof = await authMe();
+          // Profile data (if any) will be loaded from DB-based profile endpoint
+          void prof; // profile_completed is part of AuthUser already
         } catch { /* profile not yet saved */ }
         if (!user.profile_completed) setProfileModalOpen(true);
       } catch {
@@ -960,7 +954,7 @@ export default function App() {
   const handleSaveProfile = async () => {
     setProfileSaving(true);
     try {
-      await putExpertProfile(profileDraft);
+      await apiJson("/api/v1/auth/expert-profile", { method: "PUT", body: JSON.stringify(profileDraft) });
       setCurrentUser((u) => u ? { ...u, profile_completed: true } : u);
       setProfileModalOpen(false);
       void message.success("画像已保存");
@@ -4356,6 +4350,22 @@ export default function App() {
       {appMode === "extraction" ? (
         <div className="extraction-overlay">
           <ExtractionPage />
+        </div>
+      ) : null}
+
+      {/* ── Expert Profile Modal ── */}
+      <Modal
+        open={profileModalOpen}
+        title="完善专家画像（约 3 分钟）"
+        onOk={() => void handleSaveProfile()}
+        onCancel={() => setProfileModalOpen(false)}
+        okText="保存画像"
+        cancelText="稍后再说"
+        confirmLoading={profileSaving}
+        width={600}
+      >
+        <div style={{ marginBottom: 8, color: "#888", fontSize: 13 }}>
+          画像完成后 AI 将基于你的背景提问，不会问低质量的通用问题。
         </div>
         <Form layout="vertical">
           <Form.Item label="你主要负责或擅长的行业（多选）">
