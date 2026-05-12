@@ -370,116 +370,71 @@ export function waitConvertStream(
   });
 }
 
-// ── Auth ──────────────────────────────────────────────────────
+// ── Extraction module ──────────────────────────────────────────────────────
 
-export type AuthUser = {
-  user_id: number;
-  username: string;
-  display_name: string;
-  profile_completed: boolean;
+export type ExpertProfileData = { domains: string[]; background: string; updated_at?: string };
+export type ReviewQueueItem = {
+  id: string; focus_id: string; suggestion: string; status: string;
+  occurrences: number; source_role: string; source_type: string;
+  project_id?: string | null; conversation_id?: number | null; created_at: string;
+};
+export type PendingRuleItem = {
+  id: string; extraction_focus_id: string; title: string; content: string;
+  confidence: string; status: string; source_role: string; source_type: string;
+  has_conflicts: boolean; conflict_with: Array<{focus_id: string; reason: string}>;
+  scope_note?: string; created_at: string;
 };
 
-export async function authLogin(username: string, password: string): Promise<AuthUser> {
-  return apiJson("/api/v1/auth/login", {
-    method: "POST",
-    body: JSON.stringify({ username, password }),
-  });
-}
-
-export async function authLogout(): Promise<void> {
-  await apiJson("/api/v1/auth/logout", { method: "POST" });
-}
-
-export async function authMe(): Promise<AuthUser> {
-  return apiJson("/api/v1/auth/me");
-}
-
-// ── Expert Profile ────────────────────────────────────────────
-
-export type ExpertProfile = {
-  industries: string[];
-  production_modes: string[];
-  functional_modules: string[];
-  focus_areas: string[];
-  profile_completed: boolean;
-};
-
-export async function getExpertProfile(): Promise<ExpertProfile | null> {
+export async function getExpertProfile(): Promise<ExpertProfileData> {
   return apiJson("/api/v1/expert-profile");
 }
-
-export async function putExpertProfile(profile: Omit<ExpertProfile, "profile_completed">): Promise<{ profile_completed: boolean }> {
-  return apiJson("/api/v1/expert-profile", {
-    method: "PUT",
-    body: JSON.stringify(profile),
-  });
+export async function putExpertProfile(data: Partial<ExpertProfileData>): Promise<ExpertProfileData> {
+  return apiJson("/api/v1/expert-profile", { method: "PUT", body: JSON.stringify(data) });
+}
+export async function getReviewQueue(): Promise<{ items: ReviewQueueItem[]; total: number }> {
+  return apiJson("/api/v1/review-queue");
+}
+export async function patchReviewQueueItem(id: string, data: { status: string }): Promise<ReviewQueueItem> {
+  return apiJson(`/api/v1/review-queue/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(data) });
+}
+export async function deleteReviewQueueItem(id: string): Promise<{ deleted: boolean }> {
+  return apiJson(`/api/v1/review-queue/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+export async function getPendingRules(): Promise<{ items: PendingRuleItem[]; total: number }> {
+  return apiJson("/api/v1/pending-rules");
+}
+export async function approvePendingRule(kid: string, body: { note?: string }): Promise<{ approved: string; written_to?: string }> {
+  return apiJson(`/api/v1/pending-rules/${encodeURIComponent(kid)}/approve`, { method: "POST", body: JSON.stringify(body) });
+}
+export async function rejectPendingRule(kid: string, body: { reason: string }): Promise<{ rejected: string }> {
+  return apiJson(`/api/v1/pending-rules/${encodeURIComponent(kid)}/reject`, { method: "POST", body: JSON.stringify(body) });
 }
 
-// ── Knowledge Extraction ──────────────────────────────────────
-
-export type KnowledgeCard = {
-  id: number;
-  conversation_id: number;
-  card_index: number;
-  card_type: string;
-  title: string;
-  content: string;
-  applicable_scope: string | null;
-  exceptions: string | null;
-  confidence: string;
-  status: string;
-  source_turn: number | null;
-  created_at: string;
-  updated_at: string;
-};
-
-export type ExtractionSession = {
-  session_id: number;
-  title: string;
-  created_at: string;
-  updated_at: string;
-  confirmed_cards: number;
-  total_cards: number;
-};
-
-export async function createExtractionSession(title?: string): Promise<{
-  session_id: number;
-  title: string;
-  opening: string;
-  profile_completed: boolean;
-}> {
-  return apiJson("/api/v1/extraction/sessions", {
-    method: "POST",
-    body: JSON.stringify({ title: title || "知识提取会话" }),
-  });
+export async function uploadExtractionMaterial(
+  file: File,
+  title?: string,
+): Promise<{ material_id: string; original_name: string; size_bytes: number; path: string }> {
+  const fd = new FormData();
+  fd.append("file", file);
+  if (title) fd.append("title", title);
+  const r = await fetch(`${BASE}/api/v1/extraction/upload-material`, { method: "POST", body: fd });
+  const text = await r.text();
+  let j: Record<string, unknown>;
+  try { j = JSON.parse(text); } catch { throw new Error(`Upload failed HTTP ${r.status}: ${text.slice(0, 120)}`); }
+  if ((j as any).status === "error") throw new Error(String((j as any).message || "upload error"));
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return (j as any).data;
 }
 
-export async function listExtractionSessions(): Promise<{ sessions: ExtractionSession[] }> {
-  return apiJson("/api/v1/extraction/sessions");
-}
-
-export async function getExtractionSession(sessionId: number): Promise<{
-  session_id: number;
-  title: string;
-  created_at: string;
-  updated_at: string;
-  messages: Array<{ role: string; content: string; created_at: string }>;
-  cards: KnowledgeCard[];
-}> {
-  return apiJson(`/api/v1/extraction/sessions/${sessionId}`);
-}
-
-export async function postExtractionChatStream(
-  sessionId: number,
-  message: string,
+export async function postActiveExtractionStream(
+  body: { user_input: string; strategy: string; review_queue_item_id?: string | null; prior_messages?: Array<{role: string; content: string}>; round_number?: number },
   onEvent: (ev: Record<string, unknown>) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const r = await fetch(`${BASE}/api/v1/extraction/sessions/${sessionId}/chat/stream`, {
+  const r = await fetch(`${BASE}/api/v1/extraction/stream`, {
     method: "POST",
-    credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(body),
     signal,
   });
   if (!r.ok) {
@@ -489,29 +444,43 @@ export async function postExtractionChatStream(
   await consumeSseFromResponse(r, onEvent, signal);
 }
 
-export async function confirmExtractionCard(sessionId: number, cardId: number): Promise<{ card: KnowledgeCard }> {
-  return apiJson(`/api/v1/extraction/sessions/${sessionId}/cards/${cardId}/confirm`, { method: "POST" });
-}
-
-export async function rejectExtractionCard(sessionId: number, cardId: number): Promise<{ card: KnowledgeCard }> {
-  return apiJson(`/api/v1/extraction/sessions/${sessionId}/cards/${cardId}/reject`, { method: "POST" });
-}
-
-export async function endExtractionSession(sessionId: number): Promise<{
-  session_id: number;
-  filename: string;
-  summary: { confirmed: number; edited: number; rejected: number; pending: number; total: number };
-}> {
-  return apiJson(`/api/v1/extraction/sessions/${sessionId}/end`, { method: "POST" });
-}
-
-export async function updateExtractionCard(
-  sessionId: number,
-  cardId: number,
-  updates: Partial<Pick<KnowledgeCard, "card_type" | "title" | "content" | "applicable_scope" | "exceptions" | "confidence">>,
-): Promise<{ card: KnowledgeCard }> {
-  return apiJson(`/api/v1/extraction/sessions/${sessionId}/cards/${cardId}`, {
-    method: "PUT",
-    body: JSON.stringify(updates),
+export async function postDocExtractionStream(
+  body: { material_id: string; user_input?: string; strategy?: string; prior_messages?: Array<{role: string; content: string}> },
+  onEvent: (ev: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const r = await fetch(`${BASE}/api/v1/extraction/doc-stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
   });
+  if (!r.ok) {
+    const j = (await r.json().catch(() => ({}))) as ApiErr;
+    throw new Error(j.message || `HTTP ${r.status}`);
+  }
+  await consumeSseFromResponse(r, onEvent, signal);
+}
+
+export async function postReviewExtractionStream(
+  projectId: number,
+  conversationId: number,
+  body: { user_input: string; prior_messages?: Array<{role: string; content: string}>; findings_summary?: Array<Record<string, unknown>> },
+  onEvent: (ev: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const r = await fetch(
+    `${BASE}/api/v1/projects/${projectId}/conversations/${conversationId}/post-review-extraction/stream`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  if (!r.ok) {
+    const j = (await r.json().catch(() => ({}))) as ApiErr;
+    throw new Error(j.message || `HTTP ${r.status}`);
+  }
+  await consumeSseFromResponse(r, onEvent, signal);
 }

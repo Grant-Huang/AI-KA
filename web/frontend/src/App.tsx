@@ -87,6 +87,7 @@ import { parseMemoryInjectedItemsFromMilestonesRaw, useConversationReplay } from
 import SimpleMarkdown from "./SimpleMarkdown";
 import HelpPage from "./pages/help";
 import SystemSettingPage from "./pages/system_setting";
+import ExtractionPage from "./ExtractionPage";
 
 const { Text, Title } = Typography;
 
@@ -3428,22 +3429,7 @@ export default function App() {
             />
           </>
         ) : (
-          <>
-            <Button
-              type="text"
-              className="side-nav-btn"
-              icon={<PlusOutlined />}
-              title="新建提取会话"
-              onClick={handleNewExtractionSession}
-            />
-            <Button
-              type="text"
-              className="side-nav-btn"
-              icon={<HistoryOutlined />}
-              title="提取历史"
-              onClick={() => setExtractHistoryOpen(true)}
-            />
-          </>
+          <></>
         )}
         <div className="side-nav-spacer" />
         <div className="side-nav-bottom">
@@ -4046,6 +4032,26 @@ export default function App() {
                       >
                         审查报告
                       </Button>
+                      <Button
+                        type="default"
+                        size="small"
+                        icon={<BulbOutlined />}
+                        disabled={selectedId == null || selectedConversationId == null}
+                        onClick={() => {
+                          setAppMode("extraction");
+                          // Pass context so ExtractionPage opens in post-review mode
+                          window.sessionStorage.setItem(
+                            "aika_post_review_ctx",
+                            JSON.stringify({
+                              projectId: selectedId,
+                              conversationId: selectedConversationId,
+                            })
+                          );
+                        }}
+                        title="将本次审查结果发送到知识提取"
+                      >
+                        提取知识
+                      </Button>
                     </div>
                     <div className="result-actions-bar-divider" aria-hidden="true" />
                     <div className="result-output-actions">
@@ -4326,229 +4332,8 @@ export default function App() {
 
       {/* ── Knowledge Extraction Panel ── */}
       {appMode === "extraction" ? (
-        <div className="extraction-panel">
-          {/* Left: chat area */}
-          <div className="extraction-chat">
-            {extractSessionId == null ? (
-              <div className="welcome" style={{ margin: "auto", textAlign: "center" }}>
-                <div className="welcome-title">知识提取</div>
-                <div className="welcome-subtitle" style={{ marginBottom: 16 }}>
-                  通过 AI 主导的结构化对话，将专家隐性知识转化为可复用的知识卡片
-                </div>
-                <Button type="primary" icon={<PlusOutlined />} onClick={handleNewExtractionSession}>
-                  开始新会话
-                </Button>
-              </div>
-            ) : (
-              <>
-                <div className="extraction-messages">
-                  {extractMessages.map((msg, i) => (
-                    <div
-                      key={i}
-                      className={`extraction-msg extraction-msg--${msg.role}`}
-                    >
-                      <div className="extraction-msg-bubble">
-                        <SimpleMarkdown markdown={msg.content} />
-                      </div>
-                    </div>
-                  ))}
-                  {extractStreaming && extractStreamingText ? (
-                    <div className="extraction-msg extraction-msg--assistant">
-                      <div className="extraction-msg-bubble extraction-msg-bubble--streaming">
-                        <SimpleMarkdown markdown={extractStreamingText} />
-                      </div>
-                    </div>
-                  ) : null}
-                  {extractStreaming && !extractStreamingText ? (
-                    <div className="extraction-msg extraction-msg--assistant">
-                      <div className="extraction-msg-bubble"><Spin size="small" /></div>
-                    </div>
-                  ) : null}
-                  <div ref={extractChatBottomRef} />
-                </div>
-                <div className="extraction-composer">
-                  <Input.TextArea
-                    className="composer-textarea"
-                    rows={3}
-                    placeholder="输入你的回答，或描述你的经验..."
-                    value={extractDraft}
-                    onChange={(e) => setExtractDraft(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                        e.preventDefault();
-                        void handleExtractionSend();
-                      }
-                    }}
-                    disabled={extractStreaming}
-                    style={{ resize: "none" }}
-                  />
-                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
-                    <Button
-                      danger
-                      disabled={extractStreaming}
-                      onClick={() => void handleEndSession()}
-                    >
-                      结束会话
-                    </Button>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      {extractStreaming ? (
-                        <Button
-                          icon={<StopOutlined />}
-                          onClick={() => extractAbortRef.current?.abort()}
-                        >
-                          停止
-                        </Button>
-                      ) : null}
-                      <Button
-                        type="primary"
-                        icon={<SendOutlined />}
-                        disabled={!extractDraft.trim() || extractStreaming}
-                        onClick={() => void handleExtractionSend()}
-                      >
-                        发送
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* Right: knowledge cards panel */}
-          {extractSessionId != null ? (
-            <div className="extraction-cards-panel">
-              <div className="extraction-cards-header">
-                知识卡片 {extractCards.filter((c) => c.status !== "rejected").length > 0 ? (
-                  <Badge count={extractCards.filter((c) => c.status === "pending").length} size="small" offset={[4, 0]}>
-                    <span />
-                  </Badge>
-                ) : null}
-              </div>
-              <div className="extraction-cards-list">
-                {extractCards.length === 0 ? (
-                  <div style={{ color: "#888", fontSize: 13, padding: "12px 0" }}>
-                    AI 提炼知识后会在此显示，点击确认入库
-                  </div>
-                ) : null}
-                {extractCards.map((card) => {
-                  if (card.status === "rejected") return null;
-                  const typeLabels: Record<string, string> = {
-                    risk_signal: "风险信号", rule: "判断规则", process: "操作流程",
-                    best_practice: "最佳实践", anti_pattern: "反面案例",
-                  };
-                  const confColors: Record<string, string> = { high: "green", medium: "orange", low: "red" };
-                  return (
-                    <div
-                      key={card.id}
-                      className={`extraction-card extraction-card--${card.status}`}
-                    >
-                      <div className="extraction-card-header">
-                        <Tag color="blue">{typeLabels[card.card_type] || card.card_type}</Tag>
-                        <Tag color={confColors[card.confidence] || "default"}>{card.confidence === "high" ? "高" : card.confidence === "medium" ? "中" : "低"}</Tag>
-                        {card.status === "confirmed" ? <Tag color="green" icon={<CheckCircleOutlined />}>已确认</Tag> : null}
-                        {card.status === "edited" ? <Tag color="cyan" icon={<EditOutlined />}>已修改</Tag> : null}
-                      </div>
-                      <div className="extraction-card-title">{card.title}</div>
-                      <div className="extraction-card-content">{card.content}</div>
-                      {card.applicable_scope ? (
-                        <div className="extraction-card-meta">
-                          <TagOutlined /> {card.applicable_scope}
-                        </div>
-                      ) : null}
-                      {card.exceptions ? (
-                        <div className="extraction-card-meta" style={{ color: "#e67e22" }}>
-                          例外：{card.exceptions}
-                        </div>
-                      ) : null}
-                      {card.status === "pending" ? (
-                        <div className="extraction-card-actions">
-                          <Button
-                            size="small"
-                            type="primary"
-                            icon={<CheckCircleOutlined />}
-                            onClick={() => void handleConfirmCard(card)}
-                          >
-                            确认入库
-                          </Button>
-                          <Button
-                            size="small"
-                            icon={<EditOutlined />}
-                            onClick={() => {
-                              setExtractCardEdit({ ...card });
-                            }}
-                          >
-                            修改后入库
-                          </Button>
-                          <Button
-                            size="small"
-                            danger
-                            icon={<CloseCircleOutlined />}
-                            onClick={() => void handleRejectCard(card)}
-                          >
-                            不采纳
-                          </Button>
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
-      {/* ── Login Modal ── */}
-      <Modal
-        open={loginOpen}
-        title="登录 AI-KA"
-        footer={null}
-        closable={false}
-        maskClosable={false}
-        centered
-      >
-        <Form layout="vertical" onFinish={() => void handleLogin()}>
-          <Form.Item label="用户名">
-            <Input
-              value={loginUsername}
-              onChange={(e) => setLoginUsername(e.target.value)}
-              autoFocus
-              autoComplete="username"
-            />
-          </Form.Item>
-          <Form.Item label="密码">
-            <Input.Password
-              value={loginPassword}
-              onChange={(e) => setLoginPassword(e.target.value)}
-              autoComplete="current-password"
-            />
-          </Form.Item>
-          {loginError ? <Alert type="error" message={loginError} style={{ marginBottom: 12 }} /> : null}
-          <Button
-            type="primary"
-            htmlType="submit"
-            loading={loginLoading}
-            disabled={!loginUsername.trim() || !loginPassword}
-            block
-          >
-            登录
-          </Button>
-        </Form>
-      </Modal>
-
-      {/* ── Expert Profile Modal ── */}
-      <Modal
-        open={profileModalOpen}
-        title="完善专家画像（约 3 分钟）"
-        onOk={() => void handleSaveProfile()}
-        onCancel={() => setProfileModalOpen(false)}
-        okText="保存画像"
-        cancelText="稍后再说"
-        confirmLoading={profileSaving}
-        width={600}
-      >
-        <div style={{ marginBottom: 8, color: "#888", fontSize: 13 }}>
-          画像完成后 AI 将基于你的背景提问，不会问低质量的通用问题。
+        <div className="extraction-overlay">
+          <ExtractionPage />
         </div>
         <Form layout="vertical">
           <Form.Item label="你主要负责或擅长的行业（多选）">
