@@ -11,6 +11,7 @@ class ConversationMode(str, Enum):
     CLARIFYING = "clarifying"  # 追问模式：不重读文档，就已有发现问答
     REFINING   = "refining"    # 精炼模式：带约束重新审查
     GENERATING = "generating"  # 生成模式：聚合发现→文档
+    EXTRACTING = "extracting"  # 知识提取模式：AI主动提问专家，提炼知识卡片
 
 
 class ConversationState(str, Enum):

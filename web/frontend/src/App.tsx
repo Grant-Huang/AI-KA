@@ -1,16 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
+  Badge,
   Button,
   Checkbox,
   Collapse,
   Divider,
+  Form,
   Input,
   InputNumber,
   Modal,
   Radio,
   Select,
   Space,
+  Spin,
+  Tag,
   Tabs,
   Tooltip,
   Typography,
@@ -37,6 +41,14 @@ import {
   FolderOpenOutlined,
   AuditOutlined,
   BulbOutlined,
+  SendOutlined,
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  EditOutlined,
+  HistoryOutlined,
+  LogoutOutlined,
+  TagOutlined,
+  PaperClipOutlined,
 } from "@ant-design/icons";
 import {
   apiJson,
@@ -54,6 +66,24 @@ import {
   postAgentConversationStream,
   postAnalyzeConversationStream,
   postFollowupConversationStream,
+  authLogin,
+  authLogout,
+  authMe,
+  getExpertProfile,
+  putExpertProfile,
+  createExtractionSession,
+  listExtractionSessions,
+  getExtractionSession,
+  postExtractionChatStream,
+  confirmExtractionCard,
+  rejectExtractionCard,
+  updateExtractionCard,
+  endExtractionSession,
+  uploadExtractionDocument,
+  type AuthUser,
+  type ExpertProfile,
+  type KnowledgeCard,
+  type ExtractionSession,
 } from "./api";
 import { parseMemoryInjectedItemsFromMilestonesRaw, useConversationReplay } from "./hooks/useConversationReplay";
 import SimpleMarkdown from "./SimpleMarkdown";
@@ -465,6 +495,40 @@ export default function App() {
   const isStandaloneSettings = standaloneView === "settings";
   const isStandalone = isStandaloneHelp || isStandaloneSettings;
 
+  // ── Auth state ────────────────────────────────────────────
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [loginUsername, setLoginUsername] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+
+  // ── Expert profile state ──────────────────────────────────
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [profileDraft, setProfileDraft] = useState<Omit<ExpertProfile, "profile_completed">>({
+    industries: [], production_modes: [], functional_modules: [], focus_areas: [],
+  });
+  const [profileSaving, setProfileSaving] = useState(false);
+
+  // ── Extraction state ──────────────────────────────────────
+  const [extractSessions, setExtractSessions] = useState<ExtractionSession[]>([]);
+  const [extractSessionId, setExtractSessionId] = useState<number | null>(null);
+  const [extractMessages, setExtractMessages] = useState<Array<{ role: string; content: string }>>([]);
+  const [extractCards, setExtractCards] = useState<KnowledgeCard[]>([]);
+  const [extractDraft, setExtractDraft] = useState("");
+  const [extractStreaming, setExtractStreaming] = useState(false);
+  const [extractStreamingText, setExtractStreamingText] = useState("");
+  const [extractCardEdit, setExtractCardEdit] = useState<KnowledgeCard | null>(null);
+  const [extractHistoryOpen, setExtractHistoryOpen] = useState(false);
+  const [extractSummary, setExtractSummary] = useState<{
+    filename: string;
+    confirmed: number; edited: number; rejected: number; pending: number; total: number;
+  } | null>(null);
+  const extractAbortRef = useRef<AbortController | null>(null);
+  const extractChatBottomRef = useRef<HTMLDivElement>(null);
+  const extractFileInputRef = useRef<HTMLInputElement>(null);
+
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [appMode, setAppMode] = useState<"review" | "extraction">("review");
@@ -522,6 +586,39 @@ export default function App() {
     if (selectedConversationId == null) return outputEntries;
     return outputEntries.filter((e) => e.convId === selectedConversationId);
   }, [outputEntries, selectedConversationId]);
+
+  // ── Auth check on mount ───────────────────────────────────
+  useEffect(() => {
+    void (async () => {
+      try {
+        const user = await authMe();
+        setCurrentUser(user);
+        // Pre-load existing profile if any
+        try {
+          const prof = await authMe();
+          // Profile data (if any) will be loaded from DB-based profile endpoint
+          void prof; // profile_completed is part of AuthUser already
+        } catch { /* profile not yet saved */ }
+        if (!user.profile_completed) setProfileModalOpen(true);
+      } catch {
+        setCurrentUser(null);
+        setLoginOpen(true);
+      } finally {
+        setAuthLoading(false);
+      }
+    })();
+  }, []);
+
+  // ── Load extraction sessions when switching to extraction mode ──
+  useEffect(() => {
+    if (appMode !== "extraction" || !currentUser) return;
+    void listExtractionSessions().then((r) => setExtractSessions(r.sessions)).catch(() => {});
+  }, [appMode, currentUser]);
+
+  // ── Auto-scroll extraction chat ───────────────────────────
+  useEffect(() => {
+    extractChatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [extractMessages, extractStreamingText]);
 
   const replay = useConversationReplay(selectedId, selectedConversationId);
   useEffect(() => {
@@ -822,6 +919,180 @@ export default function App() {
       setMilestoneOpenOverrides((prev) => ({ ...prev, [id]: false }));
     }
   }, []);
+
+  // ── Auth handlers ─────────────────────────────────────────
+  const handleLogin = async () => {
+    if (!loginUsername.trim() || !loginPassword) return;
+    setLoginLoading(true);
+    setLoginError("");
+    try {
+      const user = await authLogin(loginUsername.trim(), loginPassword);
+      setCurrentUser(user);
+      setLoginOpen(false);
+      setLoginUsername("");
+      setLoginPassword("");
+      if (!user.profile_completed) setProfileModalOpen(true);
+    } catch (e: unknown) {
+      setLoginError(e instanceof Error ? e.message : "登录失败");
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await authLogout();
+    } catch { /* ignore */ }
+    setCurrentUser(null);
+    setLoginOpen(true);
+    setExtractSessions([]);
+    setExtractSessionId(null);
+    setExtractMessages([]);
+    setExtractCards([]);
+  };
+
+  const handleSaveProfile = async () => {
+    setProfileSaving(true);
+    try {
+      await apiJson("/api/v1/auth/expert-profile", { method: "PUT", body: JSON.stringify(profileDraft) });
+      setCurrentUser((u) => u ? { ...u, profile_completed: true } : u);
+      setProfileModalOpen(false);
+      void message.success("画像已保存");
+    } catch (e: unknown) {
+      void message.error(e instanceof Error ? e.message : "保存失败");
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
+  // ── Extraction handlers ───────────────────────────────────
+  const handleNewExtractionSession = async () => {
+    try {
+      const res = await createExtractionSession();
+      setExtractSessionId(res.session_id);
+      setExtractMessages([{ role: "assistant", content: res.opening }]);
+      setExtractCards([]);
+      setExtractHistoryOpen(false);
+      void listExtractionSessions().then((r) => setExtractSessions(r.sessions)).catch(() => {});
+    } catch (e: unknown) {
+      void message.error(e instanceof Error ? e.message : "创建会话失败");
+    }
+  };
+
+  const handleLoadExtractionSession = async (sessionId: number) => {
+    try {
+      const res = await getExtractionSession(sessionId);
+      setExtractSessionId(res.session_id);
+      setExtractMessages(res.messages);
+      setExtractCards(res.cards);
+      setExtractHistoryOpen(false);
+    } catch (e: unknown) {
+      void message.error(e instanceof Error ? e.message : "加载会话失败");
+    }
+  };
+
+  const handleExtractionSend = async () => {
+    if (!extractDraft.trim() || !extractSessionId || extractStreaming) return;
+    const userMsg = extractDraft.trim();
+    setExtractDraft("");
+    setExtractMessages((prev) => [...prev, { role: "user", content: userMsg }]);
+    setExtractStreaming(true);
+    setExtractStreamingText("");
+    const ctrl = new AbortController();
+    extractAbortRef.current = ctrl;
+    let acc = "";
+    let newCards: KnowledgeCard[] = [];
+    try {
+      await postExtractionChatStream(
+        extractSessionId,
+        userMsg,
+        (ev) => {
+          if (ev.type === "delta" && typeof ev.text === "string") {
+            acc += ev.text;
+            setExtractStreamingText(acc);
+          }
+          if (ev.type === "final") {
+            const text = typeof ev.text === "string" ? ev.text : acc;
+            newCards = Array.isArray(ev.new_cards) ? (ev.new_cards as KnowledgeCard[]) : [];
+            setExtractMessages((prev) => [...prev, { role: "assistant", content: text }]);
+            setExtractStreamingText("");
+            setExtractCards((prev) => [...prev, ...newCards]);
+          }
+        },
+        ctrl.signal,
+      );
+    } catch (e: unknown) {
+      if ((e as { name?: string }).name !== "AbortError") {
+        void message.error(e instanceof Error ? e.message : "发送失败");
+        setExtractMessages((prev) => [...prev, { role: "assistant", content: `[错误] ${e instanceof Error ? e.message : "请求失败"}` }]);
+      }
+      setExtractStreamingText("");
+    } finally {
+      setExtractStreaming(false);
+      extractAbortRef.current = null;
+    }
+  };
+
+  const handleConfirmCard = async (card: KnowledgeCard) => {
+    if (!extractSessionId) return;
+    try {
+      const res = await confirmExtractionCard(extractSessionId, card.id);
+      setExtractCards((prev) => prev.map((c) => c.id === card.id ? res.card : c));
+    } catch (e: unknown) {
+      void message.error(e instanceof Error ? e.message : "确认失败");
+    }
+  };
+
+  const handleRejectCard = async (card: KnowledgeCard) => {
+    if (!extractSessionId) return;
+    try {
+      const res = await rejectExtractionCard(extractSessionId, card.id);
+      setExtractCards((prev) => prev.map((c) => c.id === card.id ? res.card : c));
+    } catch (e: unknown) {
+      void message.error(e instanceof Error ? e.message : "拒绝失败");
+    }
+  };
+
+  const handleEndSession = async () => {
+    if (!extractSessionId) return;
+    try {
+      const res = await endExtractionSession(extractSessionId);
+      setExtractSummary({ filename: res.filename, ...res.summary });
+      void listExtractionSessions().then((r) => setExtractSessions(r.sessions)).catch(() => {});
+    } catch (e: unknown) {
+      void message.error(e instanceof Error ? e.message : "结束会话失败");
+    }
+  };
+
+  const handleDocumentUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!extractSessionId || !e.target.files?.length) return;
+    const file = e.target.files[0];
+    e.target.value = "";
+    try {
+      const res = await uploadExtractionDocument(extractSessionId, file);
+      setExtractMessages((prev) => [
+        ...prev,
+        {
+          role: "user",
+          content: `📎 已上传文档：**${res.filename}**（${res.char_count} 字符）\n\n${res.preview}${res.char_count > 200 ? "…" : ""}`,
+        },
+      ]);
+      void message.success(`文档「${res.filename}」已上传，AI 将基于文档内容提问`);
+    } catch (err: unknown) {
+      void message.error(err instanceof Error ? err.message : "上传失败");
+    }
+  };
+
+  const handleUpdateCard = async (updates: Partial<KnowledgeCard>) => {
+    if (!extractSessionId || !extractCardEdit) return;
+    try {
+      const res = await updateExtractionCard(extractSessionId, extractCardEdit.id, updates);
+      setExtractCards((prev) => prev.map((c) => c.id === extractCardEdit.id ? res.card : c));
+      setExtractCardEdit(null);
+    } catch (e: unknown) {
+      void message.error(e instanceof Error ? e.message : "更新失败");
+    }
+  };
 
   const loadProjects = useCallback(async () => {
     const data = await apiJson<{ projects: Project[] }>("/api/v1/projects");
@@ -3192,7 +3463,18 @@ export default function App() {
             title="设置（新窗口）"
             onClick={() => openStandaloneWindow("settings")}
           />
-          <Button type="text" className="side-nav-btn" icon={<UserOutlined />} title="用户" onClick={() => message.info("用户中心：占位")} />
+          <Tooltip
+            title={currentUser ? `${currentUser.display_name}（点击退出登录）` : "未登录"}
+            placement="right"
+          >
+            <Button
+              type="text"
+              className="side-nav-btn"
+              icon={currentUser ? <LogoutOutlined /> : <UserOutlined />}
+              title={currentUser ? "退出登录" : "登录"}
+              onClick={currentUser ? handleLogout : () => setLoginOpen(true)}
+            />
+          </Tooltip>
         </div>
       </div>
 
@@ -4064,11 +4346,207 @@ export default function App() {
         </div>
       </div>
 
+      {/* ── Knowledge Extraction Panel ── */}
       {appMode === "extraction" ? (
         <div className="extraction-overlay">
           <ExtractionPage />
         </div>
       ) : null}
+
+      {/* ── Expert Profile Modal ── */}
+      <Modal
+        open={profileModalOpen}
+        title="完善专家画像（约 3 分钟）"
+        onOk={() => void handleSaveProfile()}
+        onCancel={() => setProfileModalOpen(false)}
+        okText="保存画像"
+        cancelText="稍后再说"
+        confirmLoading={profileSaving}
+        width={600}
+      >
+        <div style={{ marginBottom: 8, color: "#888", fontSize: 13 }}>
+          画像完成后 AI 将基于你的背景提问，不会问低质量的通用问题。
+        </div>
+        <Form layout="vertical">
+          <Form.Item label="你主要负责或擅长的行业（多选）">
+            <Checkbox.Group
+              value={profileDraft.industries}
+              onChange={(v) => setProfileDraft((d) => ({ ...d, industries: v as string[] }))}
+              options={["汽车整车", "汽车零部件", "通用机械", "工程机械", "电力装备", "电子制造", "航空航天", "轨道交通", "船舶海工"]}
+              style={{ display: "flex", flexWrap: "wrap", gap: "4px 12px" }}
+            />
+          </Form.Item>
+          <Form.Item label="你主要擅长哪些生产模式（多选）">
+            <Checkbox.Group
+              value={profileDraft.production_modes}
+              onChange={(v) => setProfileDraft((d) => ({ ...d, production_modes: v as string[] }))}
+              options={[
+                "批量离散制造", "混线柔性装配", "配置式制造", "离散装配岛模式",
+                "连续+离散混合制造", "返工/维修型制造", "模块化制造", "高变异小批量定制",
+              ]}
+              style={{ display: "flex", flexWrap: "wrap", gap: "4px 12px" }}
+            />
+          </Form.Item>
+          <Form.Item label="你擅长的功能模块（多选）">
+            <Checkbox.Group
+              value={profileDraft.functional_modules}
+              onChange={(v) => setProfileDraft((d) => ({ ...d, functional_modules: v as string[] }))}
+              options={[
+                "计划排程", "执行与追溯", "质量管理", "质量控制", "物流管理", "仓库管理",
+                "能源管理", "设备管理", "数据采集与设备集成", "报表分析", "制造工艺管理", "数据分析",
+              ]}
+              style={{ display: "flex", flexWrap: "wrap", gap: "4px 12px" }}
+            />
+          </Form.Item>
+          <Form.Item label="你最希望 AI 辅助解决哪个阶段的问题（多选）">
+            <Checkbox.Group
+              value={profileDraft.focus_areas}
+              onChange={(v) => setProfileDraft((d) => ({ ...d, focus_areas: v as string[] }))}
+              options={["售前与方案设计", "蓝图确认阶段", "开发与测试管理", "上线陪跑与验收", "客户关系与变更管理"]}
+              style={{ display: "flex", flexWrap: "wrap", gap: "4px 12px" }}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* ── Extraction Card Edit Modal ── */}
+      {extractCardEdit ? (
+        <Modal
+          open
+          title="修改知识卡片"
+          onOk={() => void handleUpdateCard({
+            card_type: extractCardEdit.card_type,
+            title: extractCardEdit.title,
+            content: extractCardEdit.content,
+            applicable_scope: extractCardEdit.applicable_scope ?? undefined,
+            exceptions: extractCardEdit.exceptions ?? undefined,
+            confidence: extractCardEdit.confidence,
+          })}
+          onCancel={() => setExtractCardEdit(null)}
+          okText="确认入库"
+          cancelText="取消"
+          width={560}
+        >
+          <Form layout="vertical">
+            <Form.Item label="类型">
+              <Select
+                value={extractCardEdit.card_type}
+                onChange={(v) => setExtractCardEdit((c) => c ? { ...c, card_type: v } : c)}
+                options={[
+                  { value: "risk_signal", label: "风险信号" },
+                  { value: "rule", label: "判断规则" },
+                  { value: "process", label: "操作流程" },
+                  { value: "best_practice", label: "最佳实践" },
+                  { value: "anti_pattern", label: "反面案例" },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item label="标题">
+              <Input
+                value={extractCardEdit.title}
+                onChange={(e) => setExtractCardEdit((c) => c ? { ...c, title: e.target.value } : c)}
+              />
+            </Form.Item>
+            <Form.Item label="核心内容">
+              <Input.TextArea
+                rows={4}
+                value={extractCardEdit.content}
+                onChange={(e) => setExtractCardEdit((c) => c ? { ...c, content: e.target.value } : c)}
+              />
+            </Form.Item>
+            <Form.Item label="适用范围">
+              <Input
+                value={extractCardEdit.applicable_scope ?? ""}
+                onChange={(e) => setExtractCardEdit((c) => c ? { ...c, applicable_scope: e.target.value || null } : c)}
+              />
+            </Form.Item>
+            <Form.Item label="例外情况">
+              <Input
+                value={extractCardEdit.exceptions ?? ""}
+                onChange={(e) => setExtractCardEdit((c) => c ? { ...c, exceptions: e.target.value || null } : c)}
+              />
+            </Form.Item>
+            <Form.Item label="置信度">
+              <Select
+                value={extractCardEdit.confidence}
+                onChange={(v) => setExtractCardEdit((c) => c ? { ...c, confidence: v } : c)}
+                options={[
+                  { value: "high", label: "高（多次验证）" },
+                  { value: "medium", label: "中（个人经验）" },
+                  { value: "low", label: "低（推测）" },
+                ]}
+              />
+            </Form.Item>
+          </Form>
+        </Modal>
+      ) : null}
+
+      {/* ── Extraction History Drawer ── */}
+      <Modal
+        open={extractHistoryOpen}
+        title="提取历史"
+        footer={null}
+        onCancel={() => setExtractHistoryOpen(false)}
+        width={480}
+      >
+        {extractSessions.length === 0 ? (
+          <div style={{ color: "#888", padding: "12px 0" }}>暂无历史会话</div>
+        ) : (
+          <div>
+            {extractSessions.map((s) => (
+              <div
+                key={s.session_id}
+                className="chat-history-item"
+                style={{ cursor: "pointer" }}
+                onClick={() => void handleLoadExtractionSession(s.session_id)}
+              >
+                <div style={{ fontWeight: 500 }}>{s.title}</div>
+                <div style={{ fontSize: 12, color: "#888" }}>
+                  {s.confirmed_cards} 张已确认 · {s.created_at?.slice(0, 10)}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Modal>
+      {/* ── Session Summary Modal ── */}
+      <Modal
+        open={extractSummary !== null}
+        title="会话结束"
+        footer={
+          <Button type="primary" onClick={() => {
+            setExtractSummary(null);
+            setExtractSessionId(null);
+            setExtractMessages([]);
+            setExtractCards([]);
+          }}>
+            关闭
+          </Button>
+        }
+        onCancel={() => setExtractSummary(null)}
+        centered
+      >
+        {extractSummary ? (
+          <div style={{ fontSize: 15 }}>
+            <p>本次会话已结束，提炼结果如下：</p>
+            <div style={{ background: "#f6f8f5", borderRadius: 8, padding: "12px 16px", marginBottom: 12 }}>
+              <div>已确认入库：<b>{extractSummary.confirmed}</b> 张</div>
+              <div>修改后入库：<b>{extractSummary.edited}</b> 张</div>
+              <div>未采纳：<b>{extractSummary.rejected}</b> 张</div>
+              {extractSummary.pending > 0 ? <div style={{ color: "#e67e22" }}>待处理：{extractSummary.pending} 张（未确认也未拒绝）</div> : null}
+            </div>
+            {extractSummary.filename ? (
+              <div style={{ fontSize: 13, color: "#637566" }}>
+                会话记录已保存：<code>{extractSummary.filename}</code>
+              </div>
+            ) : null}
+            <div style={{ fontSize: 13, color: "#637566", marginTop: 6 }}>
+              个人知识库和组织 Pending 队列已同步更新。
+            </div>
+          </div>
+        ) : null}
+      </Modal>
+
       {!chatsOpen && appMode === "review" && mainPanel === "analyze" ? (
         <div
           className={`composer-overlay ${
