@@ -501,6 +501,7 @@ function ActiveExtractionTab({
   const [streaming, setStreaming] = useState(false);
   const [roundNumber, setRoundNumber] = useState(1);
   const [newKiItems, setNewKiItems] = useState<KiItemState[]>([]);
+  const [coachHint, setCoachHint] = useState<{ whisper: string; expert_type_signal?: string; coverage_gaps?: string[]; current_momentum?: string; flag?: string | null } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const isPostReview = postReviewCtx != null;
 
@@ -510,6 +511,7 @@ function ActiveExtractionTab({
       setMessages([]);
       setRoundNumber(1);
       setNewKiItems([]);
+      setCoachHint(null);
     }
   }, [initialRQItem]);
 
@@ -597,6 +599,17 @@ function ActiveExtractionTab({
                 { role: "status", content: `💡 建议追问方向：\n${qs}` },
               ]);
             }
+          } else if (ev.type === "coach_hint") {
+            const hint = ev as any;
+            if (hint.whisper) {
+              setCoachHint({
+                whisper: String(hint.whisper),
+                expert_type_signal: hint.expert_type_signal ? String(hint.expert_type_signal) : undefined,
+                coverage_gaps: Array.isArray(hint.coverage_gaps) ? hint.coverage_gaps.map(String) : undefined,
+                current_momentum: hint.current_momentum ? String(hint.current_momentum) : undefined,
+                flag: hint.flag ? String(hint.flag) : null,
+              });
+            }
           } else if (ev.type === "final") {
             const satisfaction = (ev as any).satisfaction as number | null;
             const autoAdv = Boolean((ev as any).auto_advance);
@@ -633,6 +646,7 @@ function ActiveExtractionTab({
     setMessages([]);
     setRoundNumber(1);
     setNewKiItems([]);
+    setCoachHint(null);
   };
 
   return (
@@ -704,6 +718,65 @@ function ActiveExtractionTab({
       )}
 
       <ChatArea messages={messages} streaming={streaming} />
+
+      {coachHint && (
+        <div style={{
+          marginTop: 8, padding: "8px 12px",
+          background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 6,
+          display: "flex", alignItems: "flex-start", gap: 8,
+        }}>
+          <div style={{ flex: 1 }}>
+            <Text style={{ fontSize: 11, color: "#52c41a", fontWeight: 600 }}>
+              🎯 教练提示（第 {roundNumber - 1} 轮）
+              {coachHint.expert_type_signal && (
+                <Text type="secondary" style={{ fontSize: 11, fontWeight: 400, marginLeft: 6 }}>
+                  {coachHint.expert_type_signal}
+                </Text>
+              )}
+              {coachHint.current_momentum && coachHint.current_momentum !== "good" && (
+                <Tag
+                  color={coachHint.current_momentum === "stuck" ? "error" : "warning"}
+                  style={{ fontSize: 10, marginLeft: 6 }}
+                >
+                  {coachHint.current_momentum === "stuck" ? "对话停滞" : "势头减弱"}
+                </Tag>
+              )}
+            </Text>
+            <div style={{ marginTop: 2 }}>
+              <Text style={{ fontSize: 12 }}>{coachHint.whisper}</Text>
+            </div>
+            {coachHint.coverage_gaps && coachHint.coverage_gaps.length > 0 && (
+              <div style={{ marginTop: 4 }}>
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  未覆盖：{coachHint.coverage_gaps.join("、")}
+                </Text>
+              </div>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+            <Button
+              size="small"
+              type="link"
+              style={{ fontSize: 11, padding: "0 4px" }}
+              onClick={() => {
+                // 将建议填入输入框，操作者可修改后发送
+                setInput(coachHint.whisper);
+                setCoachHint(null);
+              }}
+            >
+              采纳建议
+            </Button>
+            <Button
+              size="small"
+              type="text"
+              style={{ fontSize: 11, padding: "0 4px", color: "#999" }}
+              onClick={() => setCoachHint(null)}
+            >
+              忽略
+            </Button>
+          </div>
+        </div>
+      )}
 
       <InlineKnowledgeCards items={newKiItems} onUpdate={handleKiUpdate} />
 
