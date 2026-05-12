@@ -19,21 +19,17 @@ def test_delete_project_blocked_when_has_analysis_runs(client, tmp_path: Path):
     assert r2.status_code == 200
     cid = int(r2.json()["data"]["id"])
 
-    # Insert an analysis_run directly to simulate reviewed history
+    # Insert a conversation_output to simulate a completed review (the guard checks this table)
     from backend.main import _conn
     from src.aika import db as dbm
 
     conn = _conn()
-    dbm.insert_analysis_run(
+    dbm.insert_conversation_output(
         conn,
         conversation_id=cid,
-        job_id=None,
-        focus_points=["x"],
-        chunk_limit=10,
-        chunk_strategy="test",
-        used_entries=[],
-        output_markdown_path="out.md",
-        run_metadata={"test": True},
+        kind="analysis",
+        final_filename="out.md",
+        milestones_filename="milestones.json",
     )
 
     r3 = client.delete(f"/api/v1/projects/{pid}")

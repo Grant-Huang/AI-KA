@@ -2,7 +2,6 @@ name: ci
 
 on:
   push:
-  pull_request:
 
 jobs:
   test-build:
@@ -37,7 +36,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install -U pip
-          python -m pip install -e . --no-build-isolation
+          python -m pip install -e ".[dev]"
 
       - name: Test
         run: |
