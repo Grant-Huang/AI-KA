@@ -13,6 +13,11 @@ from aika.llm import LLMConfig, LLMError, get_provider
 from backend.deps import get_conn
 from backend.extraction_prompt import build_extraction_system_prompt
 from backend.ki_parser import parse_ki_markers, strip_ki_markers
+from backend.knowledge_writer import (
+    generate_session_md,
+    write_org_pending,
+    write_personal_card,
+)
 from backend.response import err, ok
 
 router = APIRouter(prefix="/api/v1/extraction", tags=["extraction"])
@@ -307,12 +312,20 @@ def confirm_card(
     card_id: int,
     aika_token: str | None = Cookie(default=None),
 ) -> JSONResponse:
-    _require_user(aika_token)
+    user_id = _require_user(aika_token)
     conn = get_conn()
     card = dbm.get_knowledge_card(conn, card_id)
     if card is None or card.conversation_id != session_id:
         raise HTTPException(status_code=404, detail="card not found")
     updated = dbm.update_knowledge_card_status(conn, card_id, "confirmed")
+    # Write to personal + org storage
+    user = dbm.get_user_by_id(conn, user_id)
+    username = user.username if user else "unknown"
+    try:
+        write_personal_card(username, updated)
+        write_org_pending(updated, username)
+    except Exception:
+        pass  # never fail the confirm because of write errors
     return JSONResponse(ok({"card": _card_dict(updated)}))
 
 
@@ -338,7 +351,7 @@ def update_card(
     body: CardUpdateBody,
     aika_token: str | None = Cookie(default=None),
 ) -> JSONResponse:
-    _require_user(aika_token)
+    user_id = _require_user(aika_token)
     conn = get_conn()
     card = dbm.get_knowledge_card(conn, card_id)
     if card is None or card.conversation_id != session_id:
@@ -354,4 +367,68 @@ def update_card(
         confidence=body.confidence,
         status="edited",
     )
+    # Write to personal + org storage (edited = confirmed with modifications)
+    user = dbm.get_user_by_id(conn, user_id)
+    username = user.username if user else "unknown"
+    try:
+        write_personal_card(username, updated)
+        write_org_pending(updated, username)
+    except Exception:
+        pass
     return JSONResponse(ok({"card": _card_dict(updated)}))
+
+
+@router.post("/sessions/{session_id}/end")
+def end_session(
+    session_id: int,
+    aika_token: str | None = Cookie(default=None),
+) -> JSONResponse:
+    """End a session: generate session Markdown file and return summary stats."""
+    user_id = _require_user(aika_token)
+    conn = get_conn()
+    conv = dbm.get_conversation(conn, session_id)
+    if conv is None or conv.analysis_type != "extraction":
+        raise HTTPException(status_code=404, detail="session not found")
+
+    user = dbm.get_user_by_id(conn, user_id)
+    username = user.username if user else "unknown"
+    display_name = user.display_name if user else "专家"
+
+    profile = dbm.get_expert_profile(conn, user_id)
+    focus_label = ""
+    if profile and profile.focus_areas:
+        focus_label = profile.focus_areas[0]
+
+    messages = dbm.list_recent_messages(conn, conversation_id=session_id, limit=500)
+    cards = dbm.list_knowledge_cards(conn, session_id)
+
+    confirmed = [c for c in cards if c.status == "confirmed"]
+    edited = [c for c in cards if c.status == "edited"]
+    rejected = [c for c in cards if c.status == "rejected"]
+    pending = [c for c in cards if c.status == "pending"]
+
+    filename = ""
+    try:
+        _, filename = generate_session_md(
+            session_id=session_id,
+            title=conv.title,
+            display_name=display_name,
+            username=username,
+            focus_label=focus_label,
+            messages=[{"role": m.role, "content": m.content, "created_at": m.created_at} for m in messages],
+            cards=cards,
+        )
+    except Exception:
+        pass
+
+    return JSONResponse(ok({
+        "session_id": session_id,
+        "filename": filename,
+        "summary": {
+            "confirmed": len(confirmed),
+            "edited": len(edited),
+            "rejected": len(rejected),
+            "pending": len(pending),
+            "total": len(cards),
+        },
+    }))

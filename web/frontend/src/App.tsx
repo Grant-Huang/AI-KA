@@ -77,6 +77,7 @@ import {
   confirmExtractionCard,
   rejectExtractionCard,
   updateExtractionCard,
+  endExtractionSession,
   type AuthUser,
   type ExpertProfile,
   type KnowledgeCard,
@@ -517,6 +518,10 @@ export default function App() {
   const [extractStreamingText, setExtractStreamingText] = useState("");
   const [extractCardEdit, setExtractCardEdit] = useState<KnowledgeCard | null>(null);
   const [extractHistoryOpen, setExtractHistoryOpen] = useState(false);
+  const [extractSummary, setExtractSummary] = useState<{
+    filename: string;
+    confirmed: number; edited: number; rejected: number; pending: number; total: number;
+  } | null>(null);
   const extractAbortRef = useRef<AbortController | null>(null);
   const extractChatBottomRef = useRef<HTMLDivElement>(null);
 
@@ -1047,6 +1052,17 @@ export default function App() {
       setExtractCards((prev) => prev.map((c) => c.id === card.id ? res.card : c));
     } catch (e: unknown) {
       void message.error(e instanceof Error ? e.message : "拒绝失败");
+    }
+  };
+
+  const handleEndSession = async () => {
+    if (!extractSessionId) return;
+    try {
+      const res = await endExtractionSession(extractSessionId);
+      setExtractSummary({ filename: res.filename, ...res.summary });
+      void listExtractionSessions().then((r) => setExtractSessions(r.sessions)).catch(() => {});
+    } catch (e: unknown) {
+      void message.error(e instanceof Error ? e.message : "结束会话失败");
     }
   };
 
@@ -4366,23 +4382,32 @@ export default function App() {
                     disabled={extractStreaming}
                     style={{ resize: "none" }}
                   />
-                  <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 6, gap: 8 }}>
-                    {extractStreaming ? (
-                      <Button
-                        icon={<StopOutlined />}
-                        onClick={() => extractAbortRef.current?.abort()}
-                      >
-                        停止
-                      </Button>
-                    ) : null}
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
                     <Button
-                      type="primary"
-                      icon={<SendOutlined />}
-                      disabled={!extractDraft.trim() || extractStreaming}
-                      onClick={() => void handleExtractionSend()}
+                      danger
+                      disabled={extractStreaming}
+                      onClick={() => void handleEndSession()}
                     >
-                      发送
+                      结束会话
                     </Button>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      {extractStreaming ? (
+                        <Button
+                          icon={<StopOutlined />}
+                          onClick={() => extractAbortRef.current?.abort()}
+                        >
+                          停止
+                        </Button>
+                      ) : null}
+                      <Button
+                        type="primary"
+                        icon={<SendOutlined />}
+                        disabled={!extractDraft.trim() || extractStreaming}
+                        onClick={() => void handleExtractionSend()}
+                      >
+                        发送
+                      </Button>
+                    </div>
                   </div>
                 </div>
               </>
@@ -4667,6 +4692,44 @@ export default function App() {
           </div>
         )}
       </Modal>
+      {/* ── Session Summary Modal ── */}
+      <Modal
+        open={extractSummary !== null}
+        title="会话结束"
+        footer={
+          <Button type="primary" onClick={() => {
+            setExtractSummary(null);
+            setExtractSessionId(null);
+            setExtractMessages([]);
+            setExtractCards([]);
+          }}>
+            关闭
+          </Button>
+        }
+        onCancel={() => setExtractSummary(null)}
+        centered
+      >
+        {extractSummary ? (
+          <div style={{ fontSize: 15 }}>
+            <p>本次会话已结束，提炼结果如下：</p>
+            <div style={{ background: "#f6f8f5", borderRadius: 8, padding: "12px 16px", marginBottom: 12 }}>
+              <div>已确认入库：<b>{extractSummary.confirmed}</b> 张</div>
+              <div>修改后入库：<b>{extractSummary.edited}</b> 张</div>
+              <div>未采纳：<b>{extractSummary.rejected}</b> 张</div>
+              {extractSummary.pending > 0 ? <div style={{ color: "#e67e22" }}>待处理：{extractSummary.pending} 张（未确认也未拒绝）</div> : null}
+            </div>
+            {extractSummary.filename ? (
+              <div style={{ fontSize: 13, color: "#637566" }}>
+                会话记录已保存：<code>{extractSummary.filename}</code>
+              </div>
+            ) : null}
+            <div style={{ fontSize: 13, color: "#637566", marginTop: 6 }}>
+              个人知识库和组织 Pending 队列已同步更新。
+            </div>
+          </div>
+        ) : null}
+      </Modal>
+
       {!chatsOpen && appMode === "review" && mainPanel === "analyze" ? (
         <div
           className={`composer-overlay ${

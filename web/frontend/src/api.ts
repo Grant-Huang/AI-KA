@@ -497,6 +497,14 @@ export async function rejectExtractionCard(sessionId: number, cardId: number): P
   return apiJson(`/api/v1/extraction/sessions/${sessionId}/cards/${cardId}/reject`, { method: "POST" });
 }
 
+export async function endExtractionSession(sessionId: number): Promise<{
+  session_id: number;
+  filename: string;
+  summary: { confirmed: number; edited: number; rejected: number; pending: number; total: number };
+}> {
+  return apiJson(`/api/v1/extraction/sessions/${sessionId}/end`, { method: "POST" });
+}
+
 export async function updateExtractionCard(
   sessionId: number,
   cardId: number,
