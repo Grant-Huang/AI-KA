@@ -35,4 +35,5 @@ frontend_dist = ["dist/**/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["src", "web"]
 

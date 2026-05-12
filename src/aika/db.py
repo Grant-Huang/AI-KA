@@ -161,6 +161,24 @@ CREATE TABLE IF NOT EXISTS memory_file_embeddings (
   updated_at   TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS knowledge_cards (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL,
+  card_index INTEGER NOT NULL,
+  card_type TEXT NOT NULL DEFAULT 'rule',
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  applicable_scope TEXT,
+  exceptions TEXT,
+  confidence TEXT NOT NULL DEFAULT 'medium',
+  status TEXT NOT NULL DEFAULT 'pending',
+  source_turn INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_cards_conversation ON knowledge_cards(conversation_id, card_index);
+
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT NOT NULL UNIQUE,
@@ -296,6 +314,23 @@ class ConversationOutputRow:
 
 
 @dataclass(frozen=True)
+class KnowledgeCardRow:
+    id: int
+    conversation_id: int
+    card_index: int
+    card_type: str
+    title: str
+    content: str
+    applicable_scope: str | None
+    exceptions: str | None
+    confidence: str
+    status: str
+    source_turn: int | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
 class UserRow:
     id: int
     username: str
@@ -331,6 +366,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _migrate_messages_metadata(conn)
     _migrate_chunks_embedding(conn)
     _migrate_users_tables(conn)
+    _migrate_knowledge_cards_table(conn)
 
 
 def _table_column_names(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -1635,4 +1671,138 @@ def upsert_expert_profile(conn, *, user_id: int, industries: list, production_mo
           int(profile_completed), _dt.utcnow().isoformat()))
     conn.commit()
     return get_expert_profile(conn, user_id)
+
+
+# ── Knowledge Cards ───────────────────────────────────────────
+
+def _migrate_knowledge_cards_table(conn: sqlite3.Connection) -> None:
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "knowledge_cards" not in tables:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS knowledge_cards (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              conversation_id INTEGER NOT NULL,
+              card_index INTEGER NOT NULL,
+              card_type TEXT NOT NULL DEFAULT 'rule',
+              title TEXT NOT NULL,
+              content TEXT NOT NULL,
+              applicable_scope TEXT,
+              exceptions TEXT,
+              confidence TEXT NOT NULL DEFAULT 'medium',
+              status TEXT NOT NULL DEFAULT 'pending',
+              source_turn INTEGER,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+              FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_cards_conversation ON knowledge_cards(conversation_id, card_index);
+        """)
+        conn.commit()
+
+
+def _row_to_knowledge_card(r: sqlite3.Row) -> KnowledgeCardRow:
+    return KnowledgeCardRow(
+        id=int(r["id"]),
+        conversation_id=int(r["conversation_id"]),
+        card_index=int(r["card_index"]),
+        card_type=str(r["card_type"]),
+        title=str(r["title"]),
+        content=str(r["content"]),
+        applicable_scope=r["applicable_scope"],
+        exceptions=r["exceptions"],
+        confidence=str(r["confidence"]),
+        status=str(r["status"]),
+        source_turn=int(r["source_turn"]) if r["source_turn"] is not None else None,
+        created_at=str(r["created_at"]),
+        updated_at=str(r["updated_at"]),
+    )
+
+
+def insert_knowledge_card(
+    conn: sqlite3.Connection,
+    *,
+    conversation_id: int,
+    card_index: int,
+    card_type: str,
+    title: str,
+    content: str,
+    applicable_scope: str | None = None,
+    exceptions: str | None = None,
+    confidence: str = "medium",
+    status: str = "pending",
+    source_turn: int | None = None,
+) -> KnowledgeCardRow:
+    cur = conn.execute(
+        """
+        INSERT INTO knowledge_cards
+          (conversation_id, card_index, card_type, title, content,
+           applicable_scope, exceptions, confidence, status, source_turn)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+        """,
+        (conversation_id, card_index, card_type, title, content,
+         applicable_scope, exceptions, confidence, status, source_turn),
+    )
+    conn.commit()
+    r = conn.execute("SELECT * FROM knowledge_cards WHERE id=?", (int(cur.lastrowid),)).fetchone()
+    return _row_to_knowledge_card(r)
+
+
+def list_knowledge_cards(conn: sqlite3.Connection, conversation_id: int) -> list[KnowledgeCardRow]:
+    rows = conn.execute(
+        "SELECT * FROM knowledge_cards WHERE conversation_id=? ORDER BY card_index",
+        (conversation_id,),
+    ).fetchall()
+    return [_row_to_knowledge_card(r) for r in rows]
+
+
+def get_knowledge_card(conn: sqlite3.Connection, card_id: int) -> KnowledgeCardRow | None:
+    r = conn.execute("SELECT * FROM knowledge_cards WHERE id=?", (card_id,)).fetchone()
+    return _row_to_knowledge_card(r) if r else None
+
+
+def update_knowledge_card_status(conn: sqlite3.Connection, card_id: int, status: str) -> KnowledgeCardRow | None:
+    conn.execute(
+        "UPDATE knowledge_cards SET status=?, updated_at=datetime('now') WHERE id=?",
+        (status, card_id),
+    )
+    conn.commit()
+    return get_knowledge_card(conn, card_id)
+
+
+def update_knowledge_card_content(
+    conn: sqlite3.Connection,
+    card_id: int,
+    *,
+    card_type: str | None = None,
+    title: str | None = None,
+    content: str | None = None,
+    applicable_scope: str | None = None,
+    exceptions: str | None = None,
+    confidence: str | None = None,
+    status: str | None = None,
+) -> KnowledgeCardRow | None:
+    card = get_knowledge_card(conn, card_id)
+    if card is None:
+        return None
+    conn.execute(
+        """
+        UPDATE knowledge_cards SET
+          card_type=?, title=?, content=?,
+          applicable_scope=?, exceptions=?, confidence=?, status=?,
+          updated_at=datetime('now')
+        WHERE id=?
+        """,
+        (
+            card_type if card_type is not None else card.card_type,
+            title if title is not None else card.title,
+            content if content is not None else card.content,
+            applicable_scope if applicable_scope is not None else card.applicable_scope,
+            exceptions if exceptions is not None else card.exceptions,
+            confidence if confidence is not None else card.confidence,
+            status if status is not None else card.status,
+            card_id,
+        ),
+    )
+    conn.commit()
+    return get_knowledge_card(conn, card_id)
 

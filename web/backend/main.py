@@ -39,6 +39,7 @@ from backend.routers.conversations import router as conversations_router
 from backend.routers.outputs import router as outputs_router
 from backend.routers.auth import router as auth_router
 from backend.routers.expert_profile import router as expert_profile_router
+from backend.routers.extraction import router as extraction_router
 from backend.run_metadata import build_run_metadata, sha256_short
 from backend.memory_recall import iter_memory_candidate_files, memory_root_under_repo, recall_memory_snippets
 from backend.conversation_models import (
@@ -151,6 +152,7 @@ app.include_router(outputs_router)
 app.include_router(conversations_router)
 app.include_router(auth_router)
 app.include_router(expert_profile_router)
+app.include_router(extraction_router)
 
 register_builtin_hooks()
 
