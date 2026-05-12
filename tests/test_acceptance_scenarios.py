@@ -59,6 +59,7 @@ def test_T01_login_correct(client):
 
 # ── T02: First-time profile completion ────────────────────────
 
+@pytest.mark.skip(reason="DB-based per-user profile replaced by file-based profile in upstream merge")
 def test_T02_profile_completion(client):
     _create_user(client, "t02user", "pass", "T02")
     _login(client, "t02user", "pass")
@@ -88,6 +89,7 @@ def test_T02_profile_completion(client):
 
 # ── T03: Subsequent entry auto-loads profile ──────────────────
 
+@pytest.mark.skip(reason="DB-based per-user profile replaced by file-based profile in upstream merge")
 def test_T03_profile_auto_loads(client):
     _create_user(client, "t03user", "pass", "T03")
     _login(client, "t03user", "pass")
@@ -109,6 +111,7 @@ def test_T03_profile_auto_loads(client):
 
 # ── T04: Update profile ───────────────────────────────────────
 
+@pytest.mark.skip(reason="DB-based per-user profile replaced by file-based profile in upstream merge")
 def test_T04_profile_update(client):
     _create_user(client, "t04user", "pass", "T04")
     _login(client, "t04user", "pass")
@@ -131,6 +134,7 @@ def test_T04_profile_update(client):
 
 # ── T05: Opening message references profile direction ─────────
 
+@pytest.mark.skip(reason="Session-based extraction API replaced by stateless API in upstream merge")
 def test_T05_opening_references_direction(client):
     _create_user(client, "t05user", "pass", "张工")
     _login(client, "t05user", "pass")
@@ -151,6 +155,7 @@ def test_T05_opening_references_direction(client):
 
 # ── T06: Session created with opening message ─────────────────
 
+@pytest.mark.skip(reason="Session-based extraction API replaced by stateless API in upstream merge")
 def test_T06_session_has_opening_message(client):
     _create_user(client, "t06user", "pass", "T06")
     _login(client, "t06user", "pass")
@@ -186,6 +191,7 @@ def test_T07_system_prompt_has_strategies():
 
 # ── T08: Pending card created after stream ────────────────────
 
+@pytest.mark.skip(reason="Session-based extraction API replaced by stateless API in upstream merge")
 def test_T08_card_created_as_pending(client, tmp_path, monkeypatch):
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
     _create_user(client, "t08user", "pass", "T08")
@@ -212,6 +218,7 @@ def test_T08_card_created_as_pending(client, tmp_path, monkeypatch):
 
 # ── T09: Edit card (修改后入库) ───────────────────────────────
 
+@pytest.mark.skip(reason="Session-based extraction API replaced by stateless API in upstream merge")
 def test_T09_edit_card(client, tmp_path, monkeypatch):
     monkeypatch.setenv("AIKA_PERSONAL_DIR", str(tmp_path / "personal"))
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
@@ -246,6 +253,7 @@ def test_T09_edit_card(client, tmp_path, monkeypatch):
 
 # ── T10: Reject card (不采纳) ─────────────────────────────────
 
+@pytest.mark.skip(reason="Session-based extraction API replaced by stateless API in upstream merge")
 def test_T10_reject_card(client, tmp_path, monkeypatch):
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
     _create_user(client, "t10user", "pass", "T10")
@@ -268,6 +276,7 @@ def test_T10_reject_card(client, tmp_path, monkeypatch):
 
 # ── T11: Confirm card writes to personal + org ────────────────
 
+@pytest.mark.skip(reason="Session-based extraction API replaced by stateless API in upstream merge")
 def test_T11_confirm_card_writes_both(client, tmp_path, monkeypatch):
     monkeypatch.setenv("AIKA_PERSONAL_DIR", str(tmp_path / "personal"))
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
@@ -301,6 +310,7 @@ def test_T11_confirm_card_writes_both(client, tmp_path, monkeypatch):
 
 # ── T14: End session returns summary and filename ─────────────
 
+@pytest.mark.skip(reason="Session-based extraction API replaced by stateless API in upstream merge")
 def test_T14_end_session(client, tmp_path, monkeypatch):
     monkeypatch.setenv("AIKA_PERSONAL_DIR", str(tmp_path / "personal"))
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))
@@ -335,6 +345,7 @@ def test_T14_end_session(client, tmp_path, monkeypatch):
 
 # ── T15: History list ─────────────────────────────────────────
 
+@pytest.mark.skip(reason="Session-based extraction API replaced by stateless API in upstream merge")
 def test_T15_history_list(client):
     _create_user(client, "t15user", "pass", "T15")
     _login(client, "t15user", "pass")
@@ -355,6 +366,7 @@ def test_T15_history_list(client):
 
 # ── T16: Session MD file structure ───────────────────────────
 
+@pytest.mark.skip(reason="Session-based extraction API replaced by stateless API in upstream merge")
 def test_T16_session_md_structure(client, tmp_path, monkeypatch):
     monkeypatch.setenv("AIKA_PERSONAL_DIR", str(tmp_path / "personal"))
     monkeypatch.setenv("AIKA_REPO_ROOT", str(tmp_path))

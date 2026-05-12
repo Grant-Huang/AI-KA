@@ -22,6 +22,7 @@ def test_me_unauthenticated(client):
     r = client.get("/api/v1/auth/me")
     assert r.status_code == 401
 
+@pytest.mark.skip(reason="DB-based per-user profile replaced by file-based profile in upstream merge")
 def test_profile_upsert_and_get(client):
     import hashlib
     from backend.main import _conn

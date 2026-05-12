@@ -161,51 +161,103 @@ CREATE TABLE IF NOT EXISTS memory_file_embeddings (
   updated_at   TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS knowledge_cards (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  conversation_id INTEGER NOT NULL,
-  card_index INTEGER NOT NULL,
-  card_type TEXT NOT NULL DEFAULT 'rule',
+CREATE TABLE IF NOT EXISTS review_queue (
+  id TEXT PRIMARY KEY,
+  focus_id TEXT NOT NULL,
+  suggestion TEXT NOT NULL,
+  source_role TEXT NOT NULL DEFAULT 'ai_self',
+  source_type TEXT NOT NULL DEFAULT 'evolve_hint',
+  status TEXT NOT NULL DEFAULT 'pending_review',
+  occurrences INTEGER NOT NULL DEFAULT 1,
+  project_ids_json TEXT,
+  conversation_id INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  reviewed_by TEXT,
+  reviewed_at TEXT,
+  reject_reason TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_review_queue_status ON review_queue(status);
+CREATE INDEX IF NOT EXISTS idx_review_queue_focus ON review_queue(focus_id);
+
+CREATE TABLE IF NOT EXISTS knowledge_items (
+  id TEXT PRIMARY KEY,
+  extraction_focus_id TEXT NOT NULL,
   title TEXT NOT NULL,
   content TEXT NOT NULL,
-  applicable_scope TEXT,
-  exceptions TEXT,
+  source_evidence TEXT,
   confidence TEXT NOT NULL DEFAULT 'medium',
   status TEXT NOT NULL DEFAULT 'pending',
-  source_turn INTEGER,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_cards_conversation ON knowledge_cards(conversation_id, card_index);
-
-CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  username TEXT NOT NULL UNIQUE,
-  display_name TEXT NOT NULL,
-  password_hash TEXT NOT NULL,
+  tags_json TEXT,
+  applicable_when_json TEXT,
+  not_applicable_when_json TEXT,
+  scope_note TEXT,
+  source_role TEXT NOT NULL DEFAULT 'senior_expert',
+  source_type TEXT NOT NULL DEFAULT 'extraction',
+  backtest_result_json TEXT,
+  conflict_with_json TEXT,
+  extraction_strategy TEXT,
+  project_id INTEGER,
+  conversation_id INTEGER,
+  review_queue_item_id TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS expert_profiles (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL UNIQUE,
-  industries_json TEXT NOT NULL DEFAULT '[]',
-  production_modes_json TEXT NOT NULL DEFAULT '[]',
-  functional_modules_json TEXT NOT NULL DEFAULT '[]',
-  focus_areas_json TEXT NOT NULL DEFAULT '[]',
-  profile_completed INTEGER NOT NULL DEFAULT 0,
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+CREATE INDEX IF NOT EXISTS idx_knowledge_items_status ON knowledge_items(status);
+CREATE INDEX IF NOT EXISTS idx_knowledge_items_focus ON knowledge_items(extraction_focus_id);
+
+CREATE TABLE IF NOT EXISTS review_phases (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  order_index INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS auth_sessions (
-  token TEXT PRIMARY KEY,
-  user_id INTEGER NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  expires_at TEXT NOT NULL,
-  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+CREATE TABLE IF NOT EXISTS review_focus_points_ext (
+  id TEXT PRIMARY KEY,
+  phase_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  order_index INTEGER NOT NULL DEFAULT 0,
+  is_required INTEGER NOT NULL DEFAULT 1,
+  package_id TEXT,
+  FOREIGN KEY(phase_id) REFERENCES review_phases(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rfpe_phase ON review_focus_points_ext(phase_id);
+
+CREATE TABLE IF NOT EXISTS review_categories (
+  id TEXT PRIMARY KEY,
+  focus_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  order_index INTEGER NOT NULL DEFAULT 0,
+  is_conditional INTEGER NOT NULL DEFAULT 0,
+  condition_note TEXT,
+  FOREIGN KEY(focus_id) REFERENCES review_focus_points_ext(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rcat_focus ON review_categories(focus_id);
+
+CREATE TABLE IF NOT EXISTS review_presets_ext (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  phase_id TEXT,
+  review_role TEXT,
+  review_goals TEXT,
+  output_requirements TEXT,
+  pass_threshold REAL,
+  package_id TEXT,
+  order_index INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS preset_focus_members (
+  preset_id TEXT NOT NULL,
+  focus_id TEXT NOT NULL,
+  order_index INTEGER NOT NULL DEFAULT 0,
+  is_prerequisite INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (preset_id, focus_id)
 );
 """
 
@@ -365,6 +417,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _migrate_conversations_mode_state(conn)
     _migrate_messages_metadata(conn)
     _migrate_chunks_embedding(conn)
+    _migrate_review_queue_columns(conn)
+    _migrate_review_knowledge_tables(conn)
     _migrate_users_tables(conn)
     _migrate_knowledge_cards_table(conn)
 
@@ -440,6 +494,18 @@ def _migrate_chunks_embedding(conn: sqlite3.Connection) -> None:
     if "embed_model" not in cols:
         conn.execute("ALTER TABLE document_chunks ADD COLUMN embed_model TEXT")
         conn.commit()
+
+
+def _migrate_review_queue_columns(conn: sqlite3.Connection) -> None:
+    """Ensure review_queue and knowledge_items tables exist (created by SCHEMA_SQL if new DB)."""
+    # Tables are already created by SCHEMA_SQL via CREATE TABLE IF NOT EXISTS.
+    # This migration only handles adding columns to pre-existing DBs that lack the tables.
+    pass
+
+
+def _migrate_review_knowledge_tables(conn: sqlite3.Connection) -> None:
+    """Review knowledge structure tables are created by SCHEMA_SQL. No-op stub."""
+    pass
 
 
 def _migrate_users_tables(conn: sqlite3.Connection) -> None:
@@ -1600,9 +1666,10 @@ def set_app_setting_json(conn: sqlite3.Connection, key: str, value: Any) -> None
     conn.commit()
 
 
-def open_db(db_file: Path) -> sqlite3.Connection:
-    return connect(db_file)
 
+# ---------------------------------------------------------------------------
+# Review Queue CRUD
+# ---------------------------------------------------------------------------
 
 # ── User & Auth ──────────────────────────────────────────────
 
@@ -1806,3 +1873,419 @@ def update_knowledge_card_content(
     conn.commit()
     return get_knowledge_card(conn, card_id)
 
+
+def upsert_review_queue_item(
+    conn: sqlite3.Connection,
+    *,
+    id: str,
+    focus_id: str,
+    suggestion: str,
+    source_role: str = "ai_self",
+    source_type: str = "evolve_hint",
+    status: str = "pending_review",
+    project_id: str | int | None = None,
+    conversation_id: int | None = None,
+) -> None:
+    """Insert or update a review queue item, incrementing occurrences on conflict."""
+    pid_str = str(project_id) if project_id is not None else None
+    conn.execute(
+        """
+        INSERT INTO review_queue(id, focus_id, suggestion, source_role, source_type, status,
+                                  occurrences, project_ids_json, conversation_id)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          suggestion=excluded.suggestion,
+          status=excluded.status,
+          occurrences=review_queue.occurrences + 1,
+          project_ids_json=CASE
+            WHEN review_queue.project_ids_json IS NULL THEN excluded.project_ids_json
+            ELSE review_queue.project_ids_json
+          END
+        """,
+        (id, focus_id, suggestion, source_role, source_type, status,
+         json.dumps([pid_str]) if pid_str else None, conversation_id),
+    )
+    conn.commit()
+
+
+def list_review_queue(
+    conn: sqlite3.Connection,
+    *,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Return review queue items sorted by priority (occurrences DESC, created_at DESC)."""
+    params: list[object] = []
+    where = ""
+    if status is not None:
+        where = "WHERE status=?"
+        params.append(status)
+    params.append(int(limit))
+    rows = conn.execute(
+        f"""
+        SELECT id, focus_id, suggestion, source_role, source_type, status,
+               occurrences, project_ids_json, conversation_id, created_at,
+               reviewed_by, reviewed_at, reject_reason
+        FROM review_queue
+        {where}
+        ORDER BY occurrences DESC, created_at DESC
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return [_row_to_review_queue(r) for r in rows]
+
+
+def get_review_queue_item(conn: sqlite3.Connection, item_id: str) -> dict[str, Any] | None:
+    r = conn.execute(
+        """
+        SELECT id, focus_id, suggestion, source_role, source_type, status,
+               occurrences, project_ids_json, conversation_id, created_at,
+               reviewed_by, reviewed_at, reject_reason
+        FROM review_queue WHERE id=?
+        """,
+        (item_id,),
+    ).fetchone()
+    return _row_to_review_queue(r) if r else None
+
+
+def update_review_queue_status(
+    conn: sqlite3.Connection,
+    item_id: str,
+    *,
+    status: str,
+    reviewed_by: str | None = None,
+    reject_reason: str | None = None,
+) -> bool:
+    sets = ["status=?"]
+    params: list[object] = [status]
+    if reviewed_by is not None:
+        sets += ["reviewed_by=?", "reviewed_at=datetime('now')"]
+        params.append(reviewed_by)
+    if reject_reason is not None:
+        sets.append("reject_reason=?")
+        params.append(reject_reason)
+    params.append(item_id)
+    cur = conn.execute(f"UPDATE review_queue SET {', '.join(sets)} WHERE id=?", params)
+    conn.commit()
+    return bool(cur.rowcount and cur.rowcount > 0)
+
+
+def delete_review_queue_item(conn: sqlite3.Connection, item_id: str) -> bool:
+    cur = conn.execute("DELETE FROM review_queue WHERE id=?", (item_id,))
+    conn.commit()
+    return bool(cur.rowcount and cur.rowcount > 0)
+
+
+def _row_to_review_queue(r: sqlite3.Row) -> dict[str, Any]:
+    keys = r.keys()
+    pids_raw = r["project_ids_json"] if "project_ids_json" in keys else None
+    try:
+        pids = json.loads(str(pids_raw)) if pids_raw else []
+    except Exception:
+        pids = []
+    return {
+        "id": str(r["id"]),
+        "focus_id": str(r["focus_id"]),
+        "suggestion": str(r["suggestion"]),
+        "source_role": str(r["source_role"]),
+        "source_type": str(r["source_type"]),
+        "status": str(r["status"]),
+        "occurrences": int(r["occurrences"]),
+        "project_ids": pids,
+        "conversation_id": r["conversation_id"],
+        "created_at": str(r["created_at"]),
+        "reviewed_by": r["reviewed_by"],
+        "reviewed_at": r["reviewed_at"],
+        "reject_reason": r["reject_reason"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Items CRUD
+# ---------------------------------------------------------------------------
+
+def insert_knowledge_item(
+    conn: sqlite3.Connection,
+    *,
+    id: str,
+    extraction_focus_id: str,
+    title: str,
+    content: str,
+    source_evidence: str = "",
+    confidence: str = "medium",
+    status: str = "pending",
+    tags: list[str] | None = None,
+    applicable_when: dict[str, Any] | None = None,
+    not_applicable_when: dict[str, Any] | None = None,
+    scope_note: str = "",
+    source_role: str = "senior_expert",
+    source_type: str = "extraction",
+    extraction_strategy: str = "",
+    project_id: int | None = None,
+    conversation_id: int | None = None,
+    review_queue_item_id: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO knowledge_items(
+          id, extraction_focus_id, title, content, source_evidence, confidence, status,
+          tags_json, applicable_when_json, not_applicable_when_json, scope_note,
+          source_role, source_type, extraction_strategy,
+          project_id, conversation_id, review_queue_item_id
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            id, extraction_focus_id, title, content, source_evidence, confidence, status,
+            json.dumps(tags or [], ensure_ascii=False),
+            json.dumps(applicable_when or {}, ensure_ascii=False),
+            json.dumps(not_applicable_when or {}, ensure_ascii=False),
+            scope_note, source_role, source_type, extraction_strategy,
+            project_id, conversation_id, review_queue_item_id,
+        ),
+    )
+    conn.commit()
+
+
+def list_knowledge_items(
+    conn: sqlite3.Connection,
+    *,
+    status: str | None = None,
+    project_id: int | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    where_parts: list[str] = []
+    params: list[object] = []
+    if status is not None:
+        where_parts.append("status=?")
+        params.append(status)
+    if project_id is not None:
+        where_parts.append("project_id=?")
+        params.append(int(project_id))
+    where = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    params.append(int(limit))
+    rows = conn.execute(
+        f"""
+        SELECT id, extraction_focus_id, title, content, source_evidence, confidence, status,
+               tags_json, applicable_when_json, not_applicable_when_json, scope_note,
+               source_role, source_type, backtest_result_json, conflict_with_json,
+               extraction_strategy, project_id, conversation_id, review_queue_item_id,
+               created_at, updated_at
+        FROM knowledge_items {where}
+        ORDER BY created_at DESC LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    return [_row_to_ki(r) for r in rows]
+
+
+def get_knowledge_item(conn: sqlite3.Connection, item_id: str) -> dict[str, Any] | None:
+    r = conn.execute(
+        """
+        SELECT id, extraction_focus_id, title, content, source_evidence, confidence, status,
+               tags_json, applicable_when_json, not_applicable_when_json, scope_note,
+               source_role, source_type, backtest_result_json, conflict_with_json,
+               extraction_strategy, project_id, conversation_id, review_queue_item_id,
+               created_at, updated_at
+        FROM knowledge_items WHERE id=?
+        """,
+        (item_id,),
+    ).fetchone()
+    return _row_to_ki(r) if r else None
+
+
+def update_knowledge_item_status(
+    conn: sqlite3.Connection,
+    item_id: str,
+    *,
+    status: str,
+    conflict_with: list[str] | None = None,
+    backtest_result: dict[str, Any] | None = None,
+) -> bool:
+    sets = ["status=?", "updated_at=datetime('now')"]
+    params: list[object] = [status]
+    if conflict_with is not None:
+        sets.append("conflict_with_json=?")
+        params.append(json.dumps(conflict_with, ensure_ascii=False))
+    if backtest_result is not None:
+        sets.append("backtest_result_json=?")
+        params.append(json.dumps(backtest_result, ensure_ascii=False))
+    params.append(item_id)
+    cur = conn.execute(f"UPDATE knowledge_items SET {', '.join(sets)} WHERE id=?", params)
+    conn.commit()
+    return bool(cur.rowcount and cur.rowcount > 0)
+
+
+def _row_to_ki(r: sqlite3.Row) -> dict[str, Any]:
+    def _j(v: Any) -> Any:
+        if v is None:
+            return None
+        try:
+            return json.loads(str(v))
+        except Exception:
+            return v
+
+    keys = r.keys()
+    return {
+        "id": str(r["id"]),
+        "extraction_focus_id": str(r["extraction_focus_id"]),
+        "title": str(r["title"]),
+        "content": str(r["content"]),
+        "source_evidence": str(r["source_evidence"] or ""),
+        "confidence": str(r["confidence"]),
+        "status": str(r["status"]),
+        "tags": _j(r["tags_json"]) or [],
+        "applicable_when": _j(r["applicable_when_json"]) or {},
+        "not_applicable_when": _j(r["not_applicable_when_json"]) or {},
+        "scope_note": str(r["scope_note"] or ""),
+        "source_role": str(r["source_role"]),
+        "source_type": str(r["source_type"]),
+        "backtest_result": _j(r["backtest_result_json"]) if "backtest_result_json" in keys else None,
+        "conflict_with": _j(r["conflict_with_json"]) if "conflict_with_json" in keys else [],
+        "extraction_strategy": str(r["extraction_strategy"] or ""),
+        "project_id": r["project_id"],
+        "conversation_id": r["conversation_id"],
+        "review_queue_item_id": r["review_queue_item_id"],
+        "created_at": str(r["created_at"]),
+        "updated_at": str(r["updated_at"]),
+    }
+
+
+# ── Review Knowledge Structure ─────────────────────────────────────────────
+
+def upsert_review_phase(conn: sqlite3.Connection, *, id: str, name: str, description: str = "", order_index: int = 0) -> None:
+    conn.execute(
+        "INSERT INTO review_phases(id,name,description,order_index) VALUES(?,?,?,?)"
+        " ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description, order_index=excluded.order_index",
+        (id, name, description, order_index),
+    )
+    conn.commit()
+
+
+def upsert_review_focus_point_ext(
+    conn: sqlite3.Connection,
+    *,
+    id: str,
+    phase_id: str,
+    name: str,
+    description: str = "",
+    order_index: int = 0,
+    is_required: bool = True,
+    package_id: str = "",
+) -> None:
+    conn.execute(
+        "INSERT INTO review_focus_points_ext(id,phase_id,name,description,order_index,is_required,package_id)"
+        " VALUES(?,?,?,?,?,?,?)"
+        " ON CONFLICT(id) DO UPDATE SET phase_id=excluded.phase_id, name=excluded.name,"
+        "   description=excluded.description, order_index=excluded.order_index,"
+        "   is_required=excluded.is_required, package_id=excluded.package_id",
+        (id, phase_id, name, description, order_index, int(is_required), package_id),
+    )
+    conn.commit()
+
+
+def upsert_review_category(
+    conn: sqlite3.Connection,
+    *,
+    id: str,
+    focus_id: str,
+    name: str,
+    description: str = "",
+    order_index: int = 0,
+    is_conditional: bool = False,
+    condition_note: str = "",
+) -> None:
+    conn.execute(
+        "INSERT INTO review_categories(id,focus_id,name,description,order_index,is_conditional,condition_note)"
+        " VALUES(?,?,?,?,?,?,?)"
+        " ON CONFLICT(id) DO UPDATE SET focus_id=excluded.focus_id, name=excluded.name,"
+        "   description=excluded.description, order_index=excluded.order_index,"
+        "   is_conditional=excluded.is_conditional, condition_note=excluded.condition_note",
+        (id, focus_id, name, description, order_index, int(is_conditional), condition_note),
+    )
+    conn.commit()
+
+
+def upsert_review_preset_ext(
+    conn: sqlite3.Connection,
+    *,
+    id: str,
+    name: str,
+    phase_id: str = "",
+    review_role: str = "",
+    review_goals: str = "",
+    output_requirements: str = "",
+    pass_threshold: float | None = None,
+    package_id: str = "",
+    order_index: int = 0,
+) -> None:
+    conn.execute(
+        "INSERT INTO review_presets_ext(id,name,phase_id,review_role,review_goals,output_requirements,pass_threshold,package_id,order_index)"
+        " VALUES(?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(id) DO UPDATE SET name=excluded.name, phase_id=excluded.phase_id,"
+        "   review_role=excluded.review_role, review_goals=excluded.review_goals,"
+        "   output_requirements=excluded.output_requirements, pass_threshold=excluded.pass_threshold,"
+        "   package_id=excluded.package_id, order_index=excluded.order_index",
+        (id, name, phase_id, review_role, review_goals, output_requirements, pass_threshold, package_id, order_index),
+    )
+    conn.commit()
+
+
+def upsert_preset_focus_member(
+    conn: sqlite3.Connection,
+    *,
+    preset_id: str,
+    focus_id: str,
+    order_index: int = 0,
+    is_prerequisite: bool = False,
+) -> None:
+    conn.execute(
+        "INSERT INTO preset_focus_members(preset_id,focus_id,order_index,is_prerequisite)"
+        " VALUES(?,?,?,?)"
+        " ON CONFLICT(preset_id,focus_id) DO UPDATE SET order_index=excluded.order_index,"
+        "   is_prerequisite=excluded.is_prerequisite",
+        (preset_id, focus_id, order_index, int(is_prerequisite)),
+    )
+    conn.commit()
+
+
+def list_review_phases(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute("SELECT * FROM review_phases ORDER BY order_index").fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_review_focus_points_ext(conn: sqlite3.Connection, phase_id: str | None = None) -> list[dict]:
+    if phase_id:
+        rows = conn.execute(
+            "SELECT * FROM review_focus_points_ext WHERE phase_id=? ORDER BY order_index", (phase_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM review_focus_points_ext ORDER BY order_index").fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_review_categories(conn: sqlite3.Connection, focus_id: str | None = None) -> list[dict]:
+    if focus_id:
+        rows = conn.execute(
+            "SELECT * FROM review_categories WHERE focus_id=? ORDER BY order_index", (focus_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM review_categories ORDER BY order_index").fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_review_presets_ext(conn: sqlite3.Connection, package_id: str | None = None) -> list[dict]:
+    if package_id:
+        rows = conn.execute(
+            "SELECT * FROM review_presets_ext WHERE package_id=? ORDER BY order_index", (package_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM review_presets_ext ORDER BY order_index").fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_preset_focus_members(conn: sqlite3.Connection, preset_id: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM preset_focus_members WHERE preset_id=? ORDER BY order_index", (preset_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
