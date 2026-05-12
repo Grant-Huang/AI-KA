@@ -911,10 +911,6 @@ export default function App() {
     } catch { /* ignore */ }
     setCurrentUser(null);
     setLoginOpen(true);
-    setExtractSessions([]);
-    setExtractSessionId(null);
-    setExtractMessages([]);
-    setExtractCards([]);
   };
 
   const handleSaveProfile = async () => {
