@@ -497,6 +497,22 @@ export async function rejectExtractionCard(sessionId: number, cardId: number): P
   return apiJson(`/api/v1/extraction/sessions/${sessionId}/cards/${cardId}/reject`, { method: "POST" });
 }
 
+export async function uploadExtractionDocument(
+  sessionId: number,
+  file: File,
+): Promise<{ filename: string; char_count: number; preview: string }> {
+  const form = new FormData();
+  form.append("file", file);
+  const r = await fetch(`${BASE}/api/v1/extraction/sessions/${sessionId}/upload`, {
+    method: "POST",
+    credentials: "include",
+    body: form,
+  });
+  const j = (await r.json()) as { status: string; data?: unknown; message?: string };
+  if (!r.ok || j.status === "error") throw new Error(String(j.message || `HTTP ${r.status}`));
+  return j.data as { filename: string; char_count: number; preview: string };
+}
+
 export async function endExtractionSession(sessionId: number): Promise<{
   session_id: number;
   filename: string;

@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import tempfile
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Cookie, HTTPException
+from fastapi import APIRouter, Cookie, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -431,4 +433,73 @@ def end_session(
             "pending": len(pending),
             "total": len(cards),
         },
+    }))
+
+
+# ── Document upload (T12) ─────────────────────────────────────
+
+def _extract_text(file_path: Path, filename: str) -> str:
+    """Extract text from uploaded document. Uses markitdown if available."""
+    ext = Path(filename).suffix.lower()
+    try:
+        from markitdown import MarkItDown  # type: ignore[import]
+        md = MarkItDown()
+        result = md.convert(str(file_path))
+        return result.text_content or ""
+    except (ImportError, Exception):
+        # Fallback: try reading as UTF-8 text
+        try:
+            return file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return f"[文件 {filename} 无法解析]"
+
+
+_UPLOAD_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+@router.post("/sessions/{session_id}/upload")
+async def upload_document(
+    session_id: int,
+    file: UploadFile = File(...),
+    aika_token: str | None = Cookie(default=None),
+) -> JSONResponse:
+    """Upload a document to a session; text is stored as a system message for context."""
+    user_id = _require_user(aika_token)
+    conn = get_conn()
+    conv = dbm.get_conversation(conn, session_id)
+    if conv is None or conv.analysis_type != "extraction":
+        raise HTTPException(status_code=404, detail="session not found")
+
+    filename = file.filename or "document"
+    raw = await file.read()
+    if len(raw) > _UPLOAD_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="文件超过 10 MB 限制")
+
+    with tempfile.NamedTemporaryFile(
+        suffix=Path(filename).suffix, delete=False
+    ) as tmp:
+        tmp.write(raw)
+        tmp_path = Path(tmp.name)
+
+    try:
+        text = _extract_text(tmp_path, filename)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    if not text.strip():
+        raise HTTPException(status_code=422, detail="文件内容为空或无法解析")
+
+    # Truncate to avoid flooding the context
+    max_chars = 12000
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n\n…（内容已截断）"
+
+    # Store as a "document" role message so the chat stream can pick it up
+    doc_note = f"[用户上传文档：{filename}]\n\n{text}"
+    dbm.insert_message(conn, conversation_id=session_id, role="user", content=doc_note)
+
+    return JSONResponse(ok({
+        "filename": filename,
+        "char_count": len(text),
+        "preview": text[:200],
     }))

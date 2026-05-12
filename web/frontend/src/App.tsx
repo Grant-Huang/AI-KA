@@ -48,6 +48,7 @@ import {
   HistoryOutlined,
   LogoutOutlined,
   TagOutlined,
+  PaperClipOutlined,
 } from "@ant-design/icons";
 import {
   apiJson,
@@ -78,6 +79,7 @@ import {
   rejectExtractionCard,
   updateExtractionCard,
   endExtractionSession,
+  uploadExtractionDocument,
   type AuthUser,
   type ExpertProfile,
   type KnowledgeCard,
@@ -524,6 +526,7 @@ export default function App() {
   } | null>(null);
   const extractAbortRef = useRef<AbortController | null>(null);
   const extractChatBottomRef = useRef<HTMLDivElement>(null);
+  const extractFileInputRef = useRef<HTMLInputElement>(null);
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -1063,6 +1066,25 @@ export default function App() {
       void listExtractionSessions().then((r) => setExtractSessions(r.sessions)).catch(() => {});
     } catch (e: unknown) {
       void message.error(e instanceof Error ? e.message : "结束会话失败");
+    }
+  };
+
+  const handleDocumentUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!extractSessionId || !e.target.files?.length) return;
+    const file = e.target.files[0];
+    e.target.value = "";
+    try {
+      const res = await uploadExtractionDocument(extractSessionId, file);
+      setExtractMessages((prev) => [
+        ...prev,
+        {
+          role: "user",
+          content: `📎 已上传文档：**${res.filename}**（${res.char_count} 字符）\n\n${res.preview}${res.char_count > 200 ? "…" : ""}`,
+        },
+      ]);
+      void message.success(`文档「${res.filename}」已上传，AI 将基于文档内容提问`);
+    } catch (err: unknown) {
+      void message.error(err instanceof Error ? err.message : "上传失败");
     }
   };
 
@@ -4391,6 +4413,19 @@ export default function App() {
                       结束会话
                     </Button>
                     <div style={{ display: "flex", gap: 8 }}>
+                      <input
+                        ref={extractFileInputRef}
+                        type="file"
+                        style={{ display: "none" }}
+                        accept=".txt,.md,.pdf,.docx,.xlsx,.pptx,.csv"
+                        onChange={(e) => void handleDocumentUpload(e)}
+                      />
+                      <Button
+                        icon={<PaperClipOutlined />}
+                        disabled={extractStreaming}
+                        onClick={() => extractFileInputRef.current?.click()}
+                        title="上传文档"
+                      />
                       {extractStreaming ? (
                         <Button
                           icon={<StopOutlined />}

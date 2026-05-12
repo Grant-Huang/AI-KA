@@ -1655,7 +1655,7 @@ def get_expert_profile(conn, user_id: int) -> ExpertProfileRow | None:
     )
 
 def upsert_expert_profile(conn, *, user_id: int, industries: list, production_modes: list, functional_modules: list, focus_areas: list, profile_completed: bool = True) -> ExpertProfileRow:
-    from datetime import datetime as _dt
+    from datetime import datetime as _dt, timezone as _tz
     conn.execute("""
         INSERT INTO expert_profiles(user_id,industries_json,production_modes_json,functional_modules_json,focus_areas_json,profile_completed,updated_at)
         VALUES (?,?,?,?,?,?,?)
@@ -1668,7 +1668,7 @@ def upsert_expert_profile(conn, *, user_id: int, industries: list, production_mo
           updated_at=excluded.updated_at
     """, (user_id, json.dumps(industries, ensure_ascii=False), json.dumps(production_modes, ensure_ascii=False),
           json.dumps(functional_modules, ensure_ascii=False), json.dumps(focus_areas, ensure_ascii=False),
-          int(profile_completed), _dt.utcnow().isoformat()))
+          int(profile_completed), _dt.now(_tz.utc).isoformat()))
     conn.commit()
     return get_expert_profile(conn, user_id)
 

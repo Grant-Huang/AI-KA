@@ -1,6 +1,6 @@
 from __future__ import annotations
 import hashlib, secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Cookie, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -27,7 +27,7 @@ def login(body: LoginBody) -> JSONResponse:
     if user is None or user.password_hash != _hash_password(body.password):
         return JSONResponse(err("用户名或密码错误"), status_code=401)
     token = secrets.token_hex(32)
-    expires_at = (datetime.utcnow() + timedelta(days=7)).isoformat()
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
     dbm.create_auth_session(conn, user_id=user.id, token=token, expires_at=expires_at)
     resp = JSONResponse(ok({"user_id": user.id, "username": user.username, "display_name": user.display_name}))
     resp.set_cookie("aika_token", token, httponly=True, samesite="lax", max_age=7*24*3600)
