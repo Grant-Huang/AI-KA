@@ -80,8 +80,151 @@ _EXTRACTION_STRATEGIES = {
 }
 
 
+_COACH_ROUNDS_INTERVAL = 5  # 每隔几轮触发一次场边教练分析
+
+_EXPERT_MODELING_PROTOCOL = """
+【专家建模协议 - 实时适应（Scale-1 学习）】
+在对话过程中持续维护对当前专家的隐式心理模型，追踪以下信号：
+
+观察维度：
+• 回答风格：是否倾向举具体案例（检测"比如/有一次/上个项目/当时"）或倾向讲原则
+• 回答密度：字数突增→触到真实领域；字数过少→方向偏离或防御
+• 不确定信号："通常/一般/这要看情况/基本上"→必须追问例外条件
+• 防御信号："这个说不好/不方便说/不太清楚"→切换为正向案例先行
+• 自我修正："不对，应该说/更准确地说"→高价值知识点，立即深挖
+
+动态调整规则：
+• 检测到"案例型"专家（B型）→ 多用"给我说一个最难处理的...是当时发生了什么？"
+• 检测到"原则型"专家（A型）→ 多用"这个原则在什么情况下会失效？能举个反例吗？"
+• 检测到防御模式（C型）→ 先问成功案例，再从侧面切入"这类项目通常在哪里出问题"
+• 每3轮自检：当前方向是否还在产出新信息？若停滞主动换方向
+""".strip()
+
+_COACH_SYSTEM_PROMPT = """你是知识提取会话的旁观质量分析员。你不参与对话，只做客观分析。
+你的任务：分析对话记录，给出一条简短的提问方向建议。
+
+规则：
+- 只输出合法 JSON，不要任何其他内容
+- whisper 字段不超过 80 字，必须是具体的行动建议而非泛泛而谈
+- coverage_gaps 列出真正缺失的知识区域（不要超过 3 个）"""
+
+_META_REFLECT_SYSTEM_PROMPT = """你是知识提取质量审查员，负责在会话结束后对整个会话做系统性评估。
+
+你的任务：
+1. 标注哪些问题轮次产生了高价值知识卡（ki_count > 0），哪些没有
+2. 分析高价值问题的共同特征（用了什么策略、什么表达方式触发了好回答）
+3. 找出哪些知识类型仍然空白，下次应该优先覆盖
+4. 提炼 3-5 条"针对此类专家的提问改进建议"
+5. 推断专家类型：A型（原则型，举例少）、B型（案例型，难抽象）、C型（防御型）或 mixed
+
+规则：
+- 只输出合法 JSON，格式如下
+- 所有字段必须填写，knowledge_gaps 至少 1 条，improvement_suggestions 至少 2 条"""
+
+
 def _sse_line(obj: dict[str, Any]) -> str:
     return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+
+
+def _run_coach_analysis(
+    provider: Any,
+    cfg: Any,
+    conv_history: list[dict[str, str]],
+    ki_ids: list[str],
+    ki_items: list[dict],
+) -> dict[str, Any]:
+    """独立 LLM 调用：场边教练分析（每 N 轮触发）。"""
+    conv_text = "\n".join(
+        f"[{m.get('role','?')}]: {m.get('content','')[:300]}"
+        for m in conv_history[-20:]  # 最近 20 条
+    )
+    ki_text = "\n".join(
+        f"- {item.get('title','?')} [{item.get('confidence','?')}]"
+        for item in ki_items[:10]
+    ) or "（暂无知识卡）"
+
+    user_msg = (
+        f"【对话记录（最近部分）】\n{conv_text}\n\n"
+        f"【已提取知识卡（共 {len(ki_ids)} 条）】\n{ki_text}\n\n"
+        "请分析并输出 JSON："
+    )
+    acc: list[str] = []
+    try:
+        for chunk in provider.chat_stream(
+            system=_COACH_SYSTEM_PROMPT,
+            user=user_msg,
+            config=cfg,
+        ):
+            text = chunk.get("content") or chunk.get("text") or "" if isinstance(chunk, dict) else str(chunk)
+            acc.append(text)
+    except Exception:
+        return {}
+
+    raw = "".join(acc).strip()
+    # 提取第一个 JSON 块
+    start = raw.find("{")
+    end = raw.rfind("}") + 1
+    if start < 0 or end <= start:
+        return {}
+    try:
+        result = json.loads(raw[start:end])
+    except Exception:
+        return {}
+    return result
+
+
+def _run_meta_reflect(
+    provider: Any,
+    cfg: Any,
+    conv_history: list[dict[str, str]],
+    ki_items: list[dict],
+    session_ref: str,
+) -> dict[str, Any]:
+    """独立 LLM 调用：会话后元反思（Session Meta-Reflection）。"""
+    conv_text = "\n".join(
+        f"[{m.get('role','?')} 第{i+1}条]: {m.get('content','')[:400]}"
+        for i, m in enumerate(conv_history)
+    )
+    ki_text = "\n".join(
+        f"- [{item.get('status','?')}] {item.get('title','?')}: {str(item.get('content',''))[:150]}"
+        for item in ki_items
+    ) or "（本次会话未产出知识卡）"
+
+    user_msg = (
+        f"【会话参考 ID】{session_ref}\n\n"
+        f"【完整对话记录】\n{conv_text}\n\n"
+        f"【知识卡列表（含审批状态）】\n{ki_text}\n\n"
+        "请输出 JSON 评估报告，格式：\n"
+        "{\n"
+        '  "expert_type": "A|B|C|mixed",\n'
+        '  "high_value_questions": [{"turn_hint": "...", "strategy": "...", "reason": "..."}],\n'
+        '  "low_value_questions": [{"turn_hint": "...", "reason": "..."}],\n'
+        '  "improvement_suggestions": ["..."],\n'
+        '  "knowledge_gaps": ["..."]\n'
+        "}"
+    )
+    acc: list[str] = []
+    try:
+        for chunk in provider.chat_stream(
+            system=_META_REFLECT_SYSTEM_PROMPT,
+            user=user_msg,
+            config=cfg,
+        ):
+            text = chunk.get("content") or chunk.get("text") or "" if isinstance(chunk, dict) else str(chunk)
+            acc.append(text)
+    except Exception:
+        return {}
+
+    raw = "".join(acc).strip()
+    start = raw.find("{")
+    end = raw.rfind("}") + 1
+    if start < 0 or end <= start:
+        return {}
+    try:
+        result = json.loads(raw[start:end])
+    except Exception:
+        return {}
+    return result
 
 
 def _get_llm_provider():
@@ -439,6 +582,8 @@ def _build_active_extraction_system_prompt(
 2. 确保每条规则都有明确的适用范围
 3. 追问例外条件，避免规则过于绝对
 
+{_EXPERT_MODELING_PROTOCOL}
+
 {KI_INSTRUCTION}
 
 满意度判断标准（内部用）：
@@ -547,6 +692,24 @@ def active_extraction_stream(body: ActiveExtractionBody) -> StreamingResponse:
             "auto_advance": auto_advance,
             "round_number": body.round_number,
         })
+
+        # ── 场边教练（每 N 轮触发，独立 LLM 调用）────────────────────────────
+        if body.round_number > 0 and body.round_number % _COACH_ROUNDS_INTERVAL == 0:
+            try:
+                all_ki = dbm.list_knowledge_items(conn, limit=50)
+                coach_result = _run_coach_analysis(
+                    provider, cfg,
+                    conv_history=([{"role": r, "content": c} for r, c in prior]
+                                  + [{"role": "user", "content": body.user_input},
+                                     {"role": "assistant", "content": full_text}]),
+                    ki_ids=new_kids,
+                    ki_items=[dbm.get_knowledge_item(conn, k) for k in new_kids
+                               if dbm.get_knowledge_item(conn, k)] + all_ki[:10],
+                )
+                if coach_result:
+                    yield _sse_line({"type": "coach_hint", **coach_result})
+            except Exception:
+                pass  # 教练分析失败不影响主流程
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -795,3 +958,230 @@ def _extract_doc_text(path: Path) -> str:
     except Exception:
         return ""
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Meta-Reflection Endpoint (Sprint 6 — Scale 2-B)
+# ---------------------------------------------------------------------------
+
+class MetaReflectBody(BaseModel):
+    session_ref: str
+    conversation_history: list[dict[str, str]]
+    ki_list: list[dict[str, Any]] = []
+
+
+@router.post("/api/v1/extraction/meta-reflect")
+def run_meta_reflect(body: MetaReflectBody) -> JSONResponse:
+    """会话后元反思：独立 LLM 分析完整会话，更新策略库效果分。"""
+    try:
+        provider, cfg = _get_llm_provider()
+    except Exception as e:
+        return err(f"LLM 初始化失败: {e}")
+
+    report = _run_meta_reflect(
+        provider, cfg,
+        conv_history=body.conversation_history,
+        ki_items=body.ki_list,
+        session_ref=body.session_ref,
+    )
+    if not report:
+        return err("元反思分析失败，LLM 未返回有效 JSON")
+
+    conn = get_conn()
+    report_id = f"sqr-{uuid.uuid4().hex[:12]}"
+    dbm.insert_session_quality_report(
+        conn,
+        id=report_id,
+        session_ref=body.session_ref,
+        expert_type=report.get("expert_type"),
+        high_value_questions=report.get("high_value_questions"),
+        low_value_questions=report.get("low_value_questions"),
+        improvement_suggestions=report.get("improvement_suggestions"),
+        knowledge_gaps=report.get("knowledge_gaps"),
+        full_report=report,
+    )
+
+    # 更新策略库效果分（基于本次会话 ki 产出）
+    if body.ki_list:
+        confirmed_count = sum(1 for k in body.ki_list if k.get("status") in ("approved", "active"))
+        total = max(len(body.conversation_history) // 2, 1)
+        ki_yield = confirmed_count / total
+        # 用关键词匹配更新相关策略分（简单 heuristic）
+        all_patterns = dbm.list_strategy_patterns(conn, limit=50)
+        for pat in all_patterns:
+            old_score = float(pat.get("effectiveness_score", 0.5))
+            old_yield = float(pat.get("ki_yield_rate", 0.0))
+            new_score = round(old_score * 0.85 + ki_yield * 0.15, 4)
+            new_yield = round(old_yield * 0.7 + ki_yield * 0.3, 4)
+            dbm.update_strategy_pattern_score(
+                conn, pat["id"],
+                new_effectiveness_score=new_score,
+                new_ki_yield_rate=new_yield,
+            )
+
+    return ok({"report_id": report_id, "report": report})
+
+
+@router.get("/api/v1/extraction/meta-reflect")
+def list_meta_reflect_reports(session_ref: str | None = None, limit: int = 10) -> JSONResponse:
+    conn = get_conn()
+    reports = dbm.list_session_quality_reports(conn, session_ref=session_ref, limit=limit)
+    return ok({"reports": reports, "total": len(reports)})
+
+
+# ---------------------------------------------------------------------------
+# Strategy Library Endpoints (Sprint 6 — Scale 2 RAG)
+# ---------------------------------------------------------------------------
+
+class StrategyPatternCreate(BaseModel):
+    pattern: str
+    strategy_type: str = "general"
+    applicable_when: dict[str, Any] | None = None
+    effectiveness_score: float = 0.5
+    sample_triggers: list[str] | None = None
+
+
+@router.get("/api/v1/extraction/strategies")
+def get_strategies(
+    strategy_type: str | None = None,
+    min_score: float = 0.0,
+    limit: int = 10,
+) -> JSONResponse:
+    conn = get_conn()
+    patterns = dbm.list_strategy_patterns(
+        conn, strategy_type=strategy_type, min_score=min_score, limit=limit
+    )
+    return ok({"patterns": patterns, "total": len(patterns)})
+
+
+@router.post("/api/v1/extraction/strategies")
+def create_strategy(body: StrategyPatternCreate) -> JSONResponse:
+    conn = get_conn()
+    pid = f"qsp-{uuid.uuid4().hex[:12]}"
+    pattern = dbm.insert_strategy_pattern(
+        conn,
+        id=pid,
+        pattern=body.pattern,
+        strategy_type=body.strategy_type,
+        applicable_when=body.applicable_when,
+        effectiveness_score=body.effectiveness_score,
+        sample_triggers=body.sample_triggers,
+        created_from="admin_manual",
+    )
+    return ok(pattern)
+
+
+@router.post("/api/v1/extraction/strategies/bootstrap")
+def bootstrap_strategies() -> JSONResponse:
+    """一次性写入 Bootstrap 种子策略（幂等，已存在则跳过）。"""
+    conn = get_conn()
+    existing = dbm.list_strategy_patterns(conn, limit=200)
+    if len(existing) >= 10:
+        return ok({"message": "已有足够种子策略，跳过", "count": len(existing)})
+
+    seeds = [
+        {
+            "id": "qsp-bootstrap-01",
+            "pattern": "能说一个您当时判断最难的节点吗？您是怎么判断的？",
+            "strategy_type": "critical_incident",
+            "applicable_when": {"expert_type": "B", "session_stage": "开场破冰后"},
+            "effectiveness_score": 0.82,
+            "sample_triggers": ["有一次...", "记得有个项目..."],
+        },
+        {
+            "id": "qsp-bootstrap-02",
+            "pattern": "您说'一般来说'——在什么情况下会不一样？",
+            "strategy_type": "fuzzy_signal",
+            "applicable_when": {"trigger": "模糊信号词", "session_stage": "任意轮次"},
+            "effectiveness_score": 0.78,
+        },
+        {
+            "id": "qsp-bootstrap-03",
+            "pattern": "这条规则在什么情况下是错的或有害的？",
+            "strategy_type": "reverse_validation",
+            "applicable_when": {"expert_type": "A", "knowledge_target": "已有规则"},
+            "effectiveness_score": 0.75,
+        },
+        {
+            "id": "qsp-bootstrap-04",
+            "pattern": "如果一个新顾问只用我们现有的规则，他会在哪里栽跟头？",
+            "strategy_type": "gap_based",
+            "applicable_when": {"session_stage": "有现有规则可参考时"},
+            "effectiveness_score": 0.73,
+        },
+        {
+            "id": "qsp-bootstrap-05",
+            "pattern": "这个问题最差的结果是什么？当时的关键决策是什么？",
+            "strategy_type": "critical_incident",
+            "applicable_when": {"expert_type": "B", "knowledge_target": "反模式/风险信号"},
+            "effectiveness_score": 0.80,
+        },
+        {
+            "id": "qsp-bootstrap-06",
+            "pattern": "这几个案例背后有没有共同的规律？",
+            "strategy_type": "gap_based",
+            "applicable_when": {"expert_type": "B", "session_stage": "专家已举例 2+ 个后"},
+            "effectiveness_score": 0.71,
+        },
+        {
+            "id": "qsp-bootstrap-07",
+            "pattern": "蓝图阶段，您最担心被客户误解的一个点是什么？",
+            "strategy_type": "critical_incident",
+            "applicable_when": {"knowledge_target": "蓝图阶段知识"},
+            "effectiveness_score": 0.68,
+        },
+        {
+            "id": "qsp-bootstrap-08",
+            "pattern": "这个规则适用于所有项目类型，还是仅限于某类项目？",
+            "strategy_type": "reverse_validation",
+            "applicable_when": {"session_stage": "规则表述完成后，追问适用范围"},
+            "effectiveness_score": 0.76,
+        },
+        {
+            "id": "qsp-bootstrap-09",
+            "pattern": "您说'不方便说'——我们换个角度：类似项目成功的原因是什么？",
+            "strategy_type": "fuzzy_signal",
+            "applicable_when": {"expert_type": "C", "trigger": "防御信号"},
+            "effectiveness_score": 0.65,
+        },
+        {
+            "id": "qsp-bootstrap-10",
+            "pattern": "有没有遇到过看起来正常、最后出问题的项目？当时第一个异常信号是什么？",
+            "strategy_type": "critical_incident",
+            "applicable_when": {"expert_type": "A|B", "knowledge_target": "风险早期信号"},
+            "effectiveness_score": 0.85,
+        },
+        {
+            "id": "qsp-bootstrap-11",
+            "pattern": "这套方法在什么规模/行业/合同模式下最管用，在什么情况下会失效？",
+            "strategy_type": "reverse_validation",
+            "applicable_when": {"session_stage": "专家陈述了方法论后"},
+            "effectiveness_score": 0.72,
+        },
+        {
+            "id": "qsp-bootstrap-12",
+            "pattern": "现有规则里，您认为最容易漏掉什么场景？",
+            "strategy_type": "gap_based",
+            "applicable_when": {"session_stage": "有现有规则展示后"},
+            "effectiveness_score": 0.74,
+        },
+    ]
+
+    inserted = 0
+    existing_ids = {p["id"] for p in existing}
+    for seed in seeds:
+        if seed["id"] in existing_ids:
+            continue
+        dbm.insert_strategy_pattern(
+            conn,
+            id=seed["id"],
+            pattern=seed["pattern"],
+            strategy_type=seed["strategy_type"],
+            applicable_when=seed.get("applicable_when"),
+            effectiveness_score=seed.get("effectiveness_score", 0.5),
+            sample_triggers=seed.get("sample_triggers"),
+            created_from="bootstrap",
+        )
+        inserted += 1
+
+    return ok({"inserted": inserted, "total": len(existing) + inserted})

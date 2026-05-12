@@ -410,6 +410,24 @@ export async function rejectPendingRule(kid: string, body: { reason: string }): 
   return apiJson(`/api/v1/pending-rules/${encodeURIComponent(kid)}/reject`, { method: "POST", body: JSON.stringify(body) });
 }
 
+export type KnowledgeItem = {
+  id: string; extraction_focus_id: string; title: string; content: string;
+  confidence: string; status: string; source_role: string; source_type: string;
+  scope_note?: string | null; has_conflicts?: boolean; created_at?: string;
+};
+export async function getKnowledgeItems(opts?: { status?: string; limit?: number }): Promise<{ items: KnowledgeItem[]; total: number }> {
+  const qs = new URLSearchParams();
+  if (opts?.status) qs.set("status", opts.status);
+  if (opts?.limit) qs.set("limit", String(opts.limit));
+  return apiJson(`/api/v1/knowledge-items?${qs.toString()}`);
+}
+export async function patchKnowledgeItem(kid: string, data: { status?: string; title?: string; content?: string; scope_note?: string }): Promise<KnowledgeItem> {
+  return apiJson(`/api/v1/knowledge-items/${encodeURIComponent(kid)}`, { method: "PATCH", body: JSON.stringify(data) });
+}
+export async function submitKnowledgeItem(kid: string): Promise<{ submitted: string; status: string }> {
+  return apiJson(`/api/v1/knowledge-items/${encodeURIComponent(kid)}/submit`, { method: "POST" });
+}
+
 export async function uploadExtractionMaterial(
   file: File,
   title?: string,

@@ -10,13 +10,13 @@ import {
   ReloadOutlined, UserOutlined, WarningOutlined,
 } from "@ant-design/icons";
 import type {
-  ExpertProfileData, PendingRuleItem, ReviewQueueItem,
+  ExpertProfileData, KnowledgeItem, PendingRuleItem, ReviewQueueItem,
 } from "./api";
 import {
   approvePendingRule, deleteReviewQueueItem, getExpertProfile,
-  getPendingRules, getReviewQueue, patchReviewQueueItem, postActiveExtractionStream,
-  postDocExtractionStream, postReviewExtractionStream, putExpertProfile, rejectPendingRule,
-  uploadExtractionMaterial,
+  getPendingRules, getReviewQueue, patchKnowledgeItem, patchReviewQueueItem,
+  postActiveExtractionStream, postDocExtractionStream, postReviewExtractionStream,
+  putExpertProfile, rejectPendingRule, submitKnowledgeItem, uploadExtractionMaterial,
 } from "./api";
 import SimpleMarkdown from "./SimpleMarkdown";
 
@@ -46,6 +46,13 @@ const CONFIDENCE_COLOR: Record<string, string> = {
 
 type ChatMsg = { role: "user" | "assistant" | "status"; content: string };
 type ActiveTab = "queue" | "extract" | "upload" | "pending";
+type KiItemState = {
+  kid: string;
+  item: KnowledgeItem;
+  localStatus: "pending" | "approved" | "rejected" | "edited";
+  editedTitle?: string;
+  editedContent?: string;
+};
 
 // ── ExpertProfileModal ───────────────────────────────────────────────────────
 
@@ -248,6 +255,180 @@ function ReviewQueueTab({
   );
 }
 
+// ── InlineKnowledgeCards ─────────────────────────────────────────────────────
+
+function InlineKnowledgeCards({
+  items,
+  onUpdate,
+}: {
+  items: KiItemState[];
+  onUpdate: (kid: string, updates: Partial<KiItemState>) => void;
+}) {
+  const [editTarget, setEditTarget] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editContent, setEditContent] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
+  const [actionKid, setActionKid] = useState<string | null>(null);
+
+  if (items.length === 0) return null;
+
+  const pendingCount = items.filter((i) => i.localStatus === "pending" || i.localStatus === "edited").length;
+
+  const handleApprove = async (kid: string) => {
+    setActionKid(kid);
+    try {
+      await submitKnowledgeItem(kid);
+      onUpdate(kid, { localStatus: "approved" });
+      message.success("知识条目已确认，写入待批准规则");
+    } catch (e) {
+      message.error(`确认失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setActionKid(null);
+    }
+  };
+
+  const handleReject = async (kid: string) => {
+    setActionKid(kid);
+    try {
+      await patchKnowledgeItem(kid, { status: "rejected" });
+      onUpdate(kid, { localStatus: "rejected" });
+      message.success("已不采纳");
+    } catch (e) {
+      message.error(`操作失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setActionKid(null);
+    }
+  };
+
+  const openEdit = (ki: KiItemState) => {
+    setEditTarget(ki.kid);
+    setEditTitle(ki.editedTitle ?? ki.item.title ?? "");
+    setEditContent(ki.editedContent ?? ki.item.content ?? "");
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editTarget) return;
+    setEditSaving(true);
+    try {
+      await patchKnowledgeItem(editTarget, { title: editTitle, content: editContent });
+      onUpdate(editTarget, { localStatus: "edited", editedTitle: editTitle, editedContent: editContent });
+      message.success("已保存修改");
+      setEditTarget(null);
+    } catch (e) {
+      message.error(`保存失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const CONF_LABEL: Record<string, string> = { high: "高", medium: "中", low: "低" };
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      <Divider orientation="left" plain style={{ fontSize: 12, color: "#888", margin: "8px 0" }}>
+        生成的知识条目（{pendingCount} 条待处理 / 共 {items.length} 条）
+      </Divider>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {items.map((ki) => {
+          const title = ki.editedTitle ?? ki.item.title ?? "";
+          const content = ki.editedContent ?? ki.item.content ?? "";
+          const conf = ki.item.confidence ?? "medium";
+          const focusId = ki.item.extraction_focus_id ?? "";
+          const isPending = ki.localStatus === "pending" || ki.localStatus === "edited";
+
+          return (
+            <Card
+              key={ki.kid}
+              size="small"
+              style={{
+                borderLeft: `3px solid ${
+                  ki.localStatus === "approved" ? "#52c41a"
+                    : ki.localStatus === "rejected" ? "#ff4d4f"
+                    : "#1677ff"
+                }`,
+                opacity: isPending ? 1 : 0.65,
+                fontSize: 12,
+              }}
+              title={
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <Tag color={CONFIDENCE_COLOR[conf]} style={{ fontSize: 11 }}>
+                    {CONF_LABEL[conf] ?? conf}置信
+                  </Tag>
+                  {focusId && <Tag style={{ fontSize: 11 }}>{focusId}</Tag>}
+                  {ki.localStatus === "edited" && <Tag color="blue" style={{ fontSize: 11 }}>已修改</Tag>}
+                  <Text style={{ fontSize: 13, fontWeight: 500 }}>{title}</Text>
+                </div>
+              }
+              extra={
+                isPending ? (
+                  <Space size={4}>
+                    <Button
+                      size="small"
+                      type="primary"
+                      icon={<CheckOutlined />}
+                      loading={actionKid === ki.kid}
+                      onClick={() => void handleApprove(ki.kid)}
+                    >
+                      确认入库
+                    </Button>
+                    <Button size="small" onClick={() => openEdit(ki)}>修改</Button>
+                    <Button
+                      size="small"
+                      danger
+                      icon={<CloseOutlined />}
+                      loading={actionKid === ki.kid}
+                      onClick={() => void handleReject(ki.kid)}
+                    >
+                      不采纳
+                    </Button>
+                  </Space>
+                ) : (
+                  <Tag color={ki.localStatus === "approved" ? "success" : "error"}>
+                    {ki.localStatus === "approved" ? "已确认" : "已不采纳"}
+                  </Tag>
+                )
+              }
+            >
+              <Text style={{ fontSize: 12, whiteSpace: "pre-wrap", color: "#444" }}>
+                {content.length > 220 ? content.slice(0, 220) + "…" : content}
+              </Text>
+            </Card>
+          );
+        })}
+      </div>
+
+      <Modal
+        title="修改知识条目"
+        open={!!editTarget}
+        onCancel={() => setEditTarget(null)}
+        onOk={() => void handleSaveEdit()}
+        okText="保存修改"
+        cancelText="取消"
+        confirmLoading={editSaving}
+        width={600}
+      >
+        <div style={{ marginBottom: 12 }}>
+          <Text strong>标题</Text>
+          <Input
+            value={editTitle}
+            onChange={(e) => setEditTitle(e.target.value)}
+            style={{ marginTop: 4 }}
+          />
+        </div>
+        <div>
+          <Text strong>内容</Text>
+          <TextArea
+            value={editContent}
+            onChange={(e) => setEditContent(e.target.value)}
+            rows={6}
+            style={{ marginTop: 4 }}
+          />
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
 // ── ChatArea ─────────────────────────────────────────────────────────────────
 
 function ChatArea({ messages, streaming }: { messages: ChatMsg[]; streaming: boolean }) {
@@ -319,7 +500,8 @@ function ActiveExtractionTab({
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [roundNumber, setRoundNumber] = useState(1);
-  const [newKiIds, setNewKiIds] = useState<string[]>([]);
+  const [newKiItems, setNewKiItems] = useState<KiItemState[]>([]);
+  const [coachHint, setCoachHint] = useState<{ whisper: string; expert_type_signal?: string; coverage_gaps?: string[]; current_momentum?: string; flag?: string | null } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const isPostReview = postReviewCtx != null;
 
@@ -328,6 +510,8 @@ function ActiveExtractionTab({
       setRqItem(initialRQItem);
       setMessages([]);
       setRoundNumber(1);
+      setNewKiItems([]);
+      setCoachHint(null);
     }
   }, [initialRQItem]);
 
@@ -398,7 +582,14 @@ function ActiveExtractionTab({
             });
           } else if (ev.type === "ki") {
             const kid = String((ev as any).kid ?? "");
-            if (kid) setNewKiIds((prev) => (prev.includes(kid) ? prev : [...prev, kid]));
+            const item = (ev as any).item as KnowledgeItem | undefined;
+            if (kid && item) {
+              setNewKiItems((prev) =>
+                prev.some((x) => x.kid === kid)
+                  ? prev
+                  : [...prev, { kid, item, localStatus: "pending" }],
+              );
+            }
           } else if (ev.type === "clarify") {
             const clarify = (ev as any).clarify as { questions?: string[] } | undefined;
             if (clarify?.questions?.length) {
@@ -407,6 +598,17 @@ function ActiveExtractionTab({
                 ...prev,
                 { role: "status", content: `💡 建议追问方向：\n${qs}` },
               ]);
+            }
+          } else if (ev.type === "coach_hint") {
+            const hint = ev as any;
+            if (hint.whisper) {
+              setCoachHint({
+                whisper: String(hint.whisper),
+                expert_type_signal: hint.expert_type_signal ? String(hint.expert_type_signal) : undefined,
+                coverage_gaps: Array.isArray(hint.coverage_gaps) ? hint.coverage_gaps.map(String) : undefined,
+                current_momentum: hint.current_momentum ? String(hint.current_momentum) : undefined,
+                flag: hint.flag ? String(hint.flag) : null,
+              });
             }
           } else if (ev.type === "final") {
             const satisfaction = (ev as any).satisfaction as number | null;
@@ -435,11 +637,16 @@ function ActiveExtractionTab({
     setStreaming(false);
   };
 
+  const handleKiUpdate = (kid: string, updates: Partial<KiItemState>) => {
+    setNewKiItems((prev) => prev.map((x) => (x.kid === kid ? { ...x, ...updates } : x)));
+  };
+
   const handleReset = () => {
     handleStop();
     setMessages([]);
     setRoundNumber(1);
-    setNewKiIds([]);
+    setNewKiItems([]);
+    setCoachHint(null);
   };
 
   return (
@@ -510,16 +717,68 @@ function ActiveExtractionTab({
         </div>
       )}
 
-      {newKiIds.length > 0 && (
-        <Alert
-          type="success"
-          message={`已生成 ${newKiIds.length} 条知识条目，请到「待批准规则」页面审批后写入规则库。`}
-          style={{ marginBottom: 12 }}
-          closable
-        />
+      <ChatArea messages={messages} streaming={streaming} />
+
+      {coachHint && (
+        <div style={{
+          marginTop: 8, padding: "8px 12px",
+          background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 6,
+          display: "flex", alignItems: "flex-start", gap: 8,
+        }}>
+          <div style={{ flex: 1 }}>
+            <Text style={{ fontSize: 11, color: "#52c41a", fontWeight: 600 }}>
+              🎯 教练提示（第 {roundNumber - 1} 轮）
+              {coachHint.expert_type_signal && (
+                <Text type="secondary" style={{ fontSize: 11, fontWeight: 400, marginLeft: 6 }}>
+                  {coachHint.expert_type_signal}
+                </Text>
+              )}
+              {coachHint.current_momentum && coachHint.current_momentum !== "good" && (
+                <Tag
+                  color={coachHint.current_momentum === "stuck" ? "error" : "warning"}
+                  style={{ fontSize: 10, marginLeft: 6 }}
+                >
+                  {coachHint.current_momentum === "stuck" ? "对话停滞" : "势头减弱"}
+                </Tag>
+              )}
+            </Text>
+            <div style={{ marginTop: 2 }}>
+              <Text style={{ fontSize: 12 }}>{coachHint.whisper}</Text>
+            </div>
+            {coachHint.coverage_gaps && coachHint.coverage_gaps.length > 0 && (
+              <div style={{ marginTop: 4 }}>
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  未覆盖：{coachHint.coverage_gaps.join("、")}
+                </Text>
+              </div>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+            <Button
+              size="small"
+              type="link"
+              style={{ fontSize: 11, padding: "0 4px" }}
+              onClick={() => {
+                // 将建议填入输入框，操作者可修改后发送
+                setInput(coachHint.whisper);
+                setCoachHint(null);
+              }}
+            >
+              采纳建议
+            </Button>
+            <Button
+              size="small"
+              type="text"
+              style={{ fontSize: 11, padding: "0 4px", color: "#999" }}
+              onClick={() => setCoachHint(null)}
+            >
+              忽略
+            </Button>
+          </div>
+        </div>
       )}
 
-      <ChatArea messages={messages} streaming={streaming} />
+      <InlineKnowledgeCards items={newKiItems} onUpdate={handleKiUpdate} />
 
       <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
         <TextArea
@@ -563,10 +822,17 @@ function ActiveExtractionTab({
                           });
                         } else if (ev.type === "ki") {
                           const kid = String((ev as any).kid ?? "");
-                          if (kid) setNewKiIds((prev) => (prev.includes(kid) ? prev : [...prev, kid]));
+                          const item = (ev as any).item as KnowledgeItem | undefined;
+                          if (kid && item) {
+                            setNewKiItems((prev) =>
+                              prev.some((x) => x.kid === kid)
+                                ? prev
+                                : [...prev, { kid, item, localStatus: "pending" }],
+                            );
+                          }
                         } else if (ev.type === "final") {
                           const kiCount = Number((ev as any).new_ki_count ?? 0);
-                          if (kiCount > 0) setMessages((prev) => [...prev, { role: "status", content: `✓ 生成 ${kiCount} 条知识条目。` }]);
+                          if (kiCount > 0) setMessages((prev) => [...prev, { role: "status", content: `✓ 生成 ${kiCount} 条知识条目，请在下方审批。` }]);
                           setRoundNumber((n) => n + 1);
                         }
                       },
@@ -613,8 +879,12 @@ function DocUploadTab() {
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
-  const [newKiIds, setNewKiIds] = useState<string[]>([]);
+  const [newKiItems, setNewKiItems] = useState<KiItemState[]>([]);
   const abortRef = useRef<AbortController | null>(null);
+
+  const handleKiUpdate = (kid: string, updates: Partial<KiItemState>) => {
+    setNewKiItems((prev) => prev.map((x) => (x.kid === kid ? { ...x, ...updates } : x)));
+  };
 
   const handleUpload = async (file: File) => {
     setUploading(true);
@@ -623,7 +893,7 @@ function DocUploadTab() {
       setMaterialId(res.material_id);
       setDocName(res.original_name);
       setMessages([]);
-      setNewKiIds([]);
+      setNewKiItems([]);
       message.success(`已上传「${res.original_name}」，可开始提取。`);
     } catch (e) {
       message.error(`上传失败: ${e instanceof Error ? e.message : String(e)}`);
@@ -660,13 +930,20 @@ function DocUploadTab() {
             });
           } else if (ev.type === "ki") {
             const kid = String((ev as any).kid ?? "");
-            if (kid) setNewKiIds((prev) => (prev.includes(kid) ? prev : [...prev, kid]));
+            const item = (ev as any).item as KnowledgeItem | undefined;
+            if (kid && item) {
+              setNewKiItems((prev) =>
+                prev.some((x) => x.kid === kid)
+                  ? prev
+                  : [...prev, { kid, item, localStatus: "pending" }],
+              );
+            }
           } else if (ev.type === "final") {
             const kiCount = Number((ev as any).new_ki_count ?? 0);
             if (kiCount > 0) {
               setMessages((prev) => [
                 ...prev,
-                { role: "status", content: `✓ 生成 ${kiCount} 条知识条目，已发送到「待批准规则」。` },
+                { role: "status", content: `✓ 生成 ${kiCount} 条知识条目，请在下方审批。` },
               ]);
             }
           }
@@ -707,15 +984,8 @@ function DocUploadTab() {
             message={`已加载文档：${docName}（material_id: ${materialId}）`}
             style={{ marginBottom: 12 }}
           />
-          {newKiIds.length > 0 && (
-            <Alert
-              type="success"
-              message={`已生成 ${newKiIds.length} 条知识条目，请到「待批准规则」页面审批。`}
-              style={{ marginBottom: 12 }}
-              closable
-            />
-          )}
           <ChatArea messages={messages} streaming={streaming} />
+          <InlineKnowledgeCards items={newKiItems} onUpdate={handleKiUpdate} />
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
             <TextArea
               value={input}

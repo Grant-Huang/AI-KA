@@ -259,6 +259,38 @@ CREATE TABLE IF NOT EXISTS preset_focus_members (
   is_prerequisite INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (preset_id, focus_id)
 );
+
+CREATE TABLE IF NOT EXISTS question_strategy_patterns (
+  id TEXT PRIMARY KEY,
+  pattern TEXT NOT NULL,
+  strategy_type TEXT NOT NULL DEFAULT 'general',
+  applicable_when TEXT,
+  effectiveness_score REAL NOT NULL DEFAULT 0.5,
+  ki_yield_rate REAL NOT NULL DEFAULT 0.0,
+  usage_count INTEGER NOT NULL DEFAULT 0,
+  sample_triggers TEXT,
+  failure_contexts TEXT,
+  created_from TEXT NOT NULL DEFAULT 'bootstrap',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_qsp_strategy ON question_strategy_patterns(strategy_type);
+CREATE INDEX IF NOT EXISTS idx_qsp_score ON question_strategy_patterns(effectiveness_score);
+
+CREATE TABLE IF NOT EXISTS session_quality_reports (
+  id TEXT PRIMARY KEY,
+  session_ref TEXT NOT NULL,
+  expert_type TEXT,
+  high_value_questions TEXT,
+  low_value_questions TEXT,
+  improvement_suggestions TEXT,
+  knowledge_gaps TEXT,
+  full_report TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_sqr_session ON session_quality_reports(session_ref);
 """
 
 
@@ -2289,3 +2321,163 @@ def list_preset_focus_members(conn: sqlite3.Connection, preset_id: str) -> list[
         "SELECT * FROM preset_focus_members WHERE preset_id=? ORDER BY order_index", (preset_id,)
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Question Strategy Patterns (Sprint 6 — Learning Flywheel)
+# ---------------------------------------------------------------------------
+
+def insert_strategy_pattern(
+    conn: sqlite3.Connection,
+    *,
+    id: str,
+    pattern: str,
+    strategy_type: str = "general",
+    applicable_when: dict | None = None,
+    effectiveness_score: float = 0.5,
+    ki_yield_rate: float = 0.0,
+    usage_count: int = 0,
+    sample_triggers: list | None = None,
+    failure_contexts: list | None = None,
+    created_from: str = "bootstrap",
+) -> dict:
+    conn.execute(
+        """INSERT OR IGNORE INTO question_strategy_patterns
+           (id, pattern, strategy_type, applicable_when, effectiveness_score,
+            ki_yield_rate, usage_count, sample_triggers, failure_contexts, created_from)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (
+            id, pattern, strategy_type,
+            json.dumps(applicable_when, ensure_ascii=False) if applicable_when else None,
+            effectiveness_score, ki_yield_rate, usage_count,
+            json.dumps(sample_triggers, ensure_ascii=False) if sample_triggers else None,
+            json.dumps(failure_contexts, ensure_ascii=False) if failure_contexts else None,
+            created_from,
+        ),
+    )
+    conn.commit()
+    return get_strategy_pattern(conn, id) or {}
+
+
+def get_strategy_pattern(conn: sqlite3.Connection, pattern_id: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM question_strategy_patterns WHERE id=?", (pattern_id,)
+    ).fetchone()
+    return _decode_strategy_pattern(row) if row else None
+
+
+def list_strategy_patterns(
+    conn: sqlite3.Connection,
+    *,
+    strategy_type: str | None = None,
+    min_score: float = 0.0,
+    limit: int = 20,
+) -> list[dict]:
+    if strategy_type:
+        rows = conn.execute(
+            """SELECT * FROM question_strategy_patterns
+               WHERE strategy_type=? AND effectiveness_score>=?
+               ORDER BY effectiveness_score DESC LIMIT ?""",
+            (strategy_type, min_score, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT * FROM question_strategy_patterns
+               WHERE effectiveness_score>=?
+               ORDER BY effectiveness_score DESC LIMIT ?""",
+            (min_score, limit),
+        ).fetchall()
+    return [_decode_strategy_pattern(r) for r in rows]
+
+
+def update_strategy_pattern_score(
+    conn: sqlite3.Connection,
+    pattern_id: str,
+    *,
+    new_effectiveness_score: float,
+    new_ki_yield_rate: float,
+) -> None:
+    conn.execute(
+        """UPDATE question_strategy_patterns
+           SET effectiveness_score=?, ki_yield_rate=?,
+               usage_count=usage_count+1,
+               updated_at=datetime('now')
+           WHERE id=?""",
+        (new_effectiveness_score, new_ki_yield_rate, pattern_id),
+    )
+    conn.commit()
+
+
+def _decode_strategy_pattern(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    for field in ("applicable_when", "sample_triggers", "failure_contexts"):
+        if d.get(field):
+            try:
+                d[field] = json.loads(d[field])
+            except Exception:
+                pass
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Session Quality Reports (Sprint 6 — Learning Flywheel)
+# ---------------------------------------------------------------------------
+
+def insert_session_quality_report(
+    conn: sqlite3.Connection,
+    *,
+    id: str,
+    session_ref: str,
+    expert_type: str | None = None,
+    high_value_questions: list | None = None,
+    low_value_questions: list | None = None,
+    improvement_suggestions: list | None = None,
+    knowledge_gaps: list | None = None,
+    full_report: dict | None = None,
+) -> None:
+    conn.execute(
+        """INSERT INTO session_quality_reports
+           (id, session_ref, expert_type, high_value_questions, low_value_questions,
+            improvement_suggestions, knowledge_gaps, full_report)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            id, session_ref, expert_type,
+            json.dumps(high_value_questions, ensure_ascii=False) if high_value_questions else None,
+            json.dumps(low_value_questions, ensure_ascii=False) if low_value_questions else None,
+            json.dumps(improvement_suggestions, ensure_ascii=False) if improvement_suggestions else None,
+            json.dumps(knowledge_gaps, ensure_ascii=False) if knowledge_gaps else None,
+            json.dumps(full_report, ensure_ascii=False) if full_report else None,
+        ),
+    )
+    conn.commit()
+
+
+def list_session_quality_reports(
+    conn: sqlite3.Connection,
+    *,
+    session_ref: str | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    if session_ref:
+        rows = conn.execute(
+            "SELECT * FROM session_quality_reports WHERE session_ref=? ORDER BY created_at DESC LIMIT ?",
+            (session_ref, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM session_quality_reports ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [_decode_quality_report(r) for r in rows]
+
+
+def _decode_quality_report(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    for field in ("high_value_questions", "low_value_questions",
+                  "improvement_suggestions", "knowledge_gaps", "full_report"):
+        if d.get(field):
+            try:
+                d[field] = json.loads(d[field])
+            except Exception:
+                pass
+    return d
