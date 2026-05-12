@@ -6,9 +6,26 @@
 
 安装（开发模式）：
 
+**推荐方式：使用 uv（速度快且兼容性好）**
+
+```bash
+# 安装 uv（首次使用）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env  # 添加到 PATH
+
+# 创建虚拟环境并安装
+uv venv
+source .venv/bin/activate
+uv pip install -e .
+```
+
+**传统方式：使用 pip**
+
 ```bash
 python -m pip install -e .
 ```
+
+> **注意**：由于上游依赖 `docs2md` 配置问题，使用 pip 可能遇到安装失败。详见 [docs/ISSUE_docs2md_license_format.md](docs/ISSUE_docs2md_license_format.md) 和 [docs/SOLUTION_uv_package_manager.md](docs/SOLUTION_uv_package_manager.md)。
 
 初始化一个项目（写入 SQLite 索引）：
 
@@ -37,6 +54,21 @@ aika doc list --project "demo"
 
 ### 3.1 安装
 
+**推荐方式：使用 uv**
+
+```bash
+# 安装 uv（如果尚未安装）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+
+# 创建虚拟环境并安装
+uv venv
+source .venv/bin/activate
+uv pip install -e .
+```
+
+**传统方式：使用 pip**
+
 ```bash
 python -m pip install -e . --no-build-isolation
 ```
@@ -44,10 +76,14 @@ python -m pip install -e . --no-build-isolation
 **升级 docs2md（Git 源，非 PyPI 固定版）**：依赖在 `pyproject.toml` 中指向 `git+https://github.com/Grant-Huang/docs2md.git`。若需拉取上游最新提交（例如图片解析、格式支持更新），在已激活的虚拟环境中执行：
 
 ```bash
+# 使用 uv（推荐）
+uv pip install -U "docs2md @ git+https://github.com/Grant-Huang/docs2md.git"
+
+# 或使用 pip
 python -m pip install -U "docs2md @ git+https://github.com/Grant-Huang/docs2md.git"
 ```
 
-然后重新安装本仓库（`python -m pip install -e .`）或重启后端，使运行中的进程使用新包。
+然后重新安装本仓库（`uv pip install -e .` 或 `python -m pip install -e .`）或重启后端，使运行中的进程使用新包。
 
 前端（开发态你自己跑；发布时由 CI 负责 `npm run build` 并将 `dist` 打进 wheel）：
 
@@ -133,9 +169,26 @@ ProjectLens 的核心是「审查技能包 / `review_domain.md` 可配置关注�
 - 测试：`tests/`
 - 临时数据：`.tmp/`（已加入 `.gitignore`）
 
-## 5. 离线 pip 说明
+## 5. 安装问题排障
+
+### 方案 A：使用 uv 包管理器（推荐）
+
+如果遇到 pip 安装失败（特别是 `docs2md` 的 `license` 字段格式问题），强烈建议使用 uv：
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+uv venv && source .venv/bin/activate
+uv pip install -e .
+```
+
+详见：[docs/SOLUTION_uv_package_manager.md](docs/SOLUTION_uv_package_manager.md)
+
+### 方案 B：离线 pip 安装
 
 若构建隔离环境无法联网，请使用：
 
-`python -m pip install -e . --no-build-isolation`
+```bash
+python -m pip install -e . --no-build-isolation
+```
 
