@@ -6,6 +6,7 @@ import {
   Checkbox,
   Collapse,
   Divider,
+  Drawer,
   Form,
   Input,
   InputNumber,
@@ -79,7 +80,8 @@ import { parseMemoryInjectedItemsFromMilestonesRaw, useConversationReplay } from
 import SimpleMarkdown from "./SimpleMarkdown";
 import HelpPage from "./pages/help";
 import SystemSettingPage from "./pages/system_setting";
-import ExtractionPage from "./ExtractionPage";
+import ExtractionPage, { ReviewQueuePanel } from "./ExtractionPage";
+import { FindingsPanel, type Finding } from "./FindingsPanel";
 import { ReviewQueueDrawer, useReviewQueueCount } from "./ReviewQueueDrawer";
 import type { ReviewQueueItem } from "./api";
 
@@ -510,6 +512,7 @@ export default function App() {
   const [reviewQueueDrawerOpen, setReviewQueueDrawerOpen] = useState(false);
   const reviewQueueCount = useReviewQueueCount();
   const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain">("analyze");
+  const [reviewQueueOpen, setReviewQueueOpen] = useState(false);
   const [projectIngest, setProjectIngest] = useState<
     Record<number, { initialized: boolean; chunk_count: number; md_out_exists: boolean; has_review_records?: boolean }>
   >(
@@ -677,7 +680,7 @@ export default function App() {
   const [chunkLimit, setChunkLimit] = useState(40);
   // Sprint 2+5: multi-turn conversation state
   const [deepMode, setDeepMode] = useState(false);
-  const [sessionFindings, setSessionFindings] = useState<import("./FindingsPanel").Finding[]>([]);
+  const [sessionFindings, setSessionFindings] = useState<Finding[]>([]);
   const [reportLoading, setReportLoading] = useState(false);
   const [nativePickerAvailable, setNativePickerAvailable] = useState(true);
   const [pickLoading, setPickLoading] = useState(false);
@@ -1933,7 +1936,7 @@ export default function App() {
             if (f && typeof f === "object" && f.id) {
               setSessionFindings((prev) => {
                 const exists = prev.some((x) => x.id === f.id);
-                return exists ? prev : [...prev, f as import("./FindingsPanel").Finding];
+                return exists ? prev : [...prev, f as Finding];
               });
             }
           }
@@ -1948,7 +1951,7 @@ export default function App() {
             const rawFindings = (ev as any).findings;
             if (Array.isArray(rawFindings) && rawFindings.length) {
               setSessionFindings((prev) => {
-                const newOnes = (rawFindings as import("./FindingsPanel").Finding[]).filter(
+                const newOnes = (rawFindings as Finding[]).filter(
                   (f) => !prev.some((x) => x.id === f.id)
                 );
                 return newOnes.length ? [...prev, ...newOnes] : prev;
@@ -3302,6 +3305,14 @@ export default function App() {
                 void loadSettings({ snapshot_chunk_strategy: true });
               }}
             />
+            <div className="side-nav-separator" aria-hidden="true" />
+            <Button
+              type="text"
+              className={`side-nav-btn${reviewQueueOpen ? " side-nav-btn--active" : ""}`}
+              icon={<SearchOutlined />}
+              title="审查队列"
+              onClick={() => setReviewQueueOpen((v) => !v)}
+            />
           </>
         ) : (
           <></>
@@ -3970,53 +3981,50 @@ export default function App() {
                 {/* Findings panel */}
                 {sessionFindings.length > 0 ? (
                   <div style={{ padding: "0 0 12px 0" }}>
-                    {(() => {
-                      const { FindingsPanel } = require("./FindingsPanel") as typeof import("./FindingsPanel");
-                      const handleStatusChange = async (findingId: string, status: import("./FindingsPanel").Finding["status"]) => {
+                    <FindingsPanel
+                      projectId={selectedId}
+                      conversationId={selectedConversationId}
+                      findings={sessionFindings}
+                      onStatusChange={(findingId: string, status: Finding["status"]) => {
                         if (selectedId == null || selectedConversationId == null) return;
-                        try {
-                          await fetch(
-                            `/api/v1/projects/${selectedId}/conversations/${selectedConversationId}/findings/${findingId}`,
-                            { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }) }
-                          );
-                          setSessionFindings((prev) => prev.map((f) => (f.id === findingId ? { ...f, status } : f)));
-                        } catch {
-                          // ignore
-                        }
-                      };
-                      const handleGenerateReport = async () => {
+                        void (async () => {
+                          try {
+                            await fetch(
+                              `/api/v1/projects/${selectedId}/conversations/${selectedConversationId}/findings/${findingId}`,
+                              { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }) }
+                            );
+                            setSessionFindings((prev) => prev.map((f) => (f.id === findingId ? { ...f, status } : f)));
+                          } catch {
+                            // ignore
+                          }
+                        })();
+                      }}
+                      onGenerateReport={() => {
                         if (selectedId == null || selectedConversationId == null) return;
                         setReportLoading(true);
-                        try {
-                          const res = await fetch(
-                            `/api/v1/projects/${selectedId}/conversations/${selectedConversationId}/generate-report`,
-                            { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: null, include_resolved: false }) }
-                          );
-                          const json = await res.json();
-                          if (json?.data?.report_markdown) {
-                            const md = String(json.data.report_markdown);
-                            pushOutputEntry({ kind: "analyze", convId: selectedConversationId, title: "正式评审报告", markdown: md });
-                            setFinalMarkdown(md);
-                          } else {
-                            import("antd").then(({ message: msg }) => msg.error(json?.error || "生成报告失败"));
+                        void (async () => {
+                          try {
+                            const res = await fetch(
+                              `/api/v1/projects/${selectedId}/conversations/${selectedConversationId}/generate-report`,
+                              { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: null, include_resolved: false }) }
+                            );
+                            const json = await res.json();
+                            if (json?.data?.report_markdown) {
+                              const md = String(json.data.report_markdown);
+                              pushOutputEntry({ kind: "analyze", convId: selectedConversationId, title: "正式评审报告", markdown: md });
+                              setFinalMarkdown(md);
+                            } else {
+                              message.error(json?.error || "生成报告失败");
+                            }
+                          } catch (e) {
+                            message.error(String(e));
+                          } finally {
+                            setReportLoading(false);
                           }
-                        } catch (e) {
-                          import("antd").then(({ message: msg }) => msg.error(String(e)));
-                        } finally {
-                          setReportLoading(false);
-                        }
-                      };
-                      return (
-                        <FindingsPanel
-                          projectId={selectedId}
-                          conversationId={selectedConversationId}
-                          findings={sessionFindings}
-                          onStatusChange={(id, s) => void handleStatusChange(id, s)}
-                          onGenerateReport={() => void handleGenerateReport()}
-                          reportLoading={reportLoading}
-                        />
-                      );
-                    })()}
+                        })();
+                      }}
+                      reportLoading={reportLoading}
+                    />
                   </div>
                 ) : null}
               </div>
@@ -4212,6 +4220,16 @@ export default function App() {
         </div>
       ) : null}
 
+      <Drawer
+        title="审查队列"
+        placement="right"
+        width={480}
+        open={reviewQueueOpen && appMode === "review"}
+        onClose={() => setReviewQueueOpen(false)}
+        bodyStyle={{ padding: 0 }}
+      >
+        <ReviewQueuePanel />
+      </Drawer>
       {/* ── Review Queue Drawer (accessible from review mode) ── */}
       <ReviewQueueDrawer
         open={reviewQueueDrawerOpen}
