@@ -17,6 +17,9 @@ dependencies = [
   "markitdown[xlsx]>=0.1.0",
 ]
 
+[project.optional-dependencies]
+test = ["httpx>=0.27.0"]
+
 [project.scripts]
 aika = "aika.cli:main"
 aika-web = "backend.__main__:main"

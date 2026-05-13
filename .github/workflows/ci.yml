@@ -48,7 +48,7 @@ jobs:
           sed -i 's|docs2md @ git+https://github.com/Grant-Huang/docs2md.git|docs2md|' pyproject.toml
           # No --no-build-isolation: epic-doc uses hatchling which needs its own
           # isolated build env; docs2md is already installed so pip reuses it.
-          python -m pip install -e .
+          python -m pip install -e ".[test]"
 
       - name: Test
         run: |
