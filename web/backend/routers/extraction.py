@@ -40,6 +40,8 @@ from pydantic import BaseModel
 from aika import db as dbm
 from aika.paths import db_path
 from backend.deps import get_conn
+from backend.streaming import sse_event as _sse_line
+from backend.llm_utils import stream_and_collect_iter as _llm_stream
 from backend.knowledge_models import ExpertProfile, next_ki_id
 from backend.ki_parser import KI_INSTRUCTION, extract_clarify, extract_ki_items, extract_satisfaction
 from backend.personal_memory import personal_aika_dir
@@ -125,8 +127,6 @@ _META_REFLECT_SYSTEM_PROMPT = """你是知识提取质量审查员，负责在�
 - 所有字段必须填写，knowledge_gaps 至少 1 条，improvement_suggestions 至少 2 条"""
 
 
-def _sse_line(obj: dict[str, Any]) -> str:
-    return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
 
 
 def _run_coach_analysis(
@@ -456,18 +456,10 @@ def post_review_extraction_stream(
         yield _sse_line({"type": "status", "msg": "提取知识中…"})
         acc: list[str] = []
         try:
-            for chunk in provider.chat_stream(
-                system=system_prompt,
-                user=body.user_input,
-                config=cfg,
-                prior_messages=prior or None,
-            ):
-                if isinstance(chunk, dict):
-                    text = chunk.get("content") or chunk.get("text") or ""
-                else:
-                    text = str(chunk)
+            for text in _llm_stream(provider, system=system_prompt, user=body.user_input, config=cfg, prior_messages=prior):
                 acc.append(text)
-                yield _sse_line({"type": "text", "text": text})
+                if text:
+                    yield _sse_line({"type": "text", "text": text})
         except Exception as e:
             yield _sse_line({"type": "error", "message": str(e)})
             return
@@ -631,18 +623,10 @@ def active_extraction_stream(body: ActiveExtractionBody) -> StreamingResponse:
         yield _sse_line({"type": "status", "msg": "提取知识中…"})
         acc: list[str] = []
         try:
-            for chunk in provider.chat_stream(
-                system=system_prompt,
-                user=body.user_input,
-                config=cfg,
-                prior_messages=prior or None,
-            ):
-                if isinstance(chunk, dict):
-                    text = chunk.get("content") or chunk.get("text") or ""
-                else:
-                    text = str(chunk)
+            for text in _llm_stream(provider, system=system_prompt, user=body.user_input, config=cfg, prior_messages=prior):
                 acc.append(text)
-                yield _sse_line({"type": "text", "text": text})
+                if text:
+                    yield _sse_line({"type": "text", "text": text})
         except Exception as e:
             yield _sse_line({"type": "error", "message": str(e)})
             return
@@ -880,18 +864,10 @@ def doc_extraction_stream(body: DocExtractionBody) -> StreamingResponse:
         if body.prior_messages:
             prior = [(m["role"], m["content"]) for m in body.prior_messages]
         try:
-            for chunk in provider.chat_stream(
-                system=system_prompt,
-                user=user_msg,
-                config=cfg,
-                prior_messages=prior or None,
-            ):
-                if isinstance(chunk, dict):
-                    text = chunk.get("content") or chunk.get("text") or ""
-                else:
-                    text = str(chunk)
+            for text in _llm_stream(provider, system=system_prompt, user=user_msg, config=cfg, prior_messages=prior):
                 acc.append(text)
-                yield _sse_line({"type": "text", "text": text})
+                if text:
+                    yield _sse_line({"type": "text", "text": text})
         except Exception as e:
             yield _sse_line({"type": "error", "message": str(e)})
             return
@@ -1019,15 +995,10 @@ def expert_interview_stream(body: ExpertInterviewBody) -> StreamingResponse:
 
         acc: list[str] = []
         try:
-            for chunk in provider.chat_stream(
-                system=system,
-                user=body.user_input,
-                config=cfg,
-                prior_messages=prior or None,
-            ):
-                text = chunk.get("content") or chunk.get("text") or "" if isinstance(chunk, dict) else str(chunk)
+            for text in _llm_stream(provider, system=system, user=body.user_input, config=cfg, prior_messages=prior):
                 acc.append(text)
-                yield _sse_line({"type": "text", "text": text})
+                if text:
+                    yield _sse_line({"type": "text", "text": text})
         except Exception as e:
             yield _sse_line({"type": "error", "message": str(e)})
             return

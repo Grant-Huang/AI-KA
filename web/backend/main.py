@@ -22,6 +22,9 @@ from aika.llm import LLMConfig, LLMError, get_provider
 from aika.paths import db_path
 
 from backend.config import get_settings
+from backend.deps import get_conn as _conn, get_project_or_404 as _get_project_or_404, get_conversation_or_404 as _get_conversation_or_404
+from backend.streaming import sse_event as _sse_line, sse_stage as _sse_stage
+from backend.llm_utils import stream_and_collect_iter as _llm_stream
 from backend.folder_picker import FolderPickerError, pick_folder_native
 from backend.epic_mapper import analysis_to_epic_doc_config, dump_epic_config_json
 from backend.frontend_static import dev_dist_dir, packaged_dist_dir
@@ -42,7 +45,7 @@ from backend.routers.extraction import router as extraction_router
 from backend.routers.pending_rules import router as pending_rules_router
 from backend.routers.review_knowledge import router as review_knowledge_router
 from backend.run_metadata import build_run_metadata, sha256_short
-from backend.memory_recall import iter_memory_candidate_files, memory_root_under_repo, recall_memory_snippets
+from backend.memory_recall import iter_memory_candidate_files, memory_root_under_repo, recall_combined, recall_memory_snippets
 from backend.conversation_models import (
     ConversationMode, MessageMetadata, collect_findings_from_conversation,
     FindingStatus,
@@ -71,7 +74,6 @@ from backend.personal_memory import (
     ensure_personal_dirs,
     list_memory_suggestions,
     load_personal_focus_override,
-    recall_personal_memory,
 )
 from backend.hooks import register_builtin_hooks, run_after_analyze_hooks, run_before_analyze_hooks
 from backend.hooks.registry import list_hook_names
@@ -108,11 +110,6 @@ from backend.skills.review_domain_io import (
 )
 
 
-def _conn():
-    root = repository_root()
-    conn = dbm.connect(db_path(root))
-    dbm.ensure_schema(conn)
-    return conn
 
 
 _MULTITURN_MESSAGE_MAX_CHARS = 8000
@@ -1672,15 +1669,6 @@ def save_rules(project_id: int, payload: dict[str, Any]) -> JSONResponse:
     return JSONResponse(ok({"saved": True}))
 
 
-def _sse_line(obj: dict[str, Any]) -> str:
-    return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
-
-
-def _sse_stage(name: str, state: str, *, detail: str | None = None) -> str:
-    payload: dict[str, Any] = {"type": "stage", "name": name, "state": state}
-    if detail:
-        payload["detail"] = detail
-    return _sse_line(payload)
 
 def _strip_think_blocks(text: str) -> str:
     """去除模型输出中的 <think>…</think> 块，避免对外展示或扰动后续处理。"""
@@ -1861,12 +1849,8 @@ def _safe_slug(text: str) -> str:
 @app.post("/api/v1/projects/{project_id}/conversations/{conversation_id}/analyze/stream")
 def analyze_conversation_stream(project_id: int, conversation_id: int, payload: AnalyzeStreamBody) -> StreamingResponse:
     conn = _conn()
-    prj = dbm.get_project_by_id(conn, project_id)
-    if prj is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    conv = dbm.get_conversation(conn, conversation_id)
-    if conv is None or conv.project_id != project_id:
-        raise HTTPException(status_code=404, detail="conversation not found")
+    prj = _get_project_or_404(conn, project_id)
+    conv = _get_conversation_or_404(conn, conversation_id, project_id=project_id)
 
     resolved, err = _resolve_focus_definitions_for_subset(conn, payload.focus_points)
     if err:
@@ -1905,23 +1889,16 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
             embed_query_vec = embed_text(mq[:500])
         except Exception:
             embed_query_vec = None
-    recalled = recall_memory_snippets(
+    recalled = recall_combined(
         memory_root=mem_root,
         project_id=project_id,
         query=mq,
         already_surfaced=surf,
-        limit=4,
+        project_limit=4,
+        personal_limit=2,
         db_conn=conn,
         embed_query_vec=embed_query_vec,
     )
-    # Also recall from personal memory (~/.aika/memory/)
-    personal_recalled = recall_personal_memory(
-        mq,
-        already_surfaced=surf | {str(s.get("id") or "") for s in recalled},
-        limit=2,
-        embed_query_vec=embed_query_vec,
-    )
-    recalled = recalled + personal_recalled
     snippets.extend(recalled)
     _recalled_meta = [
         {
@@ -2104,11 +2081,10 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
             yield _sse_stage("思考分析", "start", detail=f"model={cfg.model}")
             provider = get_provider(cfg.provider)
             acc: list[str] = []
-            for piece in provider.chat_stream(
-                system=system, user=user, config=cfg, prior_messages=prior_tuples or None
-            ):
+            for piece in _llm_stream(provider, system=system, user=user, config=cfg, prior_messages=prior_tuples):
                 acc.append(piece)
-                yield _sse_line({"type": "delta", "text": piece})
+                if piece:
+                    yield _sse_line({"type": "delta", "text": piece})
             ev = {"type": "stage", "stage": "思考分析", "status": "end"}
             append_milestone_event(milestones_path, ev)
             yield _sse_stage("思考分析", "end")
@@ -2160,11 +2136,11 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
                         "如分析已足够充分，回复\"分析已充分\"。请用一段话简短回复。"
                     )
                     critique_parts: list[str] = []
-                    for piece in provider.chat_stream(
+                    for piece in _llm_stream(
+                        provider,
                         system="你是一名严谨的项目评审专家，负责对已完成的分析进行质量审查。",
                         user=body[:3000] + "\n\n" + critique_prompt,
                         config=cfg,
-                        prior_messages=None,
                     ):
                         critique_parts.append(piece)
                     critique_summary = "".join(critique_parts).strip()
@@ -2318,12 +2294,8 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
 @app.post("/api/v1/projects/{project_id}/conversations/{conversation_id}/followup/stream")
 def followup_conversation_stream(project_id: int, conversation_id: int, payload: FollowupStreamBody) -> StreamingResponse:
     conn = _conn()
-    prj = dbm.get_project_by_id(conn, project_id)
-    if prj is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    conv = dbm.get_conversation(conn, conversation_id)
-    if conv is None or conv.project_id != project_id:
-        raise HTTPException(status_code=404, detail="conversation not found")
+    prj = _get_project_or_404(conn, project_id)
+    conv = _get_conversation_or_404(conn, conversation_id, project_id=project_id)
 
     q = str(payload.question or "").strip()
     if not q:
@@ -2435,11 +2407,10 @@ def followup_conversation_stream(project_id: int, conversation_id: int, payload:
             yield _sse_stage("追问", "start", detail=f"model={cfg.model}")
             provider = get_provider(cfg.provider)
             acc: list[str] = []
-            for piece in provider.chat_stream(
-                system=system, user=user, config=cfg, prior_messages=prior_tuples or None
-            ):
+            for piece in _llm_stream(provider, system=system, user=user, config=cfg, prior_messages=prior_tuples):
                 acc.append(piece)
-                yield _sse_line({"type": "delta", "text": piece})
+                if piece:
+                    yield _sse_line({"type": "delta", "text": piece})
             append_milestone_event(milestones_path, {"type": "stage", "stage": "追问", "status": "end"})
             yield _sse_stage("追问", "end")
             body = _normalize_model_markdown("".join(acc))
@@ -2488,12 +2459,8 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
     不自动执行 convert/index；若语料不可用则提示用户去项目初始化页。
     """
     conn = _conn()
-    prj = dbm.get_project_by_id(conn, project_id)
-    if prj is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    conv = dbm.get_conversation(conn, conversation_id)
-    if conv is None or conv.project_id != project_id:
-        raise HTTPException(status_code=404, detail="conversation not found")
+    prj = _get_project_or_404(conn, project_id)
+    conv = _get_conversation_or_404(conn, conversation_id, project_id=project_id)
 
     msg = str(payload.message or "").strip()
     if not msg:
@@ -2552,7 +2519,7 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
         yield _agent_event("agent_stage", {"stage": "routing", "state": "start"})
         acc: list[str] = []
         try:
-            for piece in provider.chat_stream(system=routing_system, user=routing_user, config=cfg, prior_messages=prior_tuples or None):
+            for piece in _llm_stream(provider, system=routing_system, user=routing_user, config=cfg, prior_messages=prior_tuples):
                 acc.append(piece)
         except LLMError as e:
             yield _agent_event("agent_stage", {"stage": "routing", "state": "end"})
@@ -2647,9 +2614,10 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
             user = f"【上次审查结论摘要】\n{prev_excerpt}\n\n【用户追问】\n{q}\n"
             yield _agent_event("agent_stage", {"stage": "executing", "state": "start", "kind": "followup"})
             acc2: list[str] = []
-            for piece in provider.chat_stream(system=system, user=user, config=cfg, prior_messages=prior_tuples or None):
+            for piece in _llm_stream(provider, system=system, user=user, config=cfg, prior_messages=prior_tuples):
                 acc2.append(piece)
-                yield _agent_event("assistant_delta", {"text": piece})
+                if piece:
+                    yield _agent_event("assistant_delta", {"text": piece})
             body = _normalize_model_markdown("".join(acc2))
             dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=body)
             yield _agent_event("agent_stage", {"stage": "executing", "state": "end", "kind": "followup"})
@@ -2687,10 +2655,15 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
                 _eq_vec = embed_text(mq[:500])
             except Exception:
                 pass
-        recalled = recall_memory_snippets(
-            memory_root=mem_root, project_id=project_id, query=mq,
-            already_surfaced=set(), limit=5,
-            db_conn=conn, embed_query_vec=_eq_vec,
+        recalled = recall_combined(
+            memory_root=mem_root,
+            project_id=project_id,
+            query=mq,
+            already_surfaced=set(),
+            project_limit=5,
+            personal_limit=0,
+            db_conn=conn,
+            embed_query_vec=_eq_vec,
         )
 
         system = build_system_prompt(None, focus_definitions=resolved, memory_snippets=recalled or None, skill_meta=skill_meta_payload)
@@ -2721,9 +2694,10 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
                 },
             )
         acc3: list[str] = []
-        for piece in provider.chat_stream(system=system, user=user, config=cfg, prior_messages=prior_tuples or None):
+        for piece in _llm_stream(provider, system=system, user=user, config=cfg, prior_messages=prior_tuples):
             acc3.append(piece)
-            yield _agent_event("assistant_delta", {"text": piece})
+            if piece:
+                yield _agent_event("assistant_delta", {"text": piece})
         body = _normalize_model_markdown("".join(acc3))
         out_path.write_text(body, encoding="utf-8")
         dbm.insert_analysis_run(
