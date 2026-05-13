@@ -46,7 +46,9 @@ jobs:
           # Replace the git+https URL in pyproject.toml with a bare name so pip
           # reuses the installed copy instead of re-fetching and re-validating it.
           sed -i 's|docs2md @ git+https://github.com/Grant-Huang/docs2md.git|docs2md|' pyproject.toml
-          python -m pip install -e . --no-build-isolation
+          # No --no-build-isolation: epic-doc uses hatchling which needs its own
+          # isolated build env; docs2md is already installed so pip reuses it.
+          python -m pip install -e .
 
       - name: Test
         run: |
