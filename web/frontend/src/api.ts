@@ -62,27 +62,6 @@ export async function apiJson<T>(
   throw new Error(`Unexpected API shape HTTP ${r.status}`);
 }
 
-export function openConvertStream(
-  projectId: number,
-  onEvent: (ev: Record<string, unknown>) => void,
-  onError: (e: Error) => void,
-): () => void {
-  const url = `${BASE}/api/v1/projects/${projectId}/convert-md/stream`;
-  const es = new EventSource(url);
-  es.onmessage = (e) => {
-    try {
-      onEvent(JSON.parse(e.data) as Record<string, unknown>);
-    } catch {
-      onEvent({ type: "parse_error", raw: e.data });
-    }
-  };
-  es.onerror = () => {
-    onError(new Error("EventSource error"));
-    es.close();
-  };
-  return () => es.close();
-}
-
 async function consumeSseFromResponse(
   response: Response,
   onEvent: (ev: Record<string, unknown>) => void,
@@ -164,8 +143,6 @@ export async function getPresetHistory(
 
 export async function getProjectIngestStatus(projectId: number): Promise<{
   project_id: number;
-  md_out: string;
-  md_out_exists: boolean;
   chunk_count: number;
   initialized: boolean;
   has_review_records: boolean;
@@ -336,38 +313,6 @@ export async function getConversationsByPair(
   qs.set("project_id", String(projectId));
   qs.set("preset_id", presetId);
   return apiJson(`/api/v1/conversations/by-pair?${qs.toString()}`);
-}
-
-export function waitConvertStream(
-  projectId: number,
-  onLogLine: (line: string) => void,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const stop = openConvertStream(
-      projectId,
-      (ev) => {
-        if (ev.type === "log" && typeof ev.text === "string") {
-          onLogLine(ev.text + "\n");
-        }
-        if (ev.type === "complete") {
-          stop();
-          resolve();
-        }
-        if (ev.type === "error") {
-          stop();
-          reject(new Error(String(ev.message)));
-        }
-      },
-      (e) => {
-        stop();
-        reject(e);
-      },
-    );
-    setTimeout(() => {
-      stop();
-      reject(new Error("docs2md 转换超时"));
-    }, 600_000);
-  });
 }
 
 // ── Extraction module ──────────────────────────────────────────────────────

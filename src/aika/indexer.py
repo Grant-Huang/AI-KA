@@ -71,7 +71,7 @@ def resolve_chunk_strategy_from_env() -> str:
     return CHUNK_STRATEGY_BLANK
 
 
-def scan_project_root(root: Path, *, exts: Iterable[str] = (".md", ".txt")) -> list[ScanFile]:
+def scan_project_root(root: Path, *, exts: Iterable[str] = (".md", ".html", ".txt")) -> list[ScanFile]:
     root = root.resolve()
     results: list[ScanFile] = []
     allow = {e.lower() for e in exts}

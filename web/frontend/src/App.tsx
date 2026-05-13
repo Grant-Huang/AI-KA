@@ -64,7 +64,6 @@ import {
   getProjectIngestStatus,
   getPresetHistory,
   getConversationOutputsIndex,
-  openConvertStream,
   postAgentConversationStream,
   postAnalyzeConversationStream,
   postFollowupConversationStream,
@@ -228,7 +227,6 @@ type SettingsData = {
   focus_presets?: FocusPreset[];
   chunk_limit: number;
   chunk_strategy?: ChunkStrategy;
-  disable_image_parse?: boolean;
   /** md_out 索引：incremental 仅新文件或内容变化；full 清空后全量重建 */
   md_index_mode?: MdIndexMode;
   llm_settings: LlmSettings;
@@ -264,7 +262,7 @@ type Milestone = {
   detailText: string;
 };
 
-type PipelineStep = "convert" | "index" | "analyze";
+type PipelineStep = "index" | "analyze";
 
 type OutputEntryKind = "analyze" | "followup" | "rereview";
 type OutputEntry = {
@@ -514,7 +512,7 @@ export default function App() {
   const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain">("analyze");
   const [reviewQueueOpen, setReviewQueueOpen] = useState(false);
   const [projectIngest, setProjectIngest] = useState<
-    Record<number, { initialized: boolean; chunk_count: number; md_out_exists: boolean; has_review_records?: boolean }>
+    Record<number, { initialized: boolean; chunk_count: number; has_review_records?: boolean }>
   >(
     {},
   );
@@ -728,7 +726,6 @@ export default function App() {
             [selectedId]: {
               initialized: !!st.initialized,
               chunk_count: Number(st.chunk_count) || 0,
-              md_out_exists: !!st.md_out_exists,
               has_review_records: !!(st as any)?.has_review_records,
             },
           }));
@@ -819,7 +816,6 @@ export default function App() {
     focus_points: [],
     chunk_limit: 40,
     chunk_strategy: "blank",
-    disable_image_parse: true,
     md_index_mode: "incremental",
     llm_settings: {
       text_provider: "openai_compatible",
@@ -855,7 +851,6 @@ export default function App() {
   const chunkStrategyAtOpenRef = useRef<ChunkStrategy>("blank");
   const [milestoneOpenOverrides, setMilestoneOpenOverrides] = useState<Record<string, boolean>>({});
   const rulesFileInputRef = useRef<HTMLInputElement | null>(null);
-  const stopConvertRef = useRef<(() => void) | null>(null);
   const stopAnalyzeRef = useRef<(() => void) | null>(null);
   const analyzeAbortRef = useRef<AbortController | null>(null);
   const indexAbortRef = useRef<AbortController | null>(null);
@@ -863,7 +858,7 @@ export default function App() {
   const deltaAccRef = useRef<string>(""); // accumulated model-output text used for dedup
   const currentStageKeyRef = useRef<string>("");
   const lastMilestoneIdRef = useRef<string>("");
-  const pipelineStepRef = useRef<PipelineStep>("convert");
+  const pipelineStepRef = useRef<PipelineStep>("index");
 
   const ensureMilestone = useCallback((id: string, name: string, detailKind: LogGroupKind) => {
     setMilestones((prev) => {
@@ -950,18 +945,17 @@ export default function App() {
             {
               initialized: !!st.initialized,
               chunk_count: Number(st.chunk_count) || 0,
-              md_out_exists: !!st.md_out_exists,
               has_review_records: !!(st as any)?.has_review_records,
             },
           ] as const;
         } catch {
-          return [p.id, { initialized: false, chunk_count: 0, md_out_exists: false }] as const;
+          return [p.id, { initialized: false, chunk_count: 0 }] as const;
         }
       }),
     );
     const next: Record<
       number,
-      { initialized: boolean; chunk_count: number; md_out_exists: boolean; has_review_records?: boolean }
+      { initialized: boolean; chunk_count: number; has_review_records?: boolean }
     > = {};
     for (const [pid, st] of pairs) next[pid] = st;
     setProjectIngest(next);
@@ -1575,11 +1569,9 @@ export default function App() {
     terminatedRef.current = true;
     analyzeAbortRef.current?.abort();
     indexAbortRef.current?.abort();
-    stopConvertRef.current?.();
     stopAnalyzeRef.current?.();
     analyzeAbortRef.current = null;
     indexAbortRef.current = null;
-    stopConvertRef.current = null;
     stopAnalyzeRef.current = null;
     setPipelineRunning(false);
     ensureMilestone("sys:control", "流程控制", "system");
@@ -1742,52 +1734,6 @@ export default function App() {
       );
       message.success("完成");
     });
-  };
-
-  const runConvertPhase = async () => {
-    if (selectedId == null) throw new Error("未选择项目");
-    ensureMilestone("sys:convert", "文档转换", "system");
-    setMilestones((prev) =>
-      prev.map((m) => (m.id === "sys:convert" ? { ...m, status: "running" as MilestoneStatus } : m)),
-    );
-    appendMilestoneDetail("sys:convert", "【docs2md】开始转换…\n");
-    await new Promise<void>((resolve, reject) => {
-      const stop = openConvertStream(
-        selectedId,
-        (ev) => {
-          if (ev.type === "log" && typeof ev.text === "string") {
-            appendMilestoneDetail("sys:convert", ev.text + "\n");
-          }
-          if (ev.type === "complete") {
-            stop();
-            stopConvertRef.current = null;
-            setMilestoneStatus("sys:convert", "done");
-            resolve();
-          }
-          if (ev.type === "error") {
-            stop();
-            stopConvertRef.current = null;
-            setMilestoneStatus("sys:convert", "error");
-            reject(new Error(String(ev.message)));
-          }
-        },
-        (e) => {
-          stop();
-          stopConvertRef.current = null;
-          setMilestoneStatus("sys:convert", "error");
-          reject(e);
-        },
-      );
-      stopConvertRef.current = () => {
-        stop();
-        stopConvertRef.current = null;
-        setMilestoneStatus("sys:convert", "done");
-        resolve();
-      };
-    });
-    if (terminatedRef.current) return;
-    appendMilestoneDetail("sys:convert", "【docs2md】转换完成。\n");
-    setMilestoneStatus("sys:convert", "done");
   };
 
   const runIndexPhase = async () => {
@@ -2105,20 +2051,16 @@ export default function App() {
       if ((e as Error)?.name === "AbortError" || terminatedRef.current) return;
       const msg = String((e as Error).message);
       const stepFallback =
-        pipelineStepRef.current === "convert"
-          ? "sys:convert"
-          : pipelineStepRef.current === "index"
-            ? "sys:index"
-            : "";
+        pipelineStepRef.current === "index"
+          ? "sys:index"
+          : "";
       const target = currentStageKeyRef.current || stepFallback || lastMilestoneIdRef.current || "sys:control";
       const targetLabel =
-        target === "sys:convert"
-          ? "文档转换"
-          : target === "sys:index"
-            ? "索引与分块"
-            : target.startsWith("stage:")
-              ? target.slice(6)
-              : "流程控制";
+        target === "sys:index"
+          ? "索引与分块"
+          : target.startsWith("stage:")
+            ? target.slice(6)
+            : "流程控制";
       ensureMilestone(target, targetLabel, "error");
       appendMilestoneDetail(target, `[error] ${msg}\n`);
       setMilestoneStatus(target, "error");
@@ -2128,7 +2070,6 @@ export default function App() {
       setPipelineRunning(false);
       analyzeAbortRef.current = null;
       indexAbortRef.current = null;
-      stopConvertRef.current = null;
       stopAnalyzeRef.current = null;
     }
   };
@@ -2271,7 +2212,7 @@ export default function App() {
     });
   };
 
-  const resumePipelineAfterFailure = async (mode: "convert_chain" | "index_chain" | "analyze_only" | "full") => {
+  const resumePipelineAfterFailure = async (mode: "index_chain" | "analyze_only" | "full") => {
     if (selectedId == null) {
       message.warning("请先选择或创建项目");
       return;
@@ -2293,15 +2234,13 @@ export default function App() {
     terminatedRef.current = false;
     analyzeAbortRef.current?.abort();
     indexAbortRef.current?.abort();
-    stopConvertRef.current?.();
     stopAnalyzeRef.current = null;
     analyzeAbortRef.current = null;
     indexAbortRef.current = null;
-    stopConvertRef.current = null;
     const projName = displayProjectSubject(selected);
     const fpSample = presetFocusPoints.slice(0, 3).join("、");
     const fpRest = presetFocusPoints.length > 3 ? "等" : "";
-    const taskBrief = `本次针对项目「${projName}」，将围绕${fpSample}${fpRest}共 ${presetFocusPoints.length} 项关注点开展关联审查。流程将顺序执行：① 文档转换（docs2md 将源文档转为 Markdown）；② 索引与分块（按设置中的分块策略建立可检索片段）；③ 模型分析（结合关注点生成结构化审查结论）。请关注下方各步骤日志；若您刚在设置中修改过分块策略，请务必重新执行索引后再解读分析结果，以免结论仍基于旧分块边界。`;
+    const taskBrief = `本次针对项目「${projName}」，将围绕${fpSample}${fpRest}共 ${presetFocusPoints.length} 项关注点开展关联审查。流程将顺序执行：① 索引与分块（按设置中的分块策略建立可检索片段）；② 模型分析（结合关注点生成结构化审查结论）。请关注下方各步骤日志；若您刚在设置中修改过分块策略，请务必重新执行索引后再解读分析结果，以免结论仍基于旧分块边界。`;
     setPipelineTaskBrief(taskBrief);
 
     if (mode === "full") {
@@ -2312,22 +2251,9 @@ export default function App() {
       setFinalMarkdown("");
       setFragmentIndexMd("");
       setResultFeedback(null);
-    } else if (mode === "convert_chain") {
-      setMilestones((prev) =>
-        prev
-          .filter((m) => m.id === "sys:convert")
-          .map((m) => ({
-            ...m,
-            status: "running" as MilestoneStatus,
-            detailText: `${m.detailText}\n\n--- 重试文档转换 ---\n`,
-          })),
-      );
     } else if (mode === "index_chain") {
       setMilestones((prev) => {
-        const c = prev.find((m) => m.id === "sys:convert" && m.status === "done");
-        if (!c) return prev;
         return [
-          { ...c },
           {
             id: "sys:index",
             name: "索引与分块",
@@ -2344,31 +2270,13 @@ export default function App() {
       currentStageKeyRef.current = "";
       setMilestones((prev) =>
         prev
-          .filter((m) => m.id === "sys:convert" || m.id === "sys:index")
+          .filter((m) => m.id === "sys:index")
           .map((m) => ({ ...m, status: "done" as MilestoneStatus })),
       );
     }
 
     await runPipelineTryCatch(async () => {
-      if (mode === "full") {
-        pipelineStepRef.current = "convert";
-        await runConvertPhase();
-        if (terminatedRef.current) return;
-        pipelineStepRef.current = "index";
-        await runIndexPhase();
-        if (terminatedRef.current) return;
-        pipelineStepRef.current = "analyze";
-        await runAnalyzePhase(presetFocusPoints);
-      } else if (mode === "convert_chain") {
-        pipelineStepRef.current = "convert";
-        await runConvertPhase();
-        if (terminatedRef.current) return;
-        pipelineStepRef.current = "index";
-        await runIndexPhase();
-        if (terminatedRef.current) return;
-        pipelineStepRef.current = "analyze";
-        await runAnalyzePhase(presetFocusPoints);
-      } else if (mode === "index_chain") {
+      if (mode === "full" || mode === "index_chain") {
         pipelineStepRef.current = "index";
         await runIndexPhase();
         if (terminatedRef.current) return;
@@ -2558,18 +2466,6 @@ export default function App() {
                   <Text type="secondary" style={{ display: "block", marginTop: 10 }}>
                     修改分块策略后须重新执行索引，否则分析仍基于旧分块。
                   </Text>
-
-                  <Divider style={{ margin: "14px 0" }} />
-
-                  <Text strong style={{ display: "block", marginBottom: 8 }}>
-                    图片解析
-                  </Text>
-                  <Checkbox
-                    checked={!!settingsDraft.disable_image_parse}
-                    onChange={(e) => setSettingsDraft((s) => ({ ...s, disable_image_parse: e.target.checked }))}
-                  >
-                    不解析文件中的图片（docs2md 转换时跳过 VL 解析）
-                  </Checkbox>
 
                   <Divider style={{ margin: "14px 0" }} />
 
@@ -3568,18 +3464,10 @@ export default function App() {
                         setFinalMarkdown("");
                         setFragmentIndexMd("");
                         setOutputEntries([]);
-                        setPipelineTaskBrief("初始化项目：自动检测状态并补齐缺失步骤（转换→索引）");
-
-                        // 自动续跑：若 md_out 不存在则先转换；之后确保索引就绪
-                        pipelineStepRef.current = "convert";
-                        let st = await getProjectIngestStatus(selectedId as number);
-                        if (!st.md_out_exists) {
-                          await runConvertPhase();
-                        }
-                        if (terminatedRef.current) return;
+                        setPipelineTaskBrief("初始化项目：对项目目录下的 Markdown 与 HTML 文件建立索引");
 
                         pipelineStepRef.current = "index";
-                        st = await getProjectIngestStatus(selectedId as number);
+                        const st = await getProjectIngestStatus(selectedId as number);
                         if (!st.initialized) {
                           await runIndexPhase();
                         }
@@ -4102,25 +3990,15 @@ export default function App() {
           <Space direction="vertical" style={{ width: "100%" }} size={12}>
             <Text strong>
               失败阶段：
-              {pipelineFailModal.step === "convert"
-                ? "文档转换"
-                : pipelineFailModal.step === "index"
-                  ? "索引与分块"
-                  : "模型分析"}
+              {pipelineFailModal.step === "index"
+                ? "索引与分块"
+                : "模型分析"}
             </Text>
             <Text type="danger" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
               {pipelineFailModal.message}
             </Text>
             <Text type="secondary">排除故障后，可选择从哪一步继续：</Text>
             <Space wrap>
-              {pipelineFailModal.step === "convert" ? (
-                <>
-                  <Button type="primary" onClick={() => void resumePipelineAfterFailure("convert_chain")}>
-                    重试转换并继续（索引→分析）
-                  </Button>
-                  <Button onClick={() => void resumePipelineAfterFailure("full")}>全流程重来</Button>
-                </>
-              ) : null}
               {pipelineFailModal.step === "index" ? (
                 <>
                   <Button type="primary" onClick={() => void resumePipelineAfterFailure("index_chain")}>
