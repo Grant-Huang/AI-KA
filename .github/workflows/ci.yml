@@ -55,7 +55,6 @@ jobs:
           from backend.main import app
           print('backend.main import OK')
           "
-          python -m pip install -e ".[dev]"
 
       - name: Test
         run: |
