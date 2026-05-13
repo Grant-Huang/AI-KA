@@ -50,7 +50,6 @@ import {
   LogoutOutlined,
   TagOutlined,
   PaperClipOutlined,
-  UnorderedListOutlined,
 } from "@ant-design/icons";
 import {
   apiJson,
@@ -79,9 +78,8 @@ import { parseMemoryInjectedItemsFromMilestonesRaw, useConversationReplay } from
 import SimpleMarkdown from "./SimpleMarkdown";
 import HelpPage from "./pages/help";
 import SystemSettingPage from "./pages/system_setting";
-import ExtractionPage, { ReviewQueuePanel } from "./ExtractionPage";
+import ExtractionPage, { ReviewQueueTab } from "./ExtractionPage";
 import { FindingsPanel, type Finding } from "./FindingsPanel";
-import { ReviewQueueDrawer, useReviewQueueCount } from "./ReviewQueueDrawer";
 import type { ReviewQueueItem } from "./api";
 
 const { Text, Title } = Typography;
@@ -507,10 +505,8 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [appMode, setAppMode] = useState<"review" | "extraction">("review");
-  const [reviewQueueDrawerOpen, setReviewQueueDrawerOpen] = useState(false);
-  const reviewQueueCount = useReviewQueueCount();
   const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain">("analyze");
-  const [reviewQueueOpen, setReviewQueueOpen] = useState(false);
+  const [reviewMainTab, setReviewMainTab] = useState<"analyze" | "result_review">("analyze");
   const [projectIngest, setProjectIngest] = useState<
     Record<number, { initialized: boolean; chunk_count: number; has_review_records?: boolean }>
   >(
@@ -3158,26 +3154,6 @@ export default function App() {
               title="审查历史"
               onClick={() => setChatsOpen(true)}
             />
-            <div style={{ position: "relative", display: "inline-flex" }}>
-              <Button
-                type="text"
-                className="side-nav-btn"
-                icon={<UnorderedListOutlined />}
-                title="审查队列（来自项目审查的知识线索）"
-                onClick={() => setReviewQueueDrawerOpen(true)}
-              />
-              {reviewQueueCount > 0 && (
-                <span style={{
-                  position: "absolute", top: 4, right: 4,
-                  background: "#fa8c16", color: "#fff", borderRadius: "50%",
-                  width: 14, height: 14, fontSize: 9, display: "flex",
-                  alignItems: "center", justifyContent: "center", fontWeight: 700,
-                  pointerEvents: "none",
-                }}>
-                  {reviewQueueCount > 9 ? "9+" : reviewQueueCount}
-                </span>
-              )}
-            </div>
             <div className="side-nav-separator" aria-hidden="true" />
             <Button
               type="text"
@@ -3202,13 +3178,6 @@ export default function App() {
               }}
             />
             <div className="side-nav-separator" aria-hidden="true" />
-            <Button
-              type="text"
-              className={`side-nav-btn${reviewQueueOpen ? " side-nav-btn--active" : ""}`}
-              icon={<SearchOutlined />}
-              title="审查队列"
-              onClick={() => setReviewQueueOpen((v) => !v)}
-            />
           </>
         ) : (
           <></>
@@ -4098,22 +4067,6 @@ export default function App() {
         </div>
       ) : null}
 
-      <Drawer
-        title="审查队列"
-        placement="right"
-        width={480}
-        open={reviewQueueOpen && appMode === "review"}
-        onClose={() => setReviewQueueOpen(false)}
-        bodyStyle={{ padding: 0 }}
-      >
-        <ReviewQueuePanel />
-      </Drawer>
-      {/* ── Review Queue Drawer (accessible from review mode) ── */}
-      <ReviewQueueDrawer
-        open={reviewQueueDrawerOpen}
-        onClose={() => setReviewQueueDrawerOpen(false)}
-        onStartExtraction={handleStartFromReviewQueue}
-      />
 
       {/* ── Expert Profile Modal ── */}
       <Modal
@@ -4173,6 +4126,43 @@ export default function App() {
 
 
       {!chatsOpen && appMode === "review" && mainPanel === "analyze" ? (
+        <>
+          {/* ── 项目审查主 tabs：对话 | 结果评审 ── */}
+          <div style={{
+            display: "flex", gap: 0,
+            borderBottom: "1px solid var(--color-border, #e0e0d8)",
+            position: "sticky", top: 0, background: "var(--color-bg, #f5f5f0)", zIndex: 10,
+          }}>
+            {(["analyze", "result_review"] as const).map((key) => {
+              const label = key === "analyze" ? "对话" : "结果评审";
+              return (
+                <button
+                  key={key}
+                  onClick={() => setReviewMainTab(key)}
+                  style={{
+                    padding: "8px 20px", border: "none",
+                    borderBottom: reviewMainTab === key ? "2px solid #527c5e" : "2px solid transparent",
+                    background: "none", cursor: "pointer",
+                    fontWeight: reviewMainTab === key ? 600 : 400,
+                    color: reviewMainTab === key ? "#527c5e" : "#666",
+                    fontSize: 14, transition: "all 0.15s",
+                  }}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+
+          {reviewMainTab === "result_review" ? (
+            <div style={{ padding: "0 24px", maxWidth: 980, margin: "0 auto", width: "100%" }}>
+              <ReviewQueueTab
+                onStartExtraction={(item) => {
+                  void handleStartFromReviewQueue(item);
+                }}
+              />
+            </div>
+          ) : (
         <div
           className={`composer-overlay ${
             // 打开会话时输入框固定底部；空白页可居中
@@ -4290,6 +4280,8 @@ export default function App() {
             </div>
           </div>
         </div>
+          )}
+        </>
       ) : null}
     </div>
   );
