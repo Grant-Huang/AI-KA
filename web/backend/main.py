@@ -1467,10 +1467,11 @@ def delete_project(project_id: int) -> JSONResponse:
     prj = dbm.get_project_by_id(conn, project_id)
     if prj is None:
         return JSONResponse(err("project not found"), status_code=404)
-    # 只允许删除"已初始化但没有审查记录"的项目
-    if int(dbm.count_project_completed_outputs(conn, project_id=prj.id)) > 0:
+    # 只允许删除没有任何审查记录的项目（包括未完成的 analysis_runs）
+    if int(dbm.count_project_analysis_runs(conn, project_id=prj.id)) > 0 or \
+            int(dbm.count_project_completed_outputs(conn, project_id=prj.id)) > 0:
         return JSONResponse(
-            err("项目已有已完成审查产物（conversation_outputs），为保护历史不可删除"),
+            err("项目已有审查记录，为保护历史不可删除"),
             status_code=409,
         )
     # 先清理文件系统产物（失败不阻断 DB 删除）

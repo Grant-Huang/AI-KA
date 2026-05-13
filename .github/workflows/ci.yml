@@ -37,13 +37,15 @@ jobs:
       - name: Install
         run: |
           python -m pip install -U pip
-          # docs2md pyproject.toml has two issues that cause modern setuptools to
-          # reject it: bare `license = "MIT"` string and `license-files` field.
-          # Patch both before installing.
+          # docs2md pyproject.toml uses bare `license = "MIT"` and `license-files`
+          # which are rejected by modern setuptools. Clone, patch, and install first.
           git clone --depth 1 https://github.com/Grant-Huang/docs2md.git /tmp/docs2md
           sed -i 's/^license = "MIT"/license = {text = "MIT"}/' /tmp/docs2md/pyproject.toml
           sed -i '/^license-files/d' /tmp/docs2md/pyproject.toml
           python -m pip install /tmp/docs2md
+          # Replace the git+https URL in pyproject.toml with a bare name so pip
+          # reuses the installed copy instead of re-fetching and re-validating it.
+          sed -i 's|docs2md @ git+https://github.com/Grant-Huang/docs2md.git|docs2md|' pyproject.toml
           python -m pip install -e . --no-build-isolation
 
       - name: Test
