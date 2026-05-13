@@ -12,7 +12,6 @@ dependencies = [
   "fastapi>=0.115.0",
   "python-multipart>=0.0.9",
   "uvicorn[standard]>=0.32.0",
-  "docs2md @ git+https://github.com/Grant-Huang/docs2md.git",
   "epic-doc @ git+https://github.com/Grant-Huang/epic-doc.git",
   "markitdown[xlsx]>=0.1.0",
 ]

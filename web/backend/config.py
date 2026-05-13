@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import os
-import sys
 from dataclasses import dataclass
 from functools import lru_cache
 
 
 @dataclass(frozen=True)
 class Settings:
-    docs2md_root: str | None
-    docs2md_python: str
     projects_allow_prefix: str | None
     enable_native_folder_picker: bool
     fs_picker_localhost_only: bool
@@ -32,9 +29,6 @@ def get_settings() -> Settings:
     origins_raw = os.environ.get("AIKA_CORS_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173")
     origins = [o.strip() for o in origins_raw.split(",") if o.strip()]
     return Settings(
-        docs2md_root=os.environ.get("DOCS2MD_ROOT"),
-        # 与 AI-KA 后端同解释器，避免 `python` 指向其它版本导致 docs2md 与依赖不一致、环境变量行为不同。
-        docs2md_python=os.environ.get("DOCS2MD_PYTHON") or sys.executable,
         projects_allow_prefix=os.environ.get("AIKA_PROJECTS_ALLOW_PREFIX"),
         enable_native_folder_picker=_env_bool("AIKA_ENABLE_NATIVE_FOLDER_PICKER", True),
         fs_picker_localhost_only=_env_bool("AIKA_FS_PICKER_LOCALHOST_ONLY", True),

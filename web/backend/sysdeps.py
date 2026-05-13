@@ -24,22 +24,16 @@ def _which_any(cmds: list[str]) -> str | None:
 def _install_hint(tool: str) -> str:
     sys = platform.system().lower()
     if sys == "darwin":
-        if tool == "libreoffice":
-            return "macOS: 安装 LibreOffice（应用程序），确保 `soffice` 在 PATH 中（或自行创建软链接）。"
         if tool == "pandoc":
             return "macOS: `brew install pandoc`"
         if tool == "graphviz":
             return "macOS: `brew install graphviz`"
     if sys == "linux":
-        if tool == "libreoffice":
-            return "Linux: `sudo apt-get update && sudo apt-get install -y libreoffice`（或使用发行版对应包管理器）"
         if tool == "pandoc":
             return "Linux: `sudo apt-get update && sudo apt-get install -y pandoc`（或使用发行版对应包管理器）"
         if tool == "graphviz":
             return "Linux: `sudo apt-get update && sudo apt-get install -y graphviz`（或使用发行版对应包管理器）"
     if sys == "windows":
-        if tool == "libreoffice":
-            return "Windows: 从 LibreOffice 官网安装，并确保 `soffice.exe` 可在 PATH 中找到。"
         if tool == "pandoc":
             return "Windows: 安装 Pandoc（可用 `choco install pandoc` 或 `scoop install pandoc`）。"
         if tool == "graphviz":
@@ -54,17 +48,6 @@ def check_runtime_system_deps() -> list[MissingDep]:
     This app does not auto-install system tools. It only detects and prints hints.
     """
     missing: list[MissingDep] = []
-
-    # docs2md: office conversion may require LibreOffice (soffice).
-    if _which_any(["soffice", "libreoffice"]) is None:
-        missing.append(
-            MissingDep(
-                name="libreoffice",
-                commands=["soffice", "libreoffice"],
-                purpose="docs2md：将 .doc/.xls 等办公文档转换为可解析格式（依赖 LibreOffice）。",
-                install_hint=_install_hint("libreoffice"),
-            )
-        )
 
     # epic-doc: optional extra outputs.
     if _which_any(["pandoc"]) is None:

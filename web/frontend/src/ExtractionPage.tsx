@@ -687,7 +687,7 @@ function DocUploadTab() {
   return (
     <div style={{ padding: "16px 0" }}>
       <Upload.Dragger
-        accept=".md,.txt,.docx,.pdf"
+        accept=".md,.html"
         beforeUpload={(file) => { void handleUpload(file); return false; }}
         showUploadList={false}
         disabled={uploading}
@@ -696,7 +696,7 @@ function DocUploadTab() {
         <p className="ant-upload-drag-icon">
           {uploading ? <Spin /> : <InboxOutlined style={{ fontSize: 32, color: "#527c5e" }} />}
         </p>
-        <p>拖拽或点击上传规则文档（.md / .txt / .docx / .pdf）</p>
+        <p>拖拽或点击上传规则文档（.md / .html）</p>
         <p style={{ fontSize: 12, color: "#888" }}>上传后 LLM 将基于文档内容做知识澄清</p>
       </Upload.Dragger>
 

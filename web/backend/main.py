@@ -22,7 +22,6 @@ from aika.llm import LLMConfig, LLMError, get_provider
 from aika.paths import db_path
 
 from backend.config import get_settings
-from backend.docs2md_runner import Docs2MdError, run_convert_directory
 from backend.folder_picker import FolderPickerError, pick_folder_native
 from backend.epic_mapper import analysis_to_epic_doc_config, dump_epic_config_json
 from backend.frontend_static import dev_dist_dir, packaged_dist_dir
@@ -492,7 +491,6 @@ def _write_app_settings_md(payload: dict[str, Any]) -> None:
     obj: dict[str, Any] = {
         "chunk_limit": int(merged.get("chunk_limit") or DEFAULT_CHUNK_LIMIT),
         "chunk_strategy": _normalize_chunk_strategy(merged.get("chunk_strategy")),
-        "disable_image_parse": bool(merged.get("disable_image_parse", True)),
         "md_index_mode": _normalize_md_index_mode(merged.get("md_index_mode")),
         "llm_settings": merged.get("llm_settings") if isinstance(merged.get("llm_settings"), dict) else {},
         "llm_text_api_key": str(merged.get("llm_text_api_key") or ""),
@@ -550,7 +548,6 @@ def _build_settings_payload(conn: Any) -> dict[str, Any]:
         "focus_presets": merged_presets,
         "chunk_limit": _get_chunk_limit(),
         "chunk_strategy": _get_chunk_strategy(),
-        "disable_image_parse": _get_disable_image_parse(),
         "md_index_mode": _get_md_index_mode(),
         "llm_settings": _get_llm_settings(),
         "repo_root": str(rr),
@@ -659,14 +656,6 @@ def _get_chunk_strategy() -> str:
     app_cfg, _ = _read_app_settings_md()
     v = app_cfg.get("chunk_strategy") if isinstance(app_cfg, dict) else None
     return _normalize_chunk_strategy(v)
-
-
-def _get_disable_image_parse() -> bool:
-    app_cfg, _ = _read_app_settings_md()
-    v = app_cfg.get("disable_image_parse") if isinstance(app_cfg, dict) else None
-    if isinstance(v, bool):
-        return v
-    return True
 
 
 def _get_md_index_mode() -> str:
@@ -885,9 +874,6 @@ def save_app_settings(payload: dict[str, Any]) -> JSONResponse:
             return JSONResponse(err("chunk_strategy must be blank or structured"), status_code=400)
         current["chunk_strategy"] = v
         app_cfg["chunk_strategy"] = v
-    if "disable_image_parse" in payload:
-        current["disable_image_parse"] = bool(payload.get("disable_image_parse"))
-        app_cfg["disable_image_parse"] = current["disable_image_parse"]
     if "md_index_mode" in payload:
         raw_m = payload.get("md_index_mode")
         if raw_m is not None and not isinstance(raw_m, str):
@@ -1445,18 +1431,14 @@ def get_project_ingest_status(project_id: int) -> JSONResponse:
     prj = dbm.get_project_by_id(conn, project_id)
     if prj is None:
         return JSONResponse(err("project not found"), status_code=404)
-    md_out = project_md_out_dir(prj.id)
-    md_out_exists = md_out.exists() and md_out.is_dir()
     chunk_count = int(dbm.count_project_chunks(conn, project_id=prj.id))
     review_runs_count = int(dbm.count_project_completed_outputs(conn, project_id=prj.id))
     return JSONResponse(
         ok(
             {
                 "project_id": prj.id,
-                "md_out": str(md_out),
-                "md_out_exists": bool(md_out_exists),
                 "chunk_count": int(chunk_count),
-                "initialized": bool(md_out_exists and chunk_count > 0),
+                "initialized": bool(chunk_count > 0),
                 "has_review_records": bool(review_runs_count > 0),
             }
         )
@@ -1808,38 +1790,6 @@ def _normalize_model_markdown(text: str) -> str:
     return cleaned
 
 
-@app.get("/api/v1/projects/{project_id}/convert-md/stream")
-def convert_md_stream(project_id: int) -> StreamingResponse:
-    conn = _conn()
-    prj = dbm.get_project_by_id(conn, project_id)
-    if prj is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    try:
-        src = validate_project_root(prj.root_path)
-    except PathValidationError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-    out_dir = project_md_out_dir(project_id)
-
-    def gen():
-        try:
-            for line in run_convert_directory(
-                input_dir=src,
-                output_dir=out_dir,
-                format_="md",
-                vl_api_key=_get_vl_llm_api_key_effective(),
-                vl_model=_get_vl_model(),
-                vl_base_url=_get_vl_base_url(),
-                disable_image_parse=_get_disable_image_parse(),
-            ):
-                yield _sse_line({"type": "log", "text": line.rstrip("\n")})
-            yield _sse_line({"type": "complete", "md_out": str(out_dir)})
-        except Docs2MdError as e:
-            yield _sse_line({"type": "error", "message": str(e)})
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
-
-
 def _embed_project_chunks(conn: Any, project_id: int, batch_size: int = 50) -> int:
     """
     Embed any document chunks that lack embeddings. Returns count of newly embedded chunks.
@@ -1882,9 +1832,12 @@ def index_md(project_id: int) -> JSONResponse:
     prj = dbm.get_project_by_id(conn, project_id)
     if prj is None:
         return JSONResponse(err("project not found"), status_code=404)
-    md_root = project_md_out_dir(project_id)
+    try:
+        md_root = validate_project_root(prj.root_path)
+    except PathValidationError as e:
+        return JSONResponse(err(str(e)), status_code=400)
     if not md_root.is_dir():
-        return JSONResponse(err("md_out does not exist; run convert-md first"), status_code=400)
+        return JSONResponse(err("project root directory does not exist"), status_code=400)
     n = sync_project_md_root(
         conn,
         project=prj,
@@ -1921,7 +1874,7 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
 
     entries = dbm.list_chunk_entries(conn, project_id=project_id, limit=payload.chunk_limit)
     if not entries:
-        raise HTTPException(status_code=400, detail="no chunks; run index-md after convert-md")
+        raise HTTPException(status_code=400, detail="no chunks; run index-md first")
 
     rules_hash, rules_fn = _review_domain_file_hash_and_name()
     rr_meta = repository_root()
@@ -2550,10 +2503,8 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
     dbm.insert_message(conn, conversation_id=conversation_id, role="user", content=msg)
 
     # 语料就绪检查：不自动补语料
-    md_out = project_md_out_dir(project_id)
-    md_out_exists = md_out.exists() and md_out.is_dir()
     chunk_count = int(dbm.count_project_chunks(conn, project_id=project_id))
-    initialized = bool(md_out_exists and chunk_count > 0)
+    initialized = bool(chunk_count > 0)
 
     cfg = _build_text_llm_config(conn, timeout_s=180.0)
     provider = get_provider(cfg.provider)
