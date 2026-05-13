@@ -13,6 +13,7 @@ V1.4  |  2026-04-14（扩展：§9 Skills/Memory/Tools/Hooks）
 | :-- | :-- | :-- | :-- |
 | V1.4 | 2026-04-14 | 新增第 9 章：审查技能包（Skills）、记忆（Memory）、工具（Tools）、钩子（Hooks）的实现机制、关键模块路径、与 `analyze/stream` / `prompt_builder` / `memory_recall` 的调用关系 | AI 协作 |
 | V1.5 | 2026-04-14 | 新增自动编排入口 `agent/stream`：后端统一编排路由（审查/追问/澄清/提示初始化），分析页隐藏预设选择（模式 C），并输出统一 SSE 事件（含产物下载入口） | AI 协作 |
+| V1.6 | 2026-05-13 | 移除 docs2md 依赖：文档处理管道改为直接从 `root_path` 读取 `.md`/`.html`（无中间 `md_out` 目录）；新增后端共享工具层（§2.3）：`streaming.py`（SSE 格式化）、`llm_utils.py`（LLM 流式调用）、`memory_recall.recall_combined()`（记忆联合召回）；`deps.py` 补充 `get_project_or_404` / `get_conversation_or_404` 通用校验辅助函数。 | AI 协作 |
 | V1.3 | 2026-04-12 | 审查技能包内 `review_domain.md` 的「组合使用建议」固定 **五列表** 解析/写回；`focus_combo_tips` / `focus_presets` 含 `review_role`、`review_goals_principles`、`output_requirements`；`build_system_prompt` 用预设三字段覆盖默认角色/原则/输出段落；`POST …/analyze/stream`（及会话流）请求体可选传入上述三字段 | AI 协作 |
 | V1.2 | 2026-04-10 | 索引器双策略、`locator_json` 扩展字段；`list_chunk_entries`；`build_user_prompt_from_entries` 块头；`analyze/stream` 追加索引表；`GET/POST /api/v1/settings` 的 `chunk_strategy`；`index-md` 传入策略 | AI 协作 |
 | V1.1 | 2026-03-25 | 基于《需求与设计文档 V1.0》补齐详细设计：模块边界、数据模型、接口契约、时序、异常与审计 | AI 协作 |
@@ -62,7 +63,34 @@ V1.4  |  2026-04-14（扩展：§9 Skills/Memory/Tools/Hooks）
 - **Report Service**
   - 报告章节结构、引用/表格/图表数据组装，调用 `epic-doc` 生成 docx
 
-### 2.2 统一 Provider/Adapter 接口（契约）
+### 2.2 文档处理管道（当前实现）
+
+```
+项目目录（root_path）
+  └── 扫描 .md / .html 文件
+       ↓ index-md（sync_project_md_root）
+  分块（空行策略 / 结构感知策略）
+       ↓ chunks（含 doc_path / chunk_index / locator_json）
+  LLM 流式审查（analyze/stream，via llm_utils.stream_and_collect_iter）
+       ↓ SSE 事件（via streaming.sse_event / sse_stage）
+  Markdown 结论 + 片段与来源索引表
+       ↓ 落库（SQLite：conversation_runs）+ 文件系统（导出）
+```
+
+> **变更说明（V1.6）**：原管道中 `docs2md 转换 → md_out` 步骤已移除。索引器现直接从项目 `root_path` 扫描文件；用户须预先将非 Markdown 格式文档转换为 `.md`/`.html`。
+
+### 2.3 后端共享工具层
+
+为消除各路由间的重复逻辑，抽取以下共享模块（均位于 `web/backend/`）：
+
+| 模块 | 主要导出 | 职责 |
+| :-- | :-- | :-- |
+| `streaming.py` | `sse_event(obj)` / `sse_stage(name, state)` | 统一 SSE JSON 格式化，避免各路由重复拼接 `data: …\n\n` |
+| `llm_utils.py` | `stream_and_collect_iter(provider, ...)` / `stream_and_collect(...)` | 统一 LLM 流式调用（`provider.chat_stream`）与文本收集；规范化 dict/str chunk 两种输出形态 |
+| `memory_recall.py` | `recall_combined(...)` | 联合召回项目记忆（`recall_memory_snippets`）与个人记忆（`recall_personal_memory`），统一去重逻辑 |
+| `deps.py` | `get_project_or_404(conn, id)` / `get_conversation_or_404(conn, id)` | 统一 DB 连接与"找不到返回 404"校验，消除各端点重复 |
+
+### 2.5 统一 Provider/Adapter 接口（契约）
 
 > 注意：此处仅定义接口形状与约束，不实现重复逻辑。
 

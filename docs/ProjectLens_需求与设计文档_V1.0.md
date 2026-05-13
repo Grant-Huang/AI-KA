@@ -20,8 +20,9 @@ V1.0  |  2025年Q2
 | 日期         | 说明                                                                                        |
 | ---------- | ----------------------------------------------------------------------------------------- |
 | 2026-04-10 | 增加可配置文档分块策略（空行 / Markdown 结构感知）；审查输出可追溯片段与文件章节行号；Web 流程体验（任务说明、里程碑折叠、完成提示）；运维侧见《系统管理员手册》。 |
-| 2026-04-13 | 文档对齐代码实现：当前 Web 范围聚焦“项目选择/转换/索引/流式审查/追问/导出/规则与模型设置”；更新接口清单（SSE 替代 WebSocket）、技术栈与安全/运维说明。 |
+| 2026-04-13 | 文档对齐代码实现：当前 Web 范围聚焦”项目选择/转换/索引/流式审查/追问/导出/规则与模型设置”；更新接口清单（SSE 替代 WebSocket）、技术栈与安全/运维说明。 |
 | 2026-04-14 | 增补「审查技能包 Skills、记忆 Memory、工具 Tools、钩子 Hooks」的预设能力与实现机制说明（见第十二章）；与 `docs/aika_spec/` 目录约定一致。 |
+| 2026-05-13 | 移除 docs2md 依赖：系统现直接从项目 `root_path` 读取 `.md`/`.html` 文件，不再经 `md_out` 中间目录；更新第 1.2.3、3.1.2、4.3 节与接口清单；补充知识提取功能作为第二主线；新增后端共享工具模块（`streaming.py`、`llm_utils.py`）说明。 |
 
 
 # **目录**
@@ -57,16 +58,28 @@ V1.0  |  2025年Q2
 
 ### **1.2.3  当前实现范围（以代码为准）**
 
-本仓库当前 Web 形态（M0/M1）聚焦“单项目目录 → docs2md 转换 → 索引与分块 → 流式审查输出”的闭环能力，核心包括：
+本仓库当前 Web 形态聚焦两条主线：**项目审查（Review）** 与 **知识提取（Extraction）**。
+
+**主线一：项目审查**
 
 - 项目：选择/注册项目目录（可选本机文件夹选择器）
+- **文档格式**：直接从项目 `root_path` 读取 **`.md`（Markdown）与 `.html`** 文件（无中间转换步骤）；其他格式（docx/pdf 等）需由用户预先转换
 - 设置：`chunk_limit`、分块策略（空行 / Markdown 结构感知）、规则（关注点与预设组合）、模型（文本与 VL）
-- 一键流程：转换（docs2md）→ 索引与分块 → 模型流式分析（SSE）
-- 证据追溯：输出中“片段与来源索引”（片段编号、文件、章节、行号范围）
+- 一键流程：索引与分块（index-md）→ 模型流式分析（SSE）
+- 证据追溯：输出中”片段与来源索引”（片段编号、文件、章节、行号范围）
 - 会话：按项目保存会话（conversation）与分析运行记录，支持基于上次结果的追问（SSE）
-- 导出：导出 Markdown；以及将分析映射为 `epic-doc` 配置并生成 docx（仅调用 `epic-doc`，本项目不实现排版引擎）
+- 导出：导出 Markdown；以及将分析映射为 `epic-doc` 配置并生成 docx
 
-本《需求与设计文档》早期章节包含较多“产品愿景”模块（知识库、任务队列、向量库、仪表盘等）。若与本节冲突，以本节与代码实现为准；未实现内容应视为后续规划，而非当前可用功能。
+**主线二：知识提取**
+
+- 提取工作台：三种模式（审查后提取 / 自由提取 / 文档澄清），AI 主动提问
+- 四种提取策略（规则差距 / 模糊信号 / 关键事件 / 反向验证）
+- 待批准规则：人工审批后写入活动技能包
+- 审查队列（Review Queue）：项目审查后 LLM 自动识别可泛化知识点写入
+- 场边教练（Coach Agent）：每 5 轮对话触发策略建议
+- 个人记忆（expert_profile.md）：首次进入时 AI 引导建立专家画像
+
+本《需求与设计文档》早期章节包含较多”产品愿景”模块（知识库、任务队列、向量库、仪表盘等）。若与本节冲突，以本节与代码实现为准；未实现内容应视为后续规划，而非当前可用功能。
 
 ### **1.2.2  规则文件与「组合使用建议」（配置约定，与实现对齐）**
 
@@ -143,14 +156,15 @@ V1.0  |  2025年Q2
 ### **3.1.2  文档格式支持**
 
 
-| 格式              | 支持级别 | 说明                    |
-| --------------- | ---- | --------------------- |
-| .md / .markdown | 完全支持 | 首选格式，解析精确             |
-| .docx / .doc    | 完全支持 | 通过 pandoc 转换为结构化内容    |
-| .pdf            | 完全支持 | 文本型 PDF；扫描件需开启 OCR 选项 |
-| .txt            | 完全支持 | 纯文本，按段落分割             |
-| .xlsx / .csv    | 部分支持 | 提取表格内容作为结构化数据         |
-| .pptx           | 部分支持 | 提取文字和备注内容             |
+| 格式              | 支持级别    | 说明                                              |
+| --------------- | ------- | ----------------------------------------------- |
+| .md / .markdown | **完全支持** | 首选格式，解析精确；支持空行分块与结构感知（`#`/`##` 标题）两种分块策略       |
+| .html           | **完全支持** | 直接从项目目录读取，与 `.md` 等同对待                          |
+| .docx / .doc    | 需预转换    | 系统不直接读取；推荐 Pandoc / Obsidian / markitdown 转为 .md |
+| .pdf            | 需预转换    | 系统不直接读取；推荐 markitdown / OCR 工具转为 .md            |
+| .txt            | 需预转换    | 建议重命名为 .md 或转换后使用                               |
+| .xlsx / .csv    | 需预转换    | 建议导出为 Markdown 表格格式后使用                          |
+| .pptx           | 需预转换    | 建议导出文字内容为 .md 后使用                               |
 
 
 ### **3.1.3  项目索引与快照**
@@ -312,19 +326,20 @@ V1.0  |  2025年Q2
 ### **4.3.1  技术选型**
 
 
-| 组件     | 技术选型                            | 说明                                    |
-| ------ | ------------------------------- | ------------------------------------- |
-| Web 框架 | Python FastAPI                  | 提供 REST API 与 SSE 流式输出；同进程可挂载前端静态资源 |
-| 文档转换   | docs2md                         | 将项目目录下原始文档转换为 Markdown（输出到 md_out）  |
-| 关系数据库  | SQLite                          | 存储项目、索引/分块、会话、分析运行与导出索引             |
-| 文件存储   | 本地文件系统                          | `.tmp`（SQLite/导出/日志）、`md_out`（转换结果） |
-| 报告导出   | epic-doc                         | 本项目只生成配置并调用 epic-doc 输出 docx         |
+| 组件       | 技术选型                   | 说明                                          |
+| -------- | ---------------------- | ------------------------------------------- |
+| Web 框架   | Python FastAPI         | 提供 REST API 与 SSE 流式输出；同进程可挂载前端静态资源        |
+| 文档读取     | 直接读取文件系统               | 从项目 `root_path` 扫描 `.md`/`.html` 文件（无转换步骤） |
+| 共享后端工具   | streaming.py / llm_utils.py | SSE 事件格式化；LLM 流式调用与文本收集统一封装                |
+| 关系数据库    | SQLite                 | 存储项目、索引/分块、会话、分析运行与导出索引                    |
+| 文件存储     | 本地文件系统                 | `.tmp`（SQLite/导出/日志）                        |
+| 报告导出     | epic-doc               | 本项目只生成配置并调用 epic-doc 输出 docx               |
 
 
 ### **4.3.2  文档处理管道**
 
 
-| 文档处理流程（当前实现） 原始文档 ↓ docs2md 转换 → Markdown（md_out） ↓ 索引与分块（空行 / 结构感知）→ chunks（含文件/章节/行号） ↓ LLM 流式审查（SSE）→ Markdown 结论 + 片段与来源索引 ↓ 保存与导出：SQLite 记录会话与运行，文件系统保存输出与索引 |
+| 文档处理流程（当前实现） 原始文档（.md / .html） ↓ 索引与分块（空行 / 结构感知）→ chunks（含文件/章节/行号） ↓ LLM 流式审查（SSE，streaming.py + llm_utils.py）→ Markdown 结论 + 片段与来源索引 ↓ 保存与导出：SQLite 记录会话与运行，文件系统保存输出与索引 |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 
 
@@ -472,14 +487,22 @@ V1.0  |  2025年Q2
 | GET | /projects/{project_id}/conversations/preset-history | 预设历史 | 查询某 preset 最近一次有分析输出的会话 |
 | GET | /projects/{project_id}/rules | 项目规则 | 项目级 rules（与审查技能包 `review_domain.md` 的关注点不同） |
 | POST | /projects/{project_id}/rules | 保存项目规则 | |
-| GET | /projects/{project_id}/convert-md/stream | 转换流 | SSE：调用 docs2md 输出日志 |
-| POST | /projects/{project_id}/index-md | 索引与分块 | 扫描 `md_out` 入库并按策略分块 |
+| POST | /projects/{project_id}/index-md | 索引与分块 | 扫描项目 `root_path` 下 `.md`/`.html` 文件入库并按策略分块 |
 | POST | /projects/{project_id}/conversations/{conversation_id}/agent/stream | 自动编排对话入口（模式 C） | SSE：`agent_stage` / `assistant_delta` / `artifact_ready` / `need_ingest` / `final` |
 | POST | /projects/{project_id}/conversations/{conversation_id}/analyze/stream | （底层能力）流式审查 | SSE：输出 delta + stage + final 等事件 |
 | POST | /projects/{project_id}/conversations/{conversation_id}/followup/stream | 流式追问 | SSE：基于上次结果与 chunks 追问 |
 | GET | /projects/{project_id}/conversations/{conversation_id}/outputs-index | 输出文件索引 | 列出该会话产生的导出文件 |
 | GET | /files/{project_id}/{filename} | 下载导出文件 | 仅允许 `.md/.txt/.json/.docx` |
 | POST | /projects/{project_id}/export/docx | 导出 docx | 生成 `epic_export.json` 并调用 `epic-doc` 产出 docx |
+| POST (SSE) | /api/v1/extraction/active | 知识提取：主动提取会话流 | 四种提取策略（规则差距/模糊信号/关键事件/反向验证） |
+| POST (SSE) | /api/v1/extraction/doc | 知识提取：文档澄清会话流 | 上传 `.md`/`.html` 文档，AI 基于文档提问 |
+| POST (SSE) | /api/v1/extraction/review | 知识提取：审查后提取会话流 | 携带审查结论，AI 自动识别可泛化知识点 |
+| PATCH | /api/v1/extraction/ki/{kid} | 更新知识条目 | 修改标题/内容/状态 |
+| POST | /api/v1/extraction/ki/{kid}/submit | 提交知识条目 | 提交至「待批准规则」列表 |
+| GET | /api/v1/review-queue | 审查队列 | 获取待提取知识线索列表 |
+| PATCH/DELETE | /api/v1/review-queue/{id} | 审查队列操作 | 更新状态或删除条目 |
+| GET/POST | /api/v1/extraction/strategies | 策略库 | 增删查提取策略 |
+| POST | /api/v1/extraction/strategies/bootstrap | 初始化种子策略 | 幂等：注入 12 条 Bootstrap 种子策略 |
 
 ## **7.3  流式输出（SSE）**
 
