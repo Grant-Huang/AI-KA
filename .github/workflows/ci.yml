@@ -37,22 +37,16 @@ jobs:
       - name: Install
         run: |
           python -m pip install -U pip
-          # docs2md has a broken pyproject.toml (bare license string + license-files)
-          # that setuptools>=69.5 rejects. Clone, patch, and install before anything else.
-          git clone --depth 1 https://github.com/Grant-Huang/docs2md.git /tmp/docs2md
-          sed -i 's/^license = "MIT"/license = {text = "MIT"}/' /tmp/docs2md/pyproject.toml
-          sed -i '/^license-files/d' /tmp/docs2md/pyproject.toml
-          python -m pip install /tmp/docs2md
-          # epic-doc has correct metadata; install it directly from git.
-          python -m pip install "epic-doc @ git+https://github.com/Grant-Huang/epic-doc.git"
-          # Install all remaining PyPI deps and test dep explicitly.
+          # Install PyPI deps and test dep explicitly; skip git-URL deps (docs2md,
+          # epic-doc) because they are invoked as CLI subprocesses and never imported
+          # directly, so they are not needed for the test suite to run.
           python -m pip install \
             "fastapi>=0.115.0" \
             "python-multipart>=0.0.9" \
             "uvicorn[standard]>=0.32.0" \
             "markitdown[xlsx]>=0.1.0" \
             "httpx>=0.27.0"
-          # Install our package without re-resolving deps (all already installed above).
+          # Install our package without resolving git-URL deps (already satisfied above).
           python -m pip install -e . --no-deps
 
       - name: Test
@@ -62,8 +56,7 @@ jobs:
       - name: Build wheel
         run: |
           python -m pip install -U build
-          # python -m build creates an isolated env; docs2md bare name avoids
-          # the broken git URL being fetched there too.
-          sed -i 's|docs2md @ git+https://github.com/Grant-Huang/docs2md.git|docs2md|' pyproject.toml
+          # python -m build only needs to produce wheel metadata; it does not install
+          # runtime deps, so git-URL entries in pyproject.toml are fine as-is.
           python -m build
 
