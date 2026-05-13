@@ -110,7 +110,10 @@ def _parse_frontmatter_simple(text: str) -> dict[str, Any] | None:
         if ":" not in line or line.strip().startswith("-"):
             continue
         key, _, val = line.partition(":")
-        result[key.strip()] = val.strip()
+        v = val.strip()
+        if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
+            v = v[1:-1]
+        result[key.strip()] = v
     return result
 
 
