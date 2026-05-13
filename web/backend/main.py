@@ -520,11 +520,19 @@ def _reload_embedding_config() -> None:
 
 
 def _helpme_md_path() -> Path:
+    candidates: list[Path] = []
     root = repository_root()
-    direct = root / "helpme.md"
-    if direct.is_file():
-        return direct
-    return root / "docs" / "helpme.md"
+    candidates.append(root / "helpme.md")
+    candidates.append(root / "docs" / "helpme.md")
+    # Also search relative to this source file (handles pip-installed layouts)
+    src_root = Path(__file__).resolve().parents[2]
+    if src_root != root:
+        candidates.append(src_root / "helpme.md")
+        candidates.append(src_root / "docs" / "helpme.md")
+    for p in candidates:
+        if p.is_file():
+            return p
+    return candidates[0]  # caller checks is_file()
 
 
 def _build_settings_payload(conn: Any) -> dict[str, Any]:

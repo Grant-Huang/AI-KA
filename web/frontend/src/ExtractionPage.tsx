@@ -287,7 +287,7 @@ function ChatArea({ messages, streaming }: { messages: ChatMsg[]; streaming: boo
             ) : msg.role === "user" ? (
               <Text>{msg.content}</Text>
             ) : (
-              <SimpleMarkdown text={msg.content} />
+              <SimpleMarkdown markdown={msg.content} />
             )}
           </div>
         ))
