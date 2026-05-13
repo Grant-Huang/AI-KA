@@ -37,17 +37,18 @@ jobs:
       - name: Install
         run: |
           python -m pip install -U pip
-          # docs2md pyproject.toml uses bare `license = "MIT"` and `license-files`
-          # which are rejected by modern setuptools. Clone, patch, and install first.
+          # Pre-install docs2md: its pyproject.toml uses `license = "MIT"` (bare
+          # string) and `license-files` which setuptools>=69.5 rejects (PEP 639).
           git clone --depth 1 https://github.com/Grant-Huang/docs2md.git /tmp/docs2md
           sed -i 's/^license = "MIT"/license = {text = "MIT"}/' /tmp/docs2md/pyproject.toml
           sed -i '/^license-files/d' /tmp/docs2md/pyproject.toml
           python -m pip install /tmp/docs2md
-          # Replace the git+https URL in pyproject.toml with a bare name so pip
-          # reuses the installed copy instead of re-fetching and re-validating it.
+          # Pre-install epic-doc from its git URL (correct metadata, installs fine).
+          python -m pip install "epic-doc @ git+https://github.com/Grant-Huang/epic-doc.git"
+          # Strip both git+https URLs from pyproject.toml so pip reuses the
+          # already-installed copies without re-fetching or re-validating.
           sed -i 's|docs2md @ git+https://github.com/Grant-Huang/docs2md.git|docs2md|' pyproject.toml
-          # No --no-build-isolation: epic-doc uses hatchling which needs its own
-          # isolated build env; docs2md is already installed so pip reuses it.
+          sed -i 's|epic-doc @ git+https://github.com/Grant-Huang/epic-doc.git|epic-doc|' pyproject.toml
           python -m pip install -e ".[test]"
 
       - name: Test
