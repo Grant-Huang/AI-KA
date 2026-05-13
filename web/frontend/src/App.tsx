@@ -82,7 +82,6 @@ import HelpPage from "./pages/help";
 import SystemSettingPage from "./pages/system_setting";
 import ExtractionPage, { ReviewQueuePanel } from "./ExtractionPage";
 import { FindingsPanel, type Finding } from "./FindingsPanel";
-import ExtractionPage from "./ExtractionPage";
 import { ReviewQueueDrawer, useReviewQueueCount } from "./ReviewQueueDrawer";
 import type { ReviewQueueItem } from "./api";
 
