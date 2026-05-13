@@ -43,6 +43,7 @@ jobs:
           # - git-URL deps (docs2md, epic-doc) are CLI subprocesses, never imported.
           # The package itself is not installed — pytest pythonpath covers src/web.
           python -m pip install \
+            pytest \
             "fastapi>=0.115.0" \
             "python-multipart>=0.0.9" \
             "httpx>=0.27.0"
