@@ -37,18 +37,23 @@ jobs:
       - name: Install
         run: |
           python -m pip install -U pip
-          # Pre-install docs2md: its pyproject.toml uses `license = "MIT"` (bare
-          # string) and `license-files` which setuptools>=69.5 rejects (PEP 639).
-          # Clone, patch, install — then replace the git URL with a bare name so
-          # pip reuses the installed copy. epic-doc has correct metadata and is
-          # left as a git URL so pip fetches it normally (NOT replaced with bare
-          # name — bare names for non-PyPI packages cause pip 24 to fail lookup).
+          # docs2md has a broken pyproject.toml (bare license string + license-files)
+          # that setuptools>=69.5 rejects. Clone, patch, and install before anything else.
           git clone --depth 1 https://github.com/Grant-Huang/docs2md.git /tmp/docs2md
           sed -i 's/^license = "MIT"/license = {text = "MIT"}/' /tmp/docs2md/pyproject.toml
           sed -i '/^license-files/d' /tmp/docs2md/pyproject.toml
           python -m pip install /tmp/docs2md
-          sed -i 's|docs2md @ git+https://github.com/Grant-Huang/docs2md.git|docs2md|' pyproject.toml
-          python -m pip install -e ".[test]"
+          # epic-doc has correct metadata; install it directly from git.
+          python -m pip install "epic-doc @ git+https://github.com/Grant-Huang/epic-doc.git"
+          # Install all remaining PyPI deps and test dep explicitly.
+          python -m pip install \
+            "fastapi>=0.115.0" \
+            "python-multipart>=0.0.9" \
+            "uvicorn[standard]>=0.32.0" \
+            "markitdown[xlsx]>=0.1.0" \
+            "httpx>=0.27.0"
+          # Install our package without re-resolving deps (all already installed above).
+          python -m pip install -e . --no-deps
 
       - name: Test
         run: |
@@ -57,5 +62,8 @@ jobs:
       - name: Build wheel
         run: |
           python -m pip install -U build
+          # python -m build creates an isolated env; docs2md bare name avoids
+          # the broken git URL being fetched there too.
+          sed -i 's|docs2md @ git+https://github.com/Grant-Huang/docs2md.git|docs2md|' pyproject.toml
           python -m build
 
