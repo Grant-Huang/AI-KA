@@ -35,6 +35,7 @@ from backend.prompt_builder import (
 )
 from backend.repo_paths import project_export_dir, project_md_out_dir, repository_root
 from backend.response import err, ok
+from backend.routers.auth import router as auth_router
 from backend.routers.conversations import router as conversations_router
 from backend.routers.outputs import router as outputs_router
 from backend.routers.review_queue import router as review_queue_router
@@ -149,6 +150,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(auth_router)
 app.include_router(outputs_router)
 app.include_router(conversations_router)
 app.include_router(review_queue_router)

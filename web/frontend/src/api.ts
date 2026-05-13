@@ -23,6 +23,7 @@ export async function apiJson<T>(
   init?: RequestInit,
 ): Promise<T> {
   const r = await fetch(`${BASE}${path}`, {
+    credentials: "include",
     ...init,
     headers: {
       "Content-Type": "application/json",
@@ -409,6 +410,24 @@ export async function rejectPendingRule(kid: string, body: { reason: string }): 
   return apiJson(`/api/v1/pending-rules/${encodeURIComponent(kid)}/reject`, { method: "POST", body: JSON.stringify(body) });
 }
 
+export type KnowledgeItem = {
+  id: string; extraction_focus_id: string; title: string; content: string;
+  confidence: string; status: string; source_role: string; source_type: string;
+  scope_note?: string | null; has_conflicts?: boolean; created_at?: string;
+};
+export async function getKnowledgeItems(opts?: { status?: string; limit?: number }): Promise<{ items: KnowledgeItem[]; total: number }> {
+  const qs = new URLSearchParams();
+  if (opts?.status) qs.set("status", opts.status);
+  if (opts?.limit) qs.set("limit", String(opts.limit));
+  return apiJson(`/api/v1/knowledge-items?${qs.toString()}`);
+}
+export async function patchKnowledgeItem(kid: string, data: { status?: string; title?: string; content?: string; scope_note?: string }): Promise<KnowledgeItem> {
+  return apiJson(`/api/v1/knowledge-items/${encodeURIComponent(kid)}`, { method: "PATCH", body: JSON.stringify(data) });
+}
+export async function submitKnowledgeItem(kid: string): Promise<{ submitted: string; status: string }> {
+  return apiJson(`/api/v1/knowledge-items/${encodeURIComponent(kid)}/submit`, { method: "POST" });
+}
+
 export async function uploadExtractionMaterial(
   file: File,
   title?: string,
@@ -484,15 +503,55 @@ export async function postReviewExtractionStream(
   await consumeSseFromResponse(r, onEvent, signal);
 }
 
-export async function postExpertInterviewStream(
-  body: { user_input: string; prior_messages?: Array<{role: string; content: string}>; rq_topics?: string[] },
+// ── Auth & session-based extraction (legacy, used by App.tsx) ─────────────
+
+export type AuthUser = { user_id: number; username: string; display_name: string; profile_completed: boolean };
+export type ExpertProfile = {
+  industries: string[]; production_modes: string[]; functional_modules: string[];
+  focus_areas: string[]; profile_completed: boolean;
+};
+export type KnowledgeCard = {
+  id: number; conversation_id: number; card_index: number; card_type: string;
+  title: string; content: string; applicable_scope: string | null;
+  exceptions: string | null; confidence: string; status: string;
+  source_turn: number | null; created_at: string; updated_at: string;
+};
+export type ExtractionSession = {
+  session_id: number; id?: number; title: string; created_at: string; card_count: number;
+  confirmed_cards?: number; total_cards?: number;
+};
+
+export async function authLogin(username: string, password: string): Promise<AuthUser> {
+  return apiJson("/api/v1/auth/login", { method: "POST", body: JSON.stringify({ username, password }) });
+}
+export async function authLogout(): Promise<void> {
+  await apiJson("/api/v1/auth/logout", { method: "POST" });
+}
+export async function authMe(): Promise<AuthUser> {
+  return apiJson("/api/v1/auth/me");
+}
+
+export async function createExtractionSession(body?: { title?: string; focus_label?: string }): Promise<{ session_id: number; opening: string; profile_completed: boolean }> {
+  return apiJson("/api/v1/extraction/sessions", { method: "POST", body: JSON.stringify(body ?? {}) });
+}
+export async function listExtractionSessions(): Promise<{ sessions: ExtractionSession[] }> {
+  return apiJson("/api/v1/extraction/sessions");
+}
+export async function getExtractionSession(sessionId: number): Promise<{ session_id: number; messages: Array<{role: string; content: string}>; cards: KnowledgeCard[] }> {
+  return apiJson(`/api/v1/extraction/sessions/${sessionId}`);
+}
+export async function postExtractionChatStream(
+  sessionId: number,
+  body: string | { message: string },
   onEvent: (ev: Record<string, unknown>) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const r = await fetch(`${BASE}/api/v1/expert-interview/stream`, {
+  const payload = typeof body === "string" ? { message: body } : body;
+  const r = await fetch(`${BASE}/api/v1/extraction/sessions/${sessionId}/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    credentials: "include",
+    body: JSON.stringify(payload),
     signal,
   });
   if (!r.ok) {
@@ -500,4 +559,41 @@ export async function postExpertInterviewStream(
     throw new Error(j.message || `HTTP ${r.status}`);
   }
   await consumeSseFromResponse(r, onEvent, signal);
+}
+export async function confirmExtractionCard(sessionId: number, cardId: number): Promise<{ card: KnowledgeCard }> {
+  return apiJson(`/api/v1/extraction/sessions/${sessionId}/cards/${cardId}/confirm`, { method: "POST" });
+}
+export async function rejectExtractionCard(sessionId: number, cardId: number): Promise<{ card: KnowledgeCard }> {
+  return apiJson(`/api/v1/extraction/sessions/${sessionId}/cards/${cardId}/reject`, { method: "POST" });
+}
+export async function updateExtractionCard(
+  sessionId: number,
+  cardId: number,
+  updates: Partial<Pick<KnowledgeCard, "card_type" | "title" | "content" | "applicable_scope" | "exceptions" | "confidence">>,
+): Promise<{ card: KnowledgeCard }> {
+  return apiJson(`/api/v1/extraction/sessions/${sessionId}/cards/${cardId}`, {
+    method: "PUT",
+    body: JSON.stringify(updates),
+  });
+}
+export async function endExtractionSession(sessionId: number): Promise<{
+  session_id: number; filename: string;
+  summary: { confirmed: number; edited: number; rejected: number; pending: number; total: number };
+}> {
+  return apiJson(`/api/v1/extraction/sessions/${sessionId}/end`, { method: "POST" });
+}
+export async function uploadExtractionDocument(
+  sessionId: number,
+  file: File,
+): Promise<{ filename: string; char_count: number; preview: string }> {
+  const form = new FormData();
+  form.append("file", file);
+  const r = await fetch(`${BASE}/api/v1/extraction/sessions/${sessionId}/upload`, {
+    method: "POST",
+    credentials: "include",
+    body: form,
+  });
+  const j = (await r.json()) as { status: string; data?: unknown; message?: string };
+  if (!r.ok || j.status === "error") throw new Error(String(j.message || `HTTP ${r.status}`));
+  return j.data as { filename: string; char_count: number; preview: string };
 }

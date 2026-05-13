@@ -1,17 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
+  Badge,
   Button,
   Checkbox,
   Collapse,
   Divider,
   Drawer,
+  Form,
   Input,
   InputNumber,
   Modal,
   Radio,
   Select,
   Space,
+  Spin,
+  Tag,
   Tabs,
   Tooltip,
   Typography,
@@ -38,6 +42,15 @@ import {
   FolderOpenOutlined,
   AuditOutlined,
   BulbOutlined,
+  SendOutlined,
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  EditOutlined,
+  HistoryOutlined,
+  LogoutOutlined,
+  TagOutlined,
+  PaperClipOutlined,
+  UnorderedListOutlined,
 } from "@ant-design/icons";
 import {
   apiJson,
@@ -55,6 +68,13 @@ import {
   postAgentConversationStream,
   postAnalyzeConversationStream,
   postFollowupConversationStream,
+  authLogin,
+  authLogout,
+  authMe,
+  getExpertProfile,
+  putExpertProfile,
+  type AuthUser,
+  type ExpertProfile,
 } from "./api";
 import { parseMemoryInjectedItemsFromMilestonesRaw, useConversationReplay } from "./hooks/useConversationReplay";
 import SimpleMarkdown from "./SimpleMarkdown";
@@ -62,6 +82,9 @@ import HelpPage from "./pages/help";
 import SystemSettingPage from "./pages/system_setting";
 import ExtractionPage, { ReviewQueuePanel } from "./ExtractionPage";
 import { FindingsPanel, type Finding } from "./FindingsPanel";
+import ExtractionPage from "./ExtractionPage";
+import { ReviewQueueDrawer, useReviewQueueCount } from "./ReviewQueueDrawer";
+import type { ReviewQueueItem } from "./api";
 
 const { Text, Title } = Typography;
 
@@ -467,9 +490,28 @@ export default function App() {
   const isStandaloneSettings = standaloneView === "settings";
   const isStandalone = isStandaloneHelp || isStandaloneSettings;
 
+  // ── Auth state ────────────────────────────────────────────
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [loginUsername, setLoginUsername] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+
+  // ── Expert profile state ──────────────────────────────────
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [profileDraft, setProfileDraft] = useState<Omit<ExpertProfile, "profile_completed">>({
+    industries: [], production_modes: [], functional_modules: [], focus_areas: [],
+  });
+  const [profileSaving, setProfileSaving] = useState(false);
+
+
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [appMode, setAppMode] = useState<"review" | "extraction">("review");
+  const [reviewQueueDrawerOpen, setReviewQueueDrawerOpen] = useState(false);
+  const reviewQueueCount = useReviewQueueCount();
   const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain">("analyze");
   const [reviewQueueOpen, setReviewQueueOpen] = useState(false);
   const [projectIngest, setProjectIngest] = useState<
@@ -525,6 +567,28 @@ export default function App() {
     if (selectedConversationId == null) return outputEntries;
     return outputEntries.filter((e) => e.convId === selectedConversationId);
   }, [outputEntries, selectedConversationId]);
+
+  // ── Auth check on mount ───────────────────────────────────
+  useEffect(() => {
+    void (async () => {
+      try {
+        const user = await authMe();
+        setCurrentUser(user);
+        // Pre-load existing profile if any
+        try {
+          const prof = await authMe();
+          // Profile data (if any) will be loaded from DB-based profile endpoint
+          void prof; // profile_completed is part of AuthUser already
+        } catch { /* profile not yet saved */ }
+        if (!user.profile_completed) setProfileModalOpen(true);
+      } catch {
+        setCurrentUser(null);
+        setLoginOpen(true);
+      } finally {
+        setAuthLoading(false);
+      }
+    })();
+  }, []);
 
   const replay = useConversationReplay(selectedId, selectedConversationId);
   useEffect(() => {
@@ -825,6 +889,53 @@ export default function App() {
       setMilestoneOpenOverrides((prev) => ({ ...prev, [id]: false }));
     }
   }, []);
+
+  // ── Auth handlers ─────────────────────────────────────────
+  const handleLogin = async () => {
+    if (!loginUsername.trim() || !loginPassword) return;
+    setLoginLoading(true);
+    setLoginError("");
+    try {
+      const user = await authLogin(loginUsername.trim(), loginPassword);
+      setCurrentUser(user);
+      setLoginOpen(false);
+      setLoginUsername("");
+      setLoginPassword("");
+      if (!user.profile_completed) setProfileModalOpen(true);
+    } catch (e: unknown) {
+      setLoginError(e instanceof Error ? e.message : "登录失败");
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await authLogout();
+    } catch { /* ignore */ }
+    setCurrentUser(null);
+    setLoginOpen(true);
+  };
+
+  const handleSaveProfile = async () => {
+    setProfileSaving(true);
+    try {
+      await apiJson("/api/v1/auth/expert-profile", { method: "PUT", body: JSON.stringify(profileDraft) });
+      setCurrentUser((u) => u ? { ...u, profile_completed: true } : u);
+      setProfileModalOpen(false);
+      void message.success("画像已保存");
+    } catch (e: unknown) {
+      void message.error(e instanceof Error ? e.message : "保存失败");
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
+  const handleStartFromReviewQueue = (item: ReviewQueueItem) => {
+    window.sessionStorage.setItem("aika_initial_rq_item", JSON.stringify(item));
+    setAppMode("extraction");
+    setChatsOpen(false);
+  };
 
   const loadProjects = useCallback(async () => {
     const data = await apiJson<{ projects: Project[] }>("/api/v1/projects");
@@ -3152,6 +3263,26 @@ export default function App() {
               title="审查历史"
               onClick={() => setChatsOpen(true)}
             />
+            <div style={{ position: "relative", display: "inline-flex" }}>
+              <Button
+                type="text"
+                className="side-nav-btn"
+                icon={<UnorderedListOutlined />}
+                title="审查队列（来自项目审查的知识线索）"
+                onClick={() => setReviewQueueDrawerOpen(true)}
+              />
+              {reviewQueueCount > 0 && (
+                <span style={{
+                  position: "absolute", top: 4, right: 4,
+                  background: "#fa8c16", color: "#fff", borderRadius: "50%",
+                  width: 14, height: 14, fontSize: 9, display: "flex",
+                  alignItems: "center", justifyContent: "center", fontWeight: 700,
+                  pointerEvents: "none",
+                }}>
+                  {reviewQueueCount > 9 ? "9+" : reviewQueueCount}
+                </span>
+              )}
+            </div>
             <div className="side-nav-separator" aria-hidden="true" />
             <Button
               type="text"
@@ -3203,7 +3334,18 @@ export default function App() {
             title="设置（新窗口）"
             onClick={() => openStandaloneWindow("settings")}
           />
-          <Button type="text" className="side-nav-btn" icon={<UserOutlined />} title="用户" onClick={() => message.info("用户中心：占位")} />
+          <Tooltip
+            title={currentUser ? `${currentUser.display_name}（点击退出登录）` : "未登录"}
+            placement="right"
+          >
+            <Button
+              type="text"
+              className="side-nav-btn"
+              icon={currentUser ? <LogoutOutlined /> : <UserOutlined />}
+              title={currentUser ? "退出登录" : "登录"}
+              onClick={currentUser ? handleLogout : () => setLoginOpen(true)}
+            />
+          </Tooltip>
         </div>
       </div>
 
@@ -4072,6 +4214,7 @@ export default function App() {
         </div>
       </div>
 
+      {/* ── Knowledge Extraction Panel ── */}
       {appMode === "extraction" ? (
         <div className="extraction-overlay">
           <ExtractionPage />
@@ -4088,6 +4231,70 @@ export default function App() {
       >
         <ReviewQueuePanel />
       </Drawer>
+      {/* ── Review Queue Drawer (accessible from review mode) ── */}
+      <ReviewQueueDrawer
+        open={reviewQueueDrawerOpen}
+        onClose={() => setReviewQueueDrawerOpen(false)}
+        onStartExtraction={handleStartFromReviewQueue}
+      />
+
+      {/* ── Expert Profile Modal ── */}
+      <Modal
+        open={profileModalOpen}
+        title="完善专家画像（约 3 分钟）"
+        onOk={() => void handleSaveProfile()}
+        onCancel={() => setProfileModalOpen(false)}
+        okText="保存画像"
+        cancelText="稍后再说"
+        confirmLoading={profileSaving}
+        width={600}
+      >
+        <div style={{ marginBottom: 8, color: "#888", fontSize: 13 }}>
+          画像完成后 AI 将基于你的背景提问，不会问低质量的通用问题。
+        </div>
+        <Form layout="vertical">
+          <Form.Item label="你主要负责或擅长的行业（多选）">
+            <Checkbox.Group
+              value={profileDraft.industries}
+              onChange={(v) => setProfileDraft((d) => ({ ...d, industries: v as string[] }))}
+              options={["汽车整车", "汽车零部件", "通用机械", "工程机械", "电力装备", "电子制造", "航空航天", "轨道交通", "船舶海工"]}
+              style={{ display: "flex", flexWrap: "wrap", gap: "4px 12px" }}
+            />
+          </Form.Item>
+          <Form.Item label="你主要擅长哪些生产模式（多选）">
+            <Checkbox.Group
+              value={profileDraft.production_modes}
+              onChange={(v) => setProfileDraft((d) => ({ ...d, production_modes: v as string[] }))}
+              options={[
+                "批量离散制造", "混线柔性装配", "配置式制造", "离散装配岛模式",
+                "连续+离散混合制造", "返工/维修型制造", "模块化制造", "高变异小批量定制",
+              ]}
+              style={{ display: "flex", flexWrap: "wrap", gap: "4px 12px" }}
+            />
+          </Form.Item>
+          <Form.Item label="你擅长的功能模块（多选）">
+            <Checkbox.Group
+              value={profileDraft.functional_modules}
+              onChange={(v) => setProfileDraft((d) => ({ ...d, functional_modules: v as string[] }))}
+              options={[
+                "计划排程", "执行与追溯", "质量管理", "质量控制", "物流管理", "仓库管理",
+                "能源管理", "设备管理", "数据采集与设备集成", "报表分析", "制造工艺管理", "数据分析",
+              ]}
+              style={{ display: "flex", flexWrap: "wrap", gap: "4px 12px" }}
+            />
+          </Form.Item>
+          <Form.Item label="你最希望 AI 辅助解决哪个阶段的问题（多选）">
+            <Checkbox.Group
+              value={profileDraft.focus_areas}
+              onChange={(v) => setProfileDraft((d) => ({ ...d, focus_areas: v as string[] }))}
+              options={["售前与方案设计", "蓝图确认阶段", "开发与测试管理", "上线陪跑与验收", "客户关系与变更管理"]}
+              style={{ display: "flex", flexWrap: "wrap", gap: "4px 12px" }}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+
       {!chatsOpen && appMode === "review" && mainPanel === "analyze" ? (
         <div
           className={`composer-overlay ${
