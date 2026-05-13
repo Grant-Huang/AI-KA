@@ -20,6 +20,9 @@ Knowledge Items CRUD:
 Expert Profile:
   GET  /api/v1/expert-profile
   PUT  /api/v1/expert-profile
+
+Expert Onboarding Interview:
+  POST /api/v1/expert-interview/stream
 """
 from __future__ import annotations
 
@@ -795,3 +798,84 @@ def _extract_doc_text(path: Path) -> str:
     except Exception:
         return ""
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Expert Onboarding Interview
+# ---------------------------------------------------------------------------
+
+_PROFILE_READY_RE = __import__("re").compile(
+    r"<!--\s*profile_ready:\s*(\{.*?\})\s*-->", __import__("re").DOTALL
+)
+
+_INTERVIEW_SYSTEM = """你是一个友善的知识工程助理，正在帮助资深专家开始知识提取之旅。
+
+你的目标是通过简短自然的对话（2-3轮）了解专家的背景，然后整理为档案。
+
+指引：
+1. 第一轮：问候 + 询问擅长领域（可参考候选领域列表，让专家确认/补充）
+2. 第二轮：追问具体经验背景（行业、年限、主要角色）
+3. 第三轮（如需要）：问"您最希望提炼哪类知识进规则库？"
+4. 信息足够后，输出档案标记（紧跟最后一句话之后）：
+   <!-- profile_ready: {"domains": ["领域1", "领域2"], "background": "一句话描述"} -->
+   然后告知专家档案已保存，可以开始提取了。
+
+约束：
+- 保持对话简短，不要反复追问同一问题
+- 语气专业但友好，称呼对方为"您"
+- 不要询问个人姓名、公司等隐私信息
+- domains 只选最相关的2-5个
+"""
+
+
+class ExpertInterviewBody(BaseModel):
+    user_input: str
+    prior_messages: list[dict[str, str]] | None = None
+    rq_topics: list[str] | None = None  # domain hints from review queue
+
+
+@router.post("/api/v1/expert-interview/stream")
+def expert_interview_stream(body: ExpertInterviewBody) -> StreamingResponse:
+    """AI-driven onboarding interview to build expert profile on first entry."""
+
+    def gen() -> Iterator[str]:
+        try:
+            provider, cfg = _get_llm_provider()
+        except Exception as e:
+            yield _sse_line({"type": "error", "message": f"LLM 初始化失败: {e}"})
+            return
+
+        topics_hint = ""
+        if body.rq_topics:
+            topics_hint = f"\n\n当前审查队列涉及的候选领域（供参考）：{', '.join(body.rq_topics[:8])}"
+
+        system = _INTERVIEW_SYSTEM + topics_hint
+        prior: list[tuple[str, str]] = []
+        if body.prior_messages:
+            prior = [(m["role"], m["content"]) for m in body.prior_messages]
+
+        acc: list[str] = []
+        try:
+            for chunk in provider.chat_stream(
+                system=system,
+                user=body.user_input,
+                config=cfg,
+                prior_messages=prior or None,
+            ):
+                text = chunk.get("content") or chunk.get("text") or "" if isinstance(chunk, dict) else str(chunk)
+                acc.append(text)
+                yield _sse_line({"type": "text", "text": text})
+        except Exception as e:
+            yield _sse_line({"type": "error", "message": str(e)})
+            return
+
+        full_text = "".join(acc)
+        m = _PROFILE_READY_RE.search(full_text)
+        if m:
+            try:
+                profile_data = __import__("json").loads(m.group(1))
+                yield _sse_line({"type": "profile_ready", "profile": profile_data})
+            except Exception:
+                pass
+
+        yield _sse_line({"type": "final"})

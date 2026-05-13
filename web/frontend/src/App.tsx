@@ -5,6 +5,7 @@ import {
   Checkbox,
   Collapse,
   Divider,
+  Drawer,
   Input,
   InputNumber,
   Modal,
@@ -59,7 +60,7 @@ import { parseMemoryInjectedItemsFromMilestonesRaw, useConversationReplay } from
 import SimpleMarkdown from "./SimpleMarkdown";
 import HelpPage from "./pages/help";
 import SystemSettingPage from "./pages/system_setting";
-import ExtractionPage from "./ExtractionPage";
+import ExtractionPage, { ReviewQueuePanel } from "./ExtractionPage";
 import { FindingsPanel, type Finding } from "./FindingsPanel";
 
 const { Text, Title } = Typography;
@@ -470,6 +471,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [appMode, setAppMode] = useState<"review" | "extraction">("review");
   const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain">("analyze");
+  const [reviewQueueOpen, setReviewQueueOpen] = useState(false);
   const [projectIngest, setProjectIngest] = useState<
     Record<number, { initialized: boolean; chunk_count: number; md_out_exists: boolean; has_review_records?: boolean }>
   >(
@@ -3173,6 +3175,14 @@ export default function App() {
                 void loadSettings({ snapshot_chunk_strategy: true });
               }}
             />
+            <div className="side-nav-separator" aria-hidden="true" />
+            <Button
+              type="text"
+              className={`side-nav-btn${reviewQueueOpen ? " side-nav-btn--active" : ""}`}
+              icon={<SearchOutlined />}
+              title="审查队列"
+              onClick={() => setReviewQueueOpen((v) => !v)}
+            />
           </>
         ) : (
           <></>
@@ -4067,6 +4077,17 @@ export default function App() {
           <ExtractionPage />
         </div>
       ) : null}
+
+      <Drawer
+        title="审查队列"
+        placement="right"
+        width={480}
+        open={reviewQueueOpen && appMode === "review"}
+        onClose={() => setReviewQueueOpen(false)}
+        bodyStyle={{ padding: 0 }}
+      >
+        <ReviewQueuePanel />
+      </Drawer>
       {!chatsOpen && appMode === "review" && mainPanel === "analyze" ? (
         <div
           className={`composer-overlay ${

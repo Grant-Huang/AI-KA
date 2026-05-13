@@ -483,3 +483,21 @@ export async function postReviewExtractionStream(
   }
   await consumeSseFromResponse(r, onEvent, signal);
 }
+
+export async function postExpertInterviewStream(
+  body: { user_input: string; prior_messages?: Array<{role: string; content: string}>; rq_topics?: string[] },
+  onEvent: (ev: Record<string, unknown>) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const r = await fetch(`${BASE}/api/v1/expert-interview/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!r.ok) {
+    const j = (await r.json().catch(() => ({}))) as ApiErr;
+    throw new Error(j.message || `HTTP ${r.status}`);
+  }
+  await consumeSseFromResponse(r, onEvent, signal);
+}
