@@ -26,6 +26,7 @@ Expert Onboarding Interview:
 """
 from __future__ import annotations
 
+import dataclasses as _dc
 import json
 
 import uuid
@@ -1100,6 +1101,50 @@ class StrategyPatternCreate(BaseModel):
     applicable_when: dict[str, Any] | None = None
     effectiveness_score: float = 0.5
     sample_triggers: list[str] | None = None
+
+
+class _CreateSessionBody(BaseModel):
+    title: str = "新提取会话"
+    strategy: str | None = None
+
+
+class _AppendMessagesBody(BaseModel):
+    messages: list[dict[str, str]]
+
+
+@router.get("/api/v1/extraction/sessions")
+def list_extraction_sessions_api():
+    conn = get_conn()
+    sessions = dbm.list_extraction_sessions(conn)
+    return {"sessions": [_dc.asdict(s) for s in sessions]}
+
+
+@router.post("/api/v1/extraction/sessions")
+def create_extraction_session_api(body: _CreateSessionBody):
+    conn = get_conn()
+    s = dbm.create_extraction_session(conn, title=body.title, strategy=body.strategy)
+    return _dc.asdict(s)
+
+
+@router.get("/api/v1/extraction/sessions/{sid}/messages")
+def get_extraction_session_messages_api(sid: int):
+    conn = get_conn()
+    msgs = dbm.list_extraction_messages(conn, sid)
+    return {"messages": msgs}
+
+
+@router.delete("/api/v1/extraction/sessions/{sid}")
+def delete_extraction_session_api(sid: int):
+    conn = get_conn()
+    dbm.delete_extraction_session(conn, sid)
+    return {"ok": True}
+
+
+@router.post("/api/v1/extraction/sessions/{sid}/messages")
+def append_extraction_messages_api(sid: int, body: _AppendMessagesBody):
+    conn = get_conn()
+    dbm.append_extraction_messages(conn, sid, body.messages)
+    return {"ok": True}
 
 
 @router.get("/api/v1/extraction/strategies")

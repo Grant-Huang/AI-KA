@@ -6,15 +6,17 @@ import {
 } from "antd";
 
 import {
-  CheckOutlined, CloseOutlined, DeleteOutlined, InboxOutlined,
-  PaperClipOutlined, ReloadOutlined, UserOutlined, WarningOutlined,
+  CheckOutlined, CloseOutlined, ClockCircleOutlined, DeleteOutlined, InboxOutlined,
+  PaperClipOutlined, PlusOutlined, ReloadOutlined, UserOutlined, WarningOutlined,
 } from "@ant-design/icons";
 import type {
-  ExpertProfileData, PendingRuleItem, ReviewQueueItem,
+  ExpertProfileData, ExtractionSession, PendingRuleItem, ReviewQueueItem,
 } from "./api";
 import {
-  approvePendingRule, deleteReviewQueueItem, getExpertProfile,
-  getPendingRules, getReviewQueue, patchReviewQueueItem, postActiveExtractionStream,
+  appendExtractionMessages, approvePendingRule, createExtractionSession,
+  deleteExtractionSession, deleteReviewQueueItem, getExpertProfile,
+  getExtractionSessionMessages, getPendingRules, getReviewQueue,
+  listExtractionSessions, patchReviewQueueItem, postActiveExtractionStream,
   postDocExtractionStream, postReviewExtractionStream, putExpertProfile, rejectPendingRule,
   uploadExtractionMaterial,
 } from "./api";
@@ -273,8 +275,16 @@ function ChatArea({
 
 function ExpertQATab({
   postReviewCtx,
+  preloadMessages,
+  sessionId,
+  onFirstMessage,
+  onRoundComplete,
 }: {
   postReviewCtx: { projectId: number; conversationId: number } | null;
+  preloadMessages: ChatMsg[];
+  sessionId: number | null;
+  onFirstMessage: (title: string, strategy: string) => Promise<number>;
+  onRoundComplete: (sid: number, messages: Array<{ role: string; content: string }>) => void;
 }) {
   // phase: "choosing" shows opening question; "chatting" is active conversation
   const [phase, setPhase] = useState<"choosing" | "chatting">("choosing");
@@ -284,7 +294,7 @@ function ExpertQATab({
   const [materialId, setMaterialId] = useState<string | null>(null);
   const [docName, setDocName] = useState("");
   const [uploading, setUploading] = useState(false);
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
+  const [messages, setMessages] = useState<ChatMsg[]>(preloadMessages);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [roundNumber, setRoundNumber] = useState(1);
@@ -305,8 +315,13 @@ function ExpertQATab({
   };
 
   useEffect(() => {
-    setPhase("choosing");
-    setMessages(makeInitialMessages(isPostReview));
+    if (preloadMessages.length > 0) {
+      setMessages(preloadMessages);
+      setPhase("chatting");
+    } else {
+      setPhase("choosing");
+      setMessages(makeInitialMessages(isPostReview));
+    }
     setRoundNumber(1);
     setNewKiIds([]);
     setMaterialId(null);
@@ -325,9 +340,20 @@ function ExpertQATab({
     .map((m) => ({ role: m.role as string, content: m.content }));
 
   const runStream = async (userText: string) => {
+    // Auto-create session on first user message
+    let sid = sessionId;
+    if (sid === null) {
+      try {
+        const title = userText.slice(0, 40) + (userText.length > 40 ? "…" : "");
+        sid = await onFirstMessage(title, strategy);
+      } catch { /* ignore */ }
+    }
+
     setMessages((prev) => [...prev, { role: "user", content: userText }]);
     setStreaming(true);
     abortRef.current = new AbortController();
+
+    const acc: string[] = [];
 
     try {
       const streamFn = isPostReview
@@ -365,6 +391,7 @@ function ExpertQATab({
             setMessages((prev) => [...prev, { role: "status", content: String(ev.msg ?? "") }]);
           } else if (ev.type === "text") {
             const chunk = String(ev.text ?? "");
+            acc.push(chunk);
             setMessages((prev) => {
               const last = prev[prev.length - 1];
               if (last?.role === "assistant") {
@@ -396,6 +423,16 @@ function ExpertQATab({
           }
         },
       );
+
+      // Persist the round to the session
+      const fullAssistant = acc.join("");
+      if (sid !== null) {
+        const toSave: Array<{ role: string; content: string }> = [
+          { role: "user", content: userText },
+        ];
+        if (fullAssistant) toSave.push({ role: "assistant", content: fullAssistant });
+        onRoundComplete(sid, toSave);
+      }
     } catch (e) {
       if ((e as Error)?.name !== "AbortError") {
         message.error(`提取失败: ${e instanceof Error ? e.message : String(e)}`);
@@ -750,6 +787,21 @@ export default function ExtractionPage() {
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [postReviewCtx, setPostReviewCtx] = useState<{ projectId: number; conversationId: number } | null>(null);
 
+  // Session state
+  const [sessions, setSessions] = useState<ExtractionSession[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
+  const [preloadMessages, setPreloadMessages] = useState<ChatMsg[]>([]);
+  const [sessionKey, setSessionKey] = useState(0); // force remount ExpertQATab
+
+  const loadSessions = useCallback(async () => {
+    try {
+      const { sessions: s } = await listExtractionSessions();
+      setSessions(s);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { void loadSessions(); }, [loadSessions]);
+
   useEffect(() => {
     const raw = window.sessionStorage.getItem("aika_post_review_ctx");
     if (raw) {
@@ -772,13 +824,66 @@ export default function ExtractionPage() {
     message.success("专家背景已保存");
   };
 
+  const handleNewSession = () => {
+    setCurrentSessionId(null);
+    setPreloadMessages([]);
+    setSessionKey((k) => k + 1);
+    setActiveTab("extract");
+  };
+
+  const handleSelectSession = async (sid: number) => {
+    try {
+      const { messages: msgs } = await getExtractionSessionMessages(sid);
+      const chatMsgs: ChatMsg[] = msgs
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+      setCurrentSessionId(sid);
+      setPreloadMessages(chatMsgs);
+      setSessionKey((k) => k + 1);
+      setActiveTab("extract");
+    } catch { /* ignore */ }
+  };
+
+  const handleDeleteSession = async (sid: number, ev: React.MouseEvent) => {
+    ev.stopPropagation();
+    Modal.confirm({
+      title: "确认删除会话",
+      content: "此操作不可撤销。",
+      okText: "删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        await deleteExtractionSession(sid);
+        if (currentSessionId === sid) handleNewSession();
+        else await loadSessions();
+        message.success("会话已删除");
+      },
+    });
+  };
+
+  const handleFirstMessage = async (title: string, strategy: string): Promise<number> => {
+    const s = await createExtractionSession(title, strategy);
+    setCurrentSessionId(s.id);
+    void loadSessions();
+    return s.id;
+  };
+
+  const handleRoundComplete = (sid: number, msgs: Array<{ role: string; content: string }>) => {
+    void appendExtractionMessages(sid, msgs).then(() => loadSessions());
+  };
+
   const tabItems: Array<{ key: ActiveTab; label: string; children: React.ReactNode }> = [
     {
       key: "extract",
       label: "专家答问",
       children: (
         <ExpertQATab
+          key={sessionKey}
           postReviewCtx={activeTab === "extract" ? postReviewCtx : null}
+          preloadMessages={preloadMessages}
+          sessionId={currentSessionId}
+          onFirstMessage={handleFirstMessage}
+          onRoundComplete={handleRoundComplete}
         />
       ),
     },
@@ -790,51 +895,109 @@ export default function ExtractionPage() {
   ];
 
   return (
-    <div className="extraction-page">
-      <div className="extraction-page-header">
-        <Title level={4} style={{ margin: 0 }}>知识提取</Title>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
-          {profile && (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              领域：{profile.domains.length > 0 ? profile.domains.join("、") : "未设置"}
-            </Text>
+    <div className="extraction-page" style={{ display: "flex", height: "100%", overflow: "hidden" }}>
+      {/* ── Left sidebar ── */}
+      <div style={{
+        width: 200, flexShrink: 0, borderRight: "1px solid var(--color-border, #e0e0d8)",
+        display: "flex", flexDirection: "column", overflow: "hidden",
+        background: "var(--color-bg-sidebar, #f7f7f3)",
+      }}>
+        <div style={{ padding: "12px 10px 8px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <Text strong style={{ fontSize: 13 }}>会话历史</Text>
+          <Button size="small" icon={<PlusOutlined />} onClick={handleNewSession} title="新会话" />
+        </div>
+        <div style={{ flex: 1, overflowY: "auto", padding: "0 6px 8px" }}>
+          {sessions.length === 0 ? (
+            <Text type="secondary" style={{ fontSize: 12, padding: "8px 4px", display: "block" }}>暂无历史会话</Text>
+          ) : (
+            sessions.map((s) => (
+              <div
+                key={s.id}
+                onClick={() => void handleSelectSession(s.id)}
+                style={{
+                  padding: "7px 8px",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                  marginBottom: 2,
+                  background: s.id === currentSessionId ? "rgba(82,124,94,0.12)" : "transparent",
+                  borderLeft: s.id === currentSessionId ? "3px solid #527c5e" : "3px solid transparent",
+                  position: "relative",
+                }}
+              >
+                <div style={{
+                  fontSize: 13,
+                  fontWeight: s.id === currentSessionId ? 600 : 400,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  paddingRight: 20,
+                }}>
+                  {s.title}
+                </div>
+                <div style={{ fontSize: 11, color: "#999", marginTop: 2 }}>
+                  <ClockCircleOutlined style={{ marginRight: 3 }} />
+                  {s.updated_at.slice(0, 16).replace("T", " ")}
+                </div>
+                <Button
+                  type="text"
+                  icon={<CloseOutlined />}
+                  size="small"
+                  style={{ position: "absolute", top: 4, right: 2, opacity: 0.5 }}
+                  onClick={(e) => void handleDeleteSession(s.id, e)}
+                />
+              </div>
+            ))
           )}
-          <Button
-            icon={<UserOutlined />}
-            size="small"
-            onClick={() => setProfileModalOpen(true)}
-          >
-            专家背景
-          </Button>
         </div>
       </div>
 
-      <div style={{ borderBottom: "1px solid var(--color-border, #e0e0d8)", marginBottom: 0 }}>
-        <div style={{ display: "flex", gap: 0 }}>
-          {tabItems.map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
-              style={{
-                padding: "8px 20px",
-                border: "none",
-                borderBottom: activeTab === tab.key ? "2px solid #527c5e" : "2px solid transparent",
-                background: "none",
-                cursor: "pointer",
-                fontWeight: activeTab === tab.key ? 600 : 400,
-                color: activeTab === tab.key ? "#527c5e" : "#666",
-                fontSize: 14,
-                transition: "all 0.15s",
-              }}
+      {/* ── Main content ── */}
+      <div style={{ flex: 1, overflow: "auto", display: "flex", flexDirection: "column" }}>
+        <div className="extraction-page-header">
+          <Title level={4} style={{ margin: 0 }}>知识提取</Title>
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+            {profile && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                领域：{profile.domains.length > 0 ? profile.domains.join("、") : "未设置"}
+              </Text>
+            )}
+            <Button
+              icon={<UserOutlined />}
+              size="small"
+              onClick={() => setProfileModalOpen(true)}
             >
-              {tab.label}
-            </button>
-          ))}
+              专家背景
+            </Button>
+          </div>
         </div>
-      </div>
 
-      <div style={{ padding: "0 4px" }}>
-        {tabItems.find((t) => t.key === activeTab)?.children}
+        <div style={{ borderBottom: "1px solid var(--color-border, #e0e0d8)", marginBottom: 0 }}>
+          <div style={{ display: "flex", gap: 0 }}>
+            {tabItems.map((tab) => (
+              <button
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                style={{
+                  padding: "8px 20px",
+                  border: "none",
+                  borderBottom: activeTab === tab.key ? "2px solid #527c5e" : "2px solid transparent",
+                  background: "none",
+                  cursor: "pointer",
+                  fontWeight: activeTab === tab.key ? 600 : 400,
+                  color: activeTab === tab.key ? "#527c5e" : "#666",
+                  fontSize: 14,
+                  transition: "all 0.15s",
+                }}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ padding: "0 4px", flex: 1 }}>
+          {tabItems.find((t) => t.key === activeTab)?.children}
+        </div>
       </div>
 
       <ExpertProfileModal

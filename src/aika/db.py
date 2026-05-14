@@ -304,6 +304,23 @@ CREATE TABLE IF NOT EXISTS obsidian_vaults (
 );
 
 CREATE INDEX IF NOT EXISTS idx_obsidian_vaults_role ON obsidian_vaults(role);
+
+CREATE TABLE IF NOT EXISTS extraction_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL DEFAULT '新提取会话',
+  strategy TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS extraction_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY(session_id) REFERENCES extraction_sessions(id) ON DELETE CASCADE
+);
 """
 
 
@@ -467,6 +484,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _migrate_users_tables(conn)
     _migrate_knowledge_cards_table(conn)
     _migrate_obsidian_vaults_table(conn)
+    _migrate_extraction_sessions_table(conn)
 
 
 def _table_column_names(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -2513,6 +2531,16 @@ class ObsidianVaultRow:
     updated_at: str
 
 
+@dataclass
+class ExtractionSessionRow:
+    id: int
+    title: str
+    strategy: str | None
+    created_at: str
+    updated_at: str
+    message_count: int = 0
+
+
 def _migrate_obsidian_vaults_table(conn: sqlite3.Connection) -> None:
     """obsidian_vaults is created by SCHEMA_SQL; this is a no-op stub for existing DBs."""
     pass
@@ -2613,3 +2641,109 @@ def delete_obsidian_vault(conn: sqlite3.Connection, vault_id: int) -> bool:
     cur = conn.execute("DELETE FROM obsidian_vaults WHERE id=?", (vault_id,))
     conn.commit()
     return bool(cur.rowcount and cur.rowcount > 0)
+
+
+# ---------------------------------------------------------------------------
+# Extraction Sessions
+# ---------------------------------------------------------------------------
+
+def _migrate_extraction_sessions_table(conn: sqlite3.Connection) -> None:
+    """extraction_sessions + extraction_messages are created by SCHEMA_SQL; no-op stub."""
+    pass
+
+
+def create_extraction_session(
+    conn: sqlite3.Connection,
+    *,
+    title: str,
+    strategy: str | None = None,
+) -> ExtractionSessionRow:
+    cur = conn.execute(
+        "INSERT INTO extraction_sessions(title, strategy) VALUES (?, ?)",
+        (str(title)[:60], strategy),
+    )
+    conn.commit()
+    sid = int(cur.lastrowid)
+    r = conn.execute(
+        "SELECT id, title, strategy, created_at, updated_at FROM extraction_sessions WHERE id=?",
+        (sid,),
+    ).fetchone()
+    return ExtractionSessionRow(
+        id=int(r["id"]), title=str(r["title"]), strategy=r["strategy"],
+        created_at=str(r["created_at"]), updated_at=str(r["updated_at"]),
+    )
+
+
+def list_extraction_sessions(
+    conn: sqlite3.Connection, *, limit: int = 60
+) -> list[ExtractionSessionRow]:
+    rows = conn.execute(
+        """
+        SELECT s.id, s.title, s.strategy, s.created_at, s.updated_at,
+               COUNT(m.id) AS message_count
+        FROM extraction_sessions s
+        LEFT JOIN extraction_messages m ON m.session_id = s.id
+        GROUP BY s.id
+        ORDER BY s.updated_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [
+        ExtractionSessionRow(
+            id=int(r["id"]), title=str(r["title"]), strategy=r["strategy"],
+            created_at=str(r["created_at"]), updated_at=str(r["updated_at"]),
+            message_count=int(r["message_count"]),
+        )
+        for r in rows
+    ]
+
+
+def get_extraction_session(
+    conn: sqlite3.Connection, session_id: int
+) -> ExtractionSessionRow | None:
+    r = conn.execute(
+        "SELECT id, title, strategy, created_at, updated_at FROM extraction_sessions WHERE id=?",
+        (session_id,),
+    ).fetchone()
+    if r is None:
+        return None
+    cnt = conn.execute(
+        "SELECT COUNT(*) FROM extraction_messages WHERE session_id=?", (session_id,)
+    ).fetchone()[0]
+    return ExtractionSessionRow(
+        id=int(r["id"]), title=str(r["title"]), strategy=r["strategy"],
+        created_at=str(r["created_at"]), updated_at=str(r["updated_at"]),
+        message_count=int(cnt),
+    )
+
+
+def delete_extraction_session(conn: sqlite3.Connection, session_id: int) -> None:
+    conn.execute("DELETE FROM extraction_sessions WHERE id=?", (session_id,))
+    conn.commit()
+
+
+def list_extraction_messages(
+    conn: sqlite3.Connection, session_id: int
+) -> list[dict]:
+    rows = conn.execute(
+        "SELECT role, content, created_at FROM extraction_messages WHERE session_id=? ORDER BY id ASC",
+        (session_id,),
+    ).fetchall()
+    return [{"role": str(r["role"]), "content": str(r["content"]), "created_at": str(r["created_at"])} for r in rows]
+
+
+def append_extraction_messages(
+    conn: sqlite3.Connection,
+    session_id: int,
+    messages: list[dict],
+) -> None:
+    conn.executemany(
+        "INSERT INTO extraction_messages(session_id, role, content) VALUES (?, ?, ?)",
+        [(session_id, str(m["role"]), str(m["content"])) for m in messages],
+    )
+    conn.execute(
+        "UPDATE extraction_sessions SET updated_at=datetime('now') WHERE id=?",
+        (session_id,),
+    )
+    conn.commit()
