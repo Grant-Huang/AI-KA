@@ -18,7 +18,7 @@ import {
   postDocExtractionStream, postReviewExtractionStream, putExpertProfile, rejectPendingRule,
   uploadExtractionMaterial,
 } from "./api";
-import SimpleMarkdown from "./SimpleMarkdown";
+import SimpleMarkdown, { ThinkableMarkdown } from "./SimpleMarkdown";
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
@@ -135,6 +135,11 @@ function ChatArea({ messages, streaming }: { messages: ChatMsg[]; streaming: boo
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  const lastAssistantIdx = messages.reduce(
+    (last, m, i) => (m.role === "assistant" ? i : last),
+    -1,
+  );
+
   return (
     <div style={{
       border: "1px solid var(--color-border, #e0e0d8)", borderRadius: 8,
@@ -161,11 +166,11 @@ function ChatArea({ messages, streaming }: { messages: ChatMsg[]; streaming: boo
           ) : msg.role === "user" ? (
             <Text>{msg.content}</Text>
           ) : (
-            <SimpleMarkdown markdown={msg.content} />
+            <ThinkableMarkdown markdown={msg.content} />
           )}
         </div>
       ))}
-      {streaming && (
+      {streaming && lastAssistantIdx < 0 && (
         <div style={{ padding: "4px 0" }}>
           <Spin size="small" />
           <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>生成中…</Text>
