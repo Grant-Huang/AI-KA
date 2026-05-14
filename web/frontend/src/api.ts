@@ -542,3 +542,63 @@ export async function uploadExtractionDocument(
   if (!r.ok || j.status === "error") throw new Error(String(j.message || `HTTP ${r.status}`));
   return j.data as { filename: string; char_count: number; preview: string };
 }
+
+// ── Obsidian Vaults ───────────────────────────────────────────────────────
+
+export type ObsidianVault = {
+  id: number;
+  path: string;
+  name: string;
+  /** "project" | "knowledge" | "both" */
+  role: string;
+  frontmatter_filter?: Record<string, unknown> | null;
+  output_folder: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DiscoveredVault = {
+  path: string;
+  name: string;
+  already_registered: boolean;
+};
+
+export async function listVaults(): Promise<{ vaults: ObsidianVault[] }> {
+  return apiJson("/api/v1/vaults");
+}
+
+export async function discoverVaults(): Promise<{ vaults: DiscoveredVault[] }> {
+  return apiJson("/api/v1/vaults/discover");
+}
+
+export async function registerVault(data: {
+  path: string;
+  name?: string;
+  role?: string;
+  frontmatter_filter?: Record<string, unknown> | null;
+  output_folder?: string;
+}): Promise<ObsidianVault> {
+  return apiJson("/api/v1/vaults", { method: "POST", body: JSON.stringify(data) });
+}
+
+export async function deleteVault(vaultId: number): Promise<{ deleted: boolean }> {
+  return apiJson(`/api/v1/vaults/${vaultId}`, { method: "DELETE" });
+}
+
+export async function updateVault(
+  vaultId: number,
+  data: Partial<Pick<ObsidianVault, "name" | "role" | "frontmatter_filter" | "output_folder">>,
+): Promise<ObsidianVault> {
+  return apiJson(`/api/v1/vaults/${vaultId}`, { method: "PATCH", body: JSON.stringify(data) });
+}
+
+export async function exportConversationToObsidian(
+  projectId: number,
+  conversationId: number,
+  body: { vault_id: number; content?: string; focus_point_ids?: string[] },
+): Promise<{ note_path: string; vault_id: number }> {
+  return apiJson(
+    `/api/v1/projects/${projectId}/conversations/${conversationId}/export/obsidian`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+}
