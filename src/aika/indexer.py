@@ -5,9 +5,12 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 from . import db as dbm
+
+if TYPE_CHECKING:
+    from backend.obsidian_service import FrontmatterFilter
 
 CHUNK_STRATEGY_BLANK = "blank"
 CHUNK_STRATEGY_STRUCTURED = "structured"
@@ -71,6 +74,9 @@ def resolve_chunk_strategy_from_env() -> str:
     return CHUNK_STRATEGY_BLANK
 
 
+_SKIP_DIR_PREFIXES = (".tmp", "tmp", "sample-docs", ".obsidian", "_aika", ".git")
+
+
 def scan_project_root(root: Path, *, exts: Iterable[str] = (".md", ".html", ".txt")) -> list[ScanFile]:
     root = root.resolve()
     results: list[ScanFile] = []
@@ -78,12 +84,16 @@ def scan_project_root(root: Path, *, exts: Iterable[str] = (".md", ".html", ".tx
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = Path(dirpath).resolve().relative_to(root)
         rel_dir_posix = rel_dir.as_posix()
-        if rel_dir_posix.startswith(".tmp") or rel_dir_posix.startswith("tmp"):
+        skip = False
+        for prefix in _SKIP_DIR_PREFIXES:
+            if rel_dir_posix == prefix or rel_dir_posix.startswith(prefix + "/"):
+                skip = True
+                break
+        if skip:
             dirnames[:] = []
             continue
-        if rel_dir_posix.startswith("sample-docs"):
-            dirnames[:] = []
-            continue
+        # Also prune subdirs that match skip prefixes so os.walk doesn't descend
+        dirnames[:] = [d for d in dirnames if not any(d == p or d.startswith(p) for p in _SKIP_DIR_PREFIXES)]
 
         for fn in filenames:
             p = Path(dirpath) / fn
@@ -340,6 +350,9 @@ def _index_one_scanfile(
     project: dbm.ProjectRow,
     sf: ScanFile,
     strat: str,
+    resolve_wikilinks: bool = False,
+    vault_path: Path | None = None,
+    wikilink_index: dict | None = None,
 ) -> None:
     doc_id = dbm.upsert_document(
         conn,
@@ -353,7 +366,10 @@ def _index_one_scanfile(
         parse_error=None,
     )
 
-    chunks = build_chunks_for_file(sf.abs_path, sf.ext, strat)
+    if resolve_wikilinks and vault_path is not None and sf.ext == ".md":
+        chunks = _build_chunks_with_wikilinks(sf.abs_path, strat, vault_path=vault_path, wikilink_index=wikilink_index)
+    else:
+        chunks = build_chunks_for_file(sf.abs_path, sf.ext, strat)
     for i, ch in enumerate(chunks):
         ch["chunk_index"] = i
     dbm.insert_chunks(conn, doc_id, chunks)
@@ -363,17 +379,58 @@ def _index_one_scanfile(
     )
 
 
+def _build_chunks_with_wikilinks(
+    abs_path: Path,
+    strat: str,
+    *,
+    vault_path: Path,
+    wikilink_index: dict | None,
+    max_chars: int = 2000,
+) -> list[dict]:
+    """Read the file, expand wikilinks, write to a temp buffer, then chunk."""
+    try:
+        from backend.obsidian_service import (
+            build_wikilink_index,
+            resolve_wikilinks_in_text,
+            strip_frontmatter,
+        )
+    except ImportError:
+        return build_chunks_for_file(abs_path, ".md", strat)
+
+    text = abs_path.read_text(encoding="utf-8", errors="replace")
+    text = strip_frontmatter(text)
+    idx = wikilink_index if wikilink_index is not None else build_wikilink_index(vault_path)
+    expanded = resolve_wikilinks_in_text(text, vault_path, idx)
+
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", encoding="utf-8", delete=False) as tmp:
+        tmp.write(expanded)
+        tmp_path = Path(tmp.name)
+    try:
+        return build_chunks_for_file(tmp_path, ".md", strat, max_chars=max_chars)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 def _sync_scanned_into_project(
     conn,
     *,
     project: dbm.ProjectRow,
     scanned: list[ScanFile],
     chunk_strategy: str,
+    resolve_wikilinks: bool = False,
+    vault_path: Path | None = None,
+    wikilink_index: dict | None = None,
 ) -> int:
     updated = 0
     strat = chunk_strategy if chunk_strategy in (CHUNK_STRATEGY_BLANK, CHUNK_STRATEGY_STRUCTURED) else CHUNK_STRATEGY_BLANK
     for sf in scanned:
-        _index_one_scanfile(conn, project=project, sf=sf, strat=strat)
+        _index_one_scanfile(
+            conn, project=project, sf=sf, strat=strat,
+            resolve_wikilinks=resolve_wikilinks,
+            vault_path=vault_path,
+            wikilink_index=wikilink_index,
+        )
         updated += 1
 
     dbm.now_touch_project(conn, project.id)
@@ -400,14 +457,20 @@ def sync_project_md_root(
     md_root: Path,
     chunk_strategy: str | None = None,
     full_resync: bool = False,
+    resolve_wikilinks: bool = False,
+    vault_path: Path | None = None,
+    frontmatter_filter: "FrontmatterFilter | None" = None,
 ) -> int:
     """
-    Index markdown under md_root (e.g. docs2md output).
+    Index markdown under md_root (e.g. docs2md output or an Obsidian vault).
 
     - full_resync=True: 清空本项目已有文档索引后，对目录内全部文件重新分块入库。
     - full_resync=False: 增量模式——仅对新增或内容变化（sha256 变）的文件建索引；磁盘上已删除的文件从索引移除；
       未变化的文件跳过以节省时间。
     chunk_strategy: blank | structured; None => env AIKA_CHUNK_STRATEGY (CLI) or caller must pass (Web).
+    resolve_wikilinks: expand [[WikiLinks]] inline before chunking (requires vault_path).
+    vault_path: root of the Obsidian vault for wikilink resolution (may differ from md_root).
+    frontmatter_filter: if given, files whose frontmatter doesn't match are skipped.
     """
     root = md_root.resolve()
     if not root.is_dir():
@@ -418,9 +481,28 @@ def sync_project_md_root(
     strat = chunk_strategy if chunk_strategy is not None else resolve_chunk_strategy_from_env()
     strat = strat if strat in (CHUNK_STRATEGY_BLANK, CHUNK_STRATEGY_STRUCTURED) else CHUNK_STRATEGY_BLANK
 
+    if frontmatter_filter is not None:
+        scanned = _apply_frontmatter_filter(scanned, frontmatter_filter)
+
+    wikilink_index: dict | None = None
+    if resolve_wikilinks and vault_path is not None:
+        try:
+            from backend.obsidian_service import build_wikilink_index
+            wikilink_index = build_wikilink_index(vault_path)
+        except ImportError:
+            pass
+
+    _shared = dict(
+        resolve_wikilinks=resolve_wikilinks,
+        vault_path=vault_path,
+        wikilink_index=wikilink_index,
+    )
+
     if full_resync:
         dbm.delete_project_documents(conn, project.id)
-        return _sync_scanned_into_project(conn, project=project, scanned=scanned, chunk_strategy=strat)
+        return _sync_scanned_into_project(
+            conn, project=project, scanned=scanned, chunk_strategy=strat, **_shared
+        )
 
     paths_on_disk = {sf.rel_path for sf in scanned}
     existing = dbm.list_documents(conn, project.id)
@@ -434,9 +516,36 @@ def sync_project_md_root(
         prev = ex_by_path.get(sf.rel_path)
         if prev is not None and (prev.sha256 or "") == sf.sha256:
             continue
-        _index_one_scanfile(conn, project=project, sf=sf, strat=strat)
+        _index_one_scanfile(
+            conn, project=project, sf=sf, strat=strat,
+            resolve_wikilinks=resolve_wikilinks,
+            vault_path=vault_path,
+            wikilink_index=wikilink_index,
+        )
         updated += 1
 
     dbm.now_touch_project(conn, project.id)
     dbm.commit(conn)
     return updated
+
+
+def _apply_frontmatter_filter(
+    scanned: list[ScanFile],
+    fm_filter: "FrontmatterFilter",
+) -> list[ScanFile]:
+    """Return only ScanFiles whose frontmatter matches the filter."""
+    kept: list[ScanFile] = []
+    for sf in scanned:
+        if sf.ext != ".md":
+            kept.append(sf)
+            continue
+        try:
+            text = sf.abs_path.read_text(encoding="utf-8", errors="replace")
+            from backend.obsidian_service import parse_frontmatter
+            fm = parse_frontmatter(text)
+        except Exception:
+            kept.append(sf)
+            continue
+        if fm_filter.matches(fm):
+            kept.append(sf)
+    return kept

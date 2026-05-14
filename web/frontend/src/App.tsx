@@ -50,7 +50,6 @@ import {
   LogoutOutlined,
   TagOutlined,
   PaperClipOutlined,
-  UnorderedListOutlined,
 } from "@ant-design/icons";
 import {
   apiJson,
@@ -72,16 +71,22 @@ import {
   authMe,
   getExpertProfile,
   putExpertProfile,
+  listVaults,
+  discoverVaults,
+  registerVault,
+  deleteVault,
+  exportConversationToObsidian,
   type AuthUser,
   type ExpertProfile,
+  type ObsidianVault,
+  type DiscoveredVault,
 } from "./api";
 import { parseMemoryInjectedItemsFromMilestonesRaw, useConversationReplay } from "./hooks/useConversationReplay";
 import SimpleMarkdown from "./SimpleMarkdown";
 import HelpPage from "./pages/help";
 import SystemSettingPage from "./pages/system_setting";
-import ExtractionPage, { ReviewQueuePanel } from "./ExtractionPage";
+import ExtractionPage, { ReviewQueueTab } from "./ExtractionPage";
 import { FindingsPanel, type Finding } from "./FindingsPanel";
-import { ReviewQueueDrawer, useReviewQueueCount } from "./ReviewQueueDrawer";
 import type { ReviewQueueItem } from "./api";
 
 const { Text, Title } = Typography;
@@ -504,13 +509,32 @@ export default function App() {
   const [profileSaving, setProfileSaving] = useState(false);
 
 
+  // Obsidian vaults
+  const [vaults, setVaults] = useState<ObsidianVault[]>([]);
+  const [vaultPickerOpen, setVaultPickerOpen] = useState(false);
+  const [discoveredVaults, setDiscoveredVaults] = useState<DiscoveredVault[]>([]);
+  const [discoverLoading, setDiscoverLoading] = useState(false);
+  const [vaultManualPath, setVaultManualPath] = useState("");
+  const [vaultManualRole, setVaultManualRole] = useState<"project" | "knowledge" | "both">("project");
+  const [vaultRegLoading, setVaultRegLoading] = useState(false);
+  const [selectedVaultId, setSelectedVaultId] = useState<number | null>(null);
+  const [indexResolveWikilinks, setIndexResolveWikilinks] = useState(false);
+  const [obsidianExportLoading, setObsidianExportLoading] = useState(false);
+
+  const loadVaults = useCallback(async () => {
+    try {
+      const d = await listVaults();
+      setVaults(d.vaults);
+    } catch {
+      // non-critical
+    }
+  }, []);
+
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [appMode, setAppMode] = useState<"review" | "extraction">("review");
-  const [reviewQueueDrawerOpen, setReviewQueueDrawerOpen] = useState(false);
-  const reviewQueueCount = useReviewQueueCount();
   const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain">("analyze");
-  const [reviewQueueOpen, setReviewQueueOpen] = useState(false);
+  const [reviewMainTab, setReviewMainTab] = useState<"analyze" | "result_review">("analyze");
   const [projectIngest, setProjectIngest] = useState<
     Record<number, { initialized: boolean; chunk_count: number; has_review_records?: boolean }>
   >(
@@ -1014,7 +1038,8 @@ export default function App() {
   useEffect(() => {
     loadProjects().catch((e) => message.error(String((e as Error).message)));
     loadSettings().catch((e) => message.error(String((e as Error).message)));
-  }, [loadProjects, loadSettings]);
+    loadVaults().catch(() => {});
+  }, [loadProjects, loadSettings, loadVaults]);
 
   /** rules 中的「目的：」文案变化时，重新显示为输入框占位提示 */
   useEffect(() => {
@@ -1746,8 +1771,12 @@ export default function App() {
     const ac = new AbortController();
     indexAbortRef.current = ac;
     try {
+      const idxBody: Record<string, unknown> = {};
+      if (selectedVaultId != null) idxBody.vault_id = selectedVaultId;
+      if (indexResolveWikilinks) idxBody.resolve_wikilinks = true;
       const idx = await apiJson<{ indexed_documents: number }>(`/api/v1/projects/${selectedId}/index-md`, {
         method: "POST",
+        body: JSON.stringify(idxBody),
         signal: ac.signal,
       });
       appendMilestoneDetail("sys:index", `【索引】完成，已索引 ${idx.indexed_documents} 个文档。\n`);
@@ -3158,26 +3187,6 @@ export default function App() {
               title="审查历史"
               onClick={() => setChatsOpen(true)}
             />
-            <div style={{ position: "relative", display: "inline-flex" }}>
-              <Button
-                type="text"
-                className="side-nav-btn"
-                icon={<UnorderedListOutlined />}
-                title="审查队列（来自项目审查的知识线索）"
-                onClick={() => setReviewQueueDrawerOpen(true)}
-              />
-              {reviewQueueCount > 0 && (
-                <span style={{
-                  position: "absolute", top: 4, right: 4,
-                  background: "#fa8c16", color: "#fff", borderRadius: "50%",
-                  width: 14, height: 14, fontSize: 9, display: "flex",
-                  alignItems: "center", justifyContent: "center", fontWeight: 700,
-                  pointerEvents: "none",
-                }}>
-                  {reviewQueueCount > 9 ? "9+" : reviewQueueCount}
-                </span>
-              )}
-            </div>
             <div className="side-nav-separator" aria-hidden="true" />
             <Button
               type="text"
@@ -3202,13 +3211,6 @@ export default function App() {
               }}
             />
             <div className="side-nav-separator" aria-hidden="true" />
-            <Button
-              type="text"
-              className={`side-nav-btn${reviewQueueOpen ? " side-nav-btn--active" : ""}`}
-              icon={<SearchOutlined />}
-              title="审查队列"
-              onClick={() => setReviewQueueOpen((v) => !v)}
-            />
           </>
         ) : (
           <></>
@@ -3404,6 +3406,16 @@ export default function App() {
                     <Button type="default" onClick={() => setManualPickOpen(true)}>
                       手动输入路径
                     </Button>
+                    <Button
+                      type="default"
+                      icon={<span style={{ marginRight: 4 }}>📒</span>}
+                      onClick={() => {
+                        setVaultPickerOpen(true);
+                        setDiscoveredVaults([]);
+                      }}
+                    >
+                      Obsidian Vault
+                    </Button>
                     {selectedId != null &&
                     projectIngest[selectedId]?.initialized &&
                     !projectIngest[selectedId]?.has_review_records ? (
@@ -3447,6 +3459,30 @@ export default function App() {
                     <Text code style={{ wordBreak: "break-all" }}>
                       {selected.root_path}
                     </Text>
+                  </div>
+                ) : null}
+
+                {vaults.length > 0 ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>📒 Vault：</Text>
+                    <Select
+                      size="small"
+                      allowClear
+                      placeholder="关联 Obsidian Vault（可选）"
+                      style={{ minWidth: 240 }}
+                      value={selectedVaultId ?? undefined}
+                      onChange={(v) => setSelectedVaultId(v ?? null)}
+                      options={vaults.map((v) => ({
+                        value: v.id,
+                        label: `${v.name} (${v.role})`,
+                      }))}
+                    />
+                    <Checkbox
+                      checked={indexResolveWikilinks}
+                      onChange={(e) => setIndexResolveWikilinks(e.target.checked)}
+                    >
+                      <Text style={{ fontSize: 12 }}>解析 Wikilinks</Text>
+                    </Checkbox>
                   </div>
                 ) : null}
 
@@ -3826,6 +3862,41 @@ export default function App() {
                       >
                         提取知识
                       </Button>
+                      {vaults.filter((v) => v.role === "knowledge" || v.role === "both").length > 0 ? (
+                        <Button
+                          type="default"
+                          size="small"
+                          loading={obsidianExportLoading}
+                          disabled={selectedId == null || selectedConversationId == null || !finalMarkdown.trim()}
+                          onClick={async () => {
+                            const knowledgeVaults = vaults.filter((v) => v.role === "knowledge" || v.role === "both");
+                            const targetVault = knowledgeVaults.length === 1
+                              ? knowledgeVaults[0]
+                              : (selectedVaultId != null && knowledgeVaults.find((v) => v.id === selectedVaultId))
+                                || knowledgeVaults[0];
+                            if (!targetVault) return;
+                            setObsidianExportLoading(true);
+                            try {
+                              const result = await exportConversationToObsidian(
+                                selectedId as number,
+                                selectedConversationId as number,
+                                {
+                                  vault_id: targetVault.id,
+                                  content: finalMarkdown,
+                                },
+                              );
+                              message.success(`已写入 Obsidian：${result.note_path.split("/").slice(-1)[0]}`);
+                            } catch (e) {
+                              message.error(String((e as Error).message));
+                            } finally {
+                              setObsidianExportLoading(false);
+                            }
+                          }}
+                          title="将审查结论导出为 Obsidian 笔记"
+                        >
+                          📒 导出到 Obsidian
+                        </Button>
+                      ) : null}
                     </div>
                     <div className="result-actions-bar-divider" aria-hidden="true" />
                     <div className="result-output-actions">
@@ -4088,6 +4159,173 @@ export default function App() {
           />
         </Space>
       </Modal>
+
+      {/* ── Obsidian Vault Picker Modal ── */}
+      <Modal
+        title="📒 注册 Obsidian Vault"
+        open={vaultPickerOpen}
+        onCancel={() => setVaultPickerOpen(false)}
+        footer={null}
+        width={680}
+      >
+        <Space direction="vertical" style={{ width: "100%" }} size={16}>
+          {/* Registered vaults */}
+          {vaults.length > 0 ? (
+            <div>
+              <Text strong>已注册 Vault</Text>
+              <div style={{ marginTop: 8 }}>
+                {vaults.map((v) => (
+                  <div
+                    key={v.id}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      padding: "6px 0", borderBottom: "1px solid #f0f0f0",
+                    }}
+                  >
+                    <span style={{ flex: 1 }}>
+                      <Text strong>{v.name}</Text>
+                      <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                        [{v.role}]
+                      </Text>
+                      <br />
+                      <Text type="secondary" code style={{ fontSize: 11 }}>{v.path}</Text>
+                    </span>
+                    <Button
+                      danger size="small"
+                      onClick={async () => {
+                        try {
+                          await deleteVault(v.id);
+                          if (selectedVaultId === v.id) setSelectedVaultId(null);
+                          await loadVaults();
+                        } catch (e) {
+                          message.error(String((e as Error).message));
+                        }
+                      }}
+                    >
+                      移除
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {/* Discover */}
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <Text strong>扫描本机 Vault</Text>
+              <Button
+                size="small"
+                loading={discoverLoading}
+                onClick={async () => {
+                  setDiscoverLoading(true);
+                  try {
+                    const d = await discoverVaults();
+                    setDiscoveredVaults(d.vaults);
+                  } catch (e) {
+                    message.error(String((e as Error).message));
+                  } finally {
+                    setDiscoverLoading(false);
+                  }
+                }}
+              >
+                扫描
+              </Button>
+            </div>
+            {discoveredVaults.length > 0 ? (
+              <div>
+                {discoveredVaults.map((dv) => (
+                  <div
+                    key={dv.path}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      padding: "6px 0", borderBottom: "1px solid #f0f0f0",
+                    }}
+                  >
+                    <span style={{ flex: 1 }}>
+                      <Text strong>{dv.name}</Text>
+                      {dv.already_registered ? (
+                        <Tag color="green" style={{ marginLeft: 8 }}>已注册</Tag>
+                      ) : null}
+                      <br />
+                      <Text type="secondary" code style={{ fontSize: 11 }}>{dv.path}</Text>
+                    </span>
+                    {!dv.already_registered ? (
+                      <Button
+                        size="small" type="primary"
+                        loading={vaultRegLoading}
+                        onClick={async () => {
+                          setVaultRegLoading(true);
+                          try {
+                            await registerVault({ path: dv.path, role: "project" });
+                            await loadVaults();
+                            message.success(`已注册：${dv.name}`);
+                            setDiscoveredVaults((prev) =>
+                              prev.map((x) => x.path === dv.path ? { ...x, already_registered: true } : x)
+                            );
+                          } catch (e) {
+                            message.error(String((e as Error).message));
+                          } finally {
+                            setVaultRegLoading(false);
+                          }
+                        }}
+                      >
+                        注册
+                      </Button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : discoverLoading ? null : (
+              <Text type="secondary" style={{ fontSize: 12 }}>点击「扫描」搜索本机 Obsidian Vault</Text>
+            )}
+          </div>
+
+          {/* Manual registration */}
+          <div>
+            <Text strong>手动注册路径</Text>
+            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+              <Input
+                placeholder="Vault 绝对路径（含 .obsidian/ 目录）"
+                value={vaultManualPath}
+                onChange={(e) => setVaultManualPath(e.target.value)}
+              />
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <Text style={{ fontSize: 12 }}>角色：</Text>
+                <Radio.Group
+                  size="small"
+                  value={vaultManualRole}
+                  onChange={(e) => setVaultManualRole(e.target.value as "project" | "knowledge" | "both")}
+                >
+                  <Radio.Button value="project">项目文档</Radio.Button>
+                  <Radio.Button value="knowledge">知识库</Radio.Button>
+                  <Radio.Button value="both">两用</Radio.Button>
+                </Radio.Group>
+                <Button
+                  type="primary" size="small"
+                  loading={vaultRegLoading}
+                  disabled={!vaultManualPath.trim()}
+                  onClick={async () => {
+                    setVaultRegLoading(true);
+                    try {
+                      const v = await registerVault({ path: vaultManualPath.trim(), role: vaultManualRole });
+                      await loadVaults();
+                      setVaultManualPath("");
+                      message.success(`已注册：${v.name}`);
+                    } catch (e) {
+                      message.error(String((e as Error).message));
+                    } finally {
+                      setVaultRegLoading(false);
+                    }
+                  }}
+                >
+                  注册
+                </Button>
+              </div>
+            </div>
+          </div>
+        </Space>
+      </Modal>
         </div>
       </div>
 
@@ -4098,22 +4336,6 @@ export default function App() {
         </div>
       ) : null}
 
-      <Drawer
-        title="审查队列"
-        placement="right"
-        width={480}
-        open={reviewQueueOpen && appMode === "review"}
-        onClose={() => setReviewQueueOpen(false)}
-        bodyStyle={{ padding: 0 }}
-      >
-        <ReviewQueuePanel />
-      </Drawer>
-      {/* ── Review Queue Drawer (accessible from review mode) ── */}
-      <ReviewQueueDrawer
-        open={reviewQueueDrawerOpen}
-        onClose={() => setReviewQueueDrawerOpen(false)}
-        onStartExtraction={handleStartFromReviewQueue}
-      />
 
       {/* ── Expert Profile Modal ── */}
       <Modal
@@ -4173,6 +4395,43 @@ export default function App() {
 
 
       {!chatsOpen && appMode === "review" && mainPanel === "analyze" ? (
+        <>
+          {/* ── 项目审查主 tabs：对话 | 结果评审 ── */}
+          <div style={{
+            display: "flex", gap: 0,
+            borderBottom: "1px solid var(--color-border, #e0e0d8)",
+            position: "sticky", top: 0, background: "var(--color-bg, #f5f5f0)", zIndex: 10,
+          }}>
+            {(["analyze", "result_review"] as const).map((key) => {
+              const label = key === "analyze" ? "对话" : "结果评审";
+              return (
+                <button
+                  key={key}
+                  onClick={() => setReviewMainTab(key)}
+                  style={{
+                    padding: "8px 20px", border: "none",
+                    borderBottom: reviewMainTab === key ? "2px solid #527c5e" : "2px solid transparent",
+                    background: "none", cursor: "pointer",
+                    fontWeight: reviewMainTab === key ? 600 : 400,
+                    color: reviewMainTab === key ? "#527c5e" : "#666",
+                    fontSize: 14, transition: "all 0.15s",
+                  }}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+
+          {reviewMainTab === "result_review" ? (
+            <div style={{ padding: "0 24px", maxWidth: 980, margin: "0 auto", width: "100%" }}>
+              <ReviewQueueTab
+                onStartExtraction={(item) => {
+                  void handleStartFromReviewQueue(item);
+                }}
+              />
+            </div>
+          ) : (
         <div
           className={`composer-overlay ${
             // 打开会话时输入框固定底部；空白页可居中
@@ -4290,6 +4549,8 @@ export default function App() {
             </div>
           </div>
         </div>
+          )}
+        </>
       ) : null}
     </div>
   );

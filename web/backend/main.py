@@ -44,6 +44,7 @@ from backend.routers.review_queue import router as review_queue_router
 from backend.routers.extraction import router as extraction_router
 from backend.routers.pending_rules import router as pending_rules_router
 from backend.routers.review_knowledge import router as review_knowledge_router
+from backend.routers.vaults import router as vaults_router
 from backend.run_metadata import build_run_metadata, sha256_short
 from backend.memory_recall import iter_memory_candidate_files, memory_root_under_repo, recall_combined, recall_memory_snippets
 from backend.conversation_models import (
@@ -153,6 +154,7 @@ app.include_router(review_queue_router)
 app.include_router(extraction_router)
 app.include_router(pending_rules_router)
 app.include_router(review_knowledge_router)
+app.include_router(vaults_router)
 
 register_builtin_hooks()
 
@@ -1815,7 +1817,7 @@ def _embed_project_chunks(conn: Any, project_id: int, batch_size: int = 50) -> i
 
 
 @app.post("/api/v1/projects/{project_id}/index-md")
-def index_md(project_id: int) -> JSONResponse:
+def index_md(project_id: int, payload: dict[str, Any] | None = None) -> JSONResponse:
     conn = _conn()
     prj = dbm.get_project_by_id(conn, project_id)
     if prj is None:
@@ -1826,12 +1828,35 @@ def index_md(project_id: int) -> JSONResponse:
         return JSONResponse(err(str(e)), status_code=400)
     if not md_root.is_dir():
         return JSONResponse(err("project root directory does not exist"), status_code=400)
+
+    body = payload or {}
+    resolve_wikilinks_flag = bool(body.get("resolve_wikilinks", False))
+    fm_filter_raw = body.get("frontmatter_filter")
+    vault_id_raw = body.get("vault_id")
+
+    vault_path: Path | None = None
+    if vault_id_raw is not None:
+        vault_row = dbm.get_obsidian_vault_by_id(conn, int(vault_id_raw))
+        if vault_row:
+            vault_path = Path(vault_row.path)
+            if fm_filter_raw is None and vault_row.frontmatter_filter_json:
+                try:
+                    fm_filter_raw = json.loads(vault_row.frontmatter_filter_json)
+                except Exception:
+                    pass
+
+    from backend.obsidian_service import FrontmatterFilter
+    fm_filter = FrontmatterFilter.from_dict(fm_filter_raw) if isinstance(fm_filter_raw, dict) else None
+
     n = sync_project_md_root(
         conn,
         project=prj,
         md_root=md_root,
         chunk_strategy=_get_chunk_strategy(),
         full_resync=_get_md_index_mode() == MD_INDEX_MODE_FULL,
+        resolve_wikilinks=resolve_wikilinks_flag,
+        vault_path=vault_path,
+        frontmatter_filter=fm_filter,
     )
     embedded_chunks = 0
     if embeddings_configured():
@@ -2909,6 +2934,57 @@ def update_finding_status(
     if not updated:
         return JSONResponse(err(f"finding {finding_id} not found"), status_code=404)
     return JSONResponse(ok({"finding_id": finding_id, "status": payload.status}))
+
+
+@app.post("/api/v1/projects/{project_id}/conversations/{conversation_id}/export/obsidian")
+def export_conversation_to_obsidian(
+    project_id: int, conversation_id: int, payload: dict[str, Any]
+) -> JSONResponse:
+    """Write review conversation output as a note into a registered Obsidian knowledge vault."""
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    conv = dbm.get_conversation(conn, conversation_id)
+    if conv is None or conv.project_id != project_id:
+        return JSONResponse(err("conversation not found"), status_code=404)
+
+    vault_id_raw = payload.get("vault_id")
+    if vault_id_raw is None:
+        return JSONResponse(err("vault_id is required"), status_code=400)
+    vault_row = dbm.get_obsidian_vault_by_id(conn, int(vault_id_raw))
+    if vault_row is None:
+        return JSONResponse(err("vault not found"), status_code=404)
+    if vault_row.role not in ("knowledge", "both"):
+        return JSONResponse(
+            err("vault role must be 'knowledge' or 'both' to export notes into it"),
+            status_code=400,
+        )
+
+    content_md = str(payload.get("content") or "").strip()
+    if not content_md:
+        # Fall back: gather last assistant message
+        messages = dbm.list_messages(conn, conversation_id=conversation_id)
+        asst_msgs = [m for m in messages if m.role == "assistant"]
+        if asst_msgs:
+            content_md = asst_msgs[-1].content
+    if not content_md:
+        return JSONResponse(err("no content to export"), status_code=400)
+
+    focus_ids = payload.get("focus_point_ids") or []
+    if isinstance(focus_ids, str):
+        focus_ids = [focus_ids]
+
+    from backend.obsidian_service import write_review_note
+    note_path = write_review_note(
+        Path(vault_row.path),
+        vault_row.output_folder,
+        project_name=prj.name,
+        content_markdown=content_md,
+        focus_point_ids=list(focus_ids),
+        conversation_id=conversation_id,
+    )
+    return JSONResponse(ok({"note_path": str(note_path), "vault_id": vault_row.id}))
 
 
 # 开发/本机部署：优先使用仓库内 `web/frontend/dist`（npm run build），避免 editable 安装仍沿用 wheel 里旧的 frontend_dist。

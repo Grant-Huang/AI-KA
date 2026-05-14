@@ -291,6 +291,19 @@ CREATE TABLE IF NOT EXISTS session_quality_reports (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sqr_session ON session_quality_reports(session_ref);
+
+CREATE TABLE IF NOT EXISTS obsidian_vaults (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  path TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'project',
+  frontmatter_filter_json TEXT,
+  output_folder TEXT NOT NULL DEFAULT '_aika/reviews',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_obsidian_vaults_role ON obsidian_vaults(role);
 """
 
 
@@ -453,6 +466,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _migrate_review_knowledge_tables(conn)
     _migrate_users_tables(conn)
     _migrate_knowledge_cards_table(conn)
+    _migrate_obsidian_vaults_table(conn)
 
 
 def _table_column_names(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -2481,3 +2495,121 @@ def _decode_quality_report(row: sqlite3.Row) -> dict:
             except Exception:
                 pass
     return d
+
+
+# ---------------------------------------------------------------------------
+# Obsidian Vaults
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ObsidianVaultRow:
+    id: int
+    path: str
+    name: str
+    role: str
+    frontmatter_filter_json: str | None
+    output_folder: str
+    created_at: str
+    updated_at: str
+
+
+def _migrate_obsidian_vaults_table(conn: sqlite3.Connection) -> None:
+    """obsidian_vaults is created by SCHEMA_SQL; this is a no-op stub for existing DBs."""
+    pass
+
+
+def _row_to_obsidian_vault(r: sqlite3.Row) -> ObsidianVaultRow:
+    return ObsidianVaultRow(
+        id=int(r["id"]),
+        path=str(r["path"]),
+        name=str(r["name"]),
+        role=str(r["role"]),
+        frontmatter_filter_json=r["frontmatter_filter_json"] if r["frontmatter_filter_json"] else None,
+        output_folder=str(r["output_folder"]),
+        created_at=str(r["created_at"]),
+        updated_at=str(r["updated_at"]),
+    )
+
+
+def create_obsidian_vault(
+    conn: sqlite3.Connection,
+    *,
+    path: str,
+    name: str,
+    role: str = "project",
+    frontmatter_filter_json: str | None = None,
+    output_folder: str = "_aika/reviews",
+) -> ObsidianVaultRow:
+    cur = conn.execute(
+        """INSERT INTO obsidian_vaults(path, name, role, frontmatter_filter_json, output_folder)
+           VALUES (?, ?, ?, ?, ?)""",
+        (path, name, role, frontmatter_filter_json, output_folder),
+    )
+    conn.commit()
+    vault_id = int(cur.lastrowid)
+    return ObsidianVaultRow(
+        id=vault_id,
+        path=path,
+        name=name,
+        role=role,
+        frontmatter_filter_json=frontmatter_filter_json,
+        output_folder=output_folder,
+        created_at="",
+        updated_at="",
+    )
+
+
+def get_obsidian_vault_by_id(conn: sqlite3.Connection, vault_id: int) -> ObsidianVaultRow | None:
+    r = conn.execute(
+        "SELECT * FROM obsidian_vaults WHERE id=?", (vault_id,)
+    ).fetchone()
+    return _row_to_obsidian_vault(r) if r else None
+
+
+def get_obsidian_vault_by_path(conn: sqlite3.Connection, path: str) -> ObsidianVaultRow | None:
+    r = conn.execute(
+        "SELECT * FROM obsidian_vaults WHERE path=?", (path,)
+    ).fetchone()
+    return _row_to_obsidian_vault(r) if r else None
+
+
+def list_obsidian_vaults(conn: sqlite3.Connection) -> list[ObsidianVaultRow]:
+    rows = conn.execute("SELECT * FROM obsidian_vaults ORDER BY id").fetchall()
+    return [_row_to_obsidian_vault(r) for r in rows]
+
+
+def update_obsidian_vault(
+    conn: sqlite3.Connection,
+    vault_id: int,
+    *,
+    name: str | None = None,
+    role: str | None = None,
+    frontmatter_filter_json: str | None = None,
+    output_folder: str | None = None,
+) -> bool:
+    updates: list[str] = ["updated_at=datetime('now')"]
+    params: list[Any] = []
+    if name is not None:
+        updates.append("name=?")
+        params.append(name)
+    if role is not None:
+        updates.append("role=?")
+        params.append(role)
+    if frontmatter_filter_json is not None:
+        updates.append("frontmatter_filter_json=?")
+        params.append(frontmatter_filter_json)
+    if output_folder is not None:
+        updates.append("output_folder=?")
+        params.append(output_folder)
+    if len(updates) == 1:
+        return False
+    params.append(vault_id)
+    cur = conn.execute(f"UPDATE obsidian_vaults SET {', '.join(updates)} WHERE id=?", params)
+    conn.commit()
+    return bool(cur.rowcount and cur.rowcount > 0)
+
+
+def delete_obsidian_vault(conn: sqlite3.Connection, vault_id: int) -> bool:
+    cur = conn.execute("DELETE FROM obsidian_vaults WHERE id=?", (vault_id,))
+    conn.commit()
+    return bool(cur.rowcount and cur.rowcount > 0)
