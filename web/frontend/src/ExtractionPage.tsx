@@ -393,7 +393,7 @@ function ExpertQATab({
               {docName}
             </Tag>
           )}
-        </div>
+        </>
       )}
 
       <ChatArea messages={messages} streaming={streaming} />
