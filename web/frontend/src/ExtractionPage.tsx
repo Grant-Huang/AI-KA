@@ -173,7 +173,7 @@ function ChatArea({ messages, streaming }: { messages: ChatMsg[]; streaming: boo
       {streaming && lastAssistantIdx < 0 && (
         <div style={{ padding: "4px 0" }}>
           <Spin size="small" />
-          <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>生成中…</Text>
+          <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>Agent思考中...</Text>
         </div>
       )}
       <div ref={bottomRef} />
