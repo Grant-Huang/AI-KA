@@ -32,10 +32,10 @@ const DOMAIN_OPTIONS = [
 ];
 
 const STRATEGY_OPTIONS = [
-  { value: "gap_based", label: "规则差距", desc: "对比 Review Queue 与现有规则，识别空白" },
-  { value: "fuzzy_signal", label: "模糊信号", desc: "澄清模糊印象，转化为清晰规则" },
-  { value: "critical_incident", label: "关键事件", desc: "从具体案例提炼可复用规律" },
-  { value: "reverse_validation", label: "反向验证", desc: "验证或反驳现有规则的适用边界" },
+  { value: "gap_based", label: "发现规则盲点", desc: "找出哪些经验还没有被总结成规律" },
+  { value: "fuzzy_signal", label: "澄清模糊印象", desc: "把说不清的直觉转化成清晰的规则" },
+  { value: "critical_incident", label: "复盘具体案例", desc: "从一次实际经历提炼可复用的经验" },
+  { value: "reverse_validation", label: "挑战现有规则", desc: "检验一条规则是否在各种情境下都成立" },
 ];
 
 const CONFIDENCE_COLOR: Record<string, string> = {
@@ -44,7 +44,11 @@ const CONFIDENCE_COLOR: Record<string, string> = {
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-type ChatMsg = { role: "user" | "assistant" | "status"; content: string };
+type StrategyOption = typeof STRATEGY_OPTIONS[number];
+type ChatMsg =
+  | { role: "user" | "assistant" | "status"; content: string }
+  | { role: "choices"; options: StrategyOption[] }
+  | { role: "clarify"; questions: string[] };
 type ActiveTab = "extract" | "pending";
 
 // ── ExpertProfileModal ───────────────────────────────────────────────────────
@@ -129,16 +133,35 @@ function ExpertProfileModal({
 
 // ── ChatArea ─────────────────────────────────────────────────────────────────
 
-function ChatArea({ messages, streaming }: { messages: ChatMsg[]; streaming: boolean }) {
+function ChatArea({
+  messages, streaming, onStrategyChoose, onClarify,
+}: {
+  messages: ChatMsg[];
+  streaming: boolean;
+  onStrategyChoose?: (opt: StrategyOption) => void;
+  onClarify?: (text: string) => void;
+}) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [otherInput, setOtherInput] = useState("");
+  const [showOther, setShowOther] = useState(false);
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  useEffect(() => { setShowOther(false); setOtherInput(""); }, [messages.length]);
+
   const lastAssistantIdx = messages.reduce(
-    (last, m, i) => (m.role === "assistant" ? i : last),
-    -1,
+    (last, m, i) => (m.role === "assistant" ? i : last), -1,
   );
+
+  const submitOther = () => {
+    const t = otherInput.trim();
+    if (!t) return;
+    onClarify?.(t);
+    setOtherInput("");
+    setShowOther(false);
+  };
 
   return (
     <div style={{
@@ -146,30 +169,95 @@ function ChatArea({ messages, streaming }: { messages: ChatMsg[]; streaming: boo
       padding: "12px 14px", background: "var(--color-bg-card, #fff)",
       minHeight: 200, maxHeight: 420, overflowY: "auto",
     }}>
-      {messages.map((msg, i) => (
-        <div
-          key={i}
-          style={{
-            marginBottom: 12,
-            padding: msg.role === "status" ? "4px 8px" : "8px 12px",
-            borderRadius: 6,
-            background: msg.role === "user"
-              ? "rgba(82, 124, 94, 0.08)"
-              : msg.role === "status"
-                ? "transparent"
-                : "var(--color-bg-card, #fff)",
-            borderLeft: msg.role === "assistant" ? "3px solid rgba(82,124,94,0.4)" : "none",
-          }}
-        >
-          {msg.role === "status" ? (
-            <Text type="secondary" style={{ fontSize: 12 }}>{msg.content}</Text>
-          ) : msg.role === "user" ? (
-            <Text>{msg.content}</Text>
-          ) : (
-            <ThinkableMarkdown markdown={msg.content} />
-          )}
-        </div>
-      ))}
+      {messages.map((msg, i) => {
+        if (msg.role === "choices") {
+          return (
+            <div key={i} style={{ marginBottom: 12, paddingLeft: 4 }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {msg.options.map((opt) => (
+                  <Button
+                    key={opt.value}
+                    size="small"
+                    onClick={() => onStrategyChoose?.(opt)}
+                    disabled={streaming}
+                    title={opt.desc}
+                    style={{ borderRadius: 16 }}
+                  >
+                    {opt.label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          );
+        }
+
+        if (msg.role === "clarify") {
+          return (
+            <div key={i} style={{ marginBottom: 12, paddingLeft: 4 }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: showOther ? 8 : 0 }}>
+                {msg.questions.map((q, qi) => (
+                  <Button
+                    key={qi}
+                    size="small"
+                    onClick={() => onClarify?.(q)}
+                    disabled={streaming}
+                    style={{ borderRadius: 16 }}
+                  >
+                    {q}
+                  </Button>
+                ))}
+                <Button
+                  size="small"
+                  onClick={() => setShowOther((v) => !v)}
+                  disabled={streaming}
+                  style={{ borderRadius: 16 }}
+                >
+                  其他…
+                </Button>
+              </div>
+              {showOther && (
+                <div style={{ display: "flex", gap: 6 }}>
+                  <Input
+                    size="small"
+                    value={otherInput}
+                    onChange={(e) => setOtherInput(e.target.value)}
+                    onPressEnter={submitOther}
+                    placeholder="输入自定义回复…"
+                    autoFocus
+                    style={{ flex: 1 }}
+                  />
+                  <Button size="small" type="primary" onClick={submitOther}>发送</Button>
+                </div>
+              )}
+            </div>
+          );
+        }
+
+        return (
+          <div
+            key={i}
+            style={{
+              marginBottom: 12,
+              padding: msg.role === "status" ? "4px 8px" : "8px 12px",
+              borderRadius: 6,
+              background: msg.role === "user"
+                ? "rgba(82, 124, 94, 0.08)"
+                : msg.role === "status"
+                  ? "transparent"
+                  : "var(--color-bg-card, #fff)",
+              borderLeft: msg.role === "assistant" ? "3px solid rgba(82,124,94,0.4)" : "none",
+            }}
+          >
+            {msg.role === "status" ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>{msg.content}</Text>
+            ) : msg.role === "user" ? (
+              <Text>{msg.content}</Text>
+            ) : (
+              <ThinkableMarkdown markdown={msg.content} />
+            )}
+          </div>
+        );
+      })}
       {streaming && lastAssistantIdx < 0 && (
         <div style={{ padding: "4px 0" }}>
           <Spin size="small" />
@@ -205,17 +293,20 @@ function ExpertQATab({
   const isPostReview = postReviewCtx != null;
   const isDocMode = materialId != null;
 
-  // Opening canned message shown on mount
-  const OPENING_MSG: ChatMsg = {
-    role: "assistant",
-    content: isPostReview
-      ? `已关联本次审查结果（项目 #${postReviewCtx!.projectId}）。请描述遗漏或补充发现，或直接点击「开始提取」。`
-      : "你好！今天想从哪里开始提取知识？选择一种提取方式，或直接输入你想聊的内容。",
+  const makeInitialMessages = (postReview: boolean): ChatMsg[] => {
+    const opening: ChatMsg = {
+      role: "assistant",
+      content: postReview
+        ? `已关联本次审查结果（项目 #${postReviewCtx!.projectId}）。请描述遗漏或补充发现，或直接点击「开始提取」。`
+        : "你好！今天想从哪里开始？选一个方向，或直接输入你想聊的内容。",
+    };
+    if (postReview) return [opening];
+    return [opening, { role: "choices", options: STRATEGY_OPTIONS }];
   };
 
   useEffect(() => {
     setPhase("choosing");
-    setMessages([OPENING_MSG]);
+    setMessages(makeInitialMessages(isPostReview));
     setRoundNumber(1);
     setNewKiIds([]);
     setMaterialId(null);
@@ -228,7 +319,9 @@ function ExpertQATab({
   }, []);
 
   const priorMessages = messages
-    .filter((m) => m.role !== "status")
+    .filter((m): m is { role: "user" | "assistant"; content: string } =>
+      m.role === "user" || m.role === "assistant"
+    )
     .map((m) => ({ role: m.role as string, content: m.content }));
 
   const runStream = async (userText: string) => {
@@ -285,10 +378,9 @@ function ExpertQATab({
           } else if (ev.type === "clarify") {
             const clarify = (ev as any).clarify as { questions?: string[] } | undefined;
             if (clarify?.questions?.length) {
-              const qs = clarify.questions.map((q, i) => `${i + 1}. ${q}`).join("\n");
               setMessages((prev) => [
                 ...prev,
-                { role: "status", content: `💡 建议追问方向：\n${qs}` },
+                { role: "clarify", questions: clarify!.questions! },
               ]);
             }
           } else if (ev.type === "final") {
@@ -314,10 +406,16 @@ function ExpertQATab({
   };
 
   // Strategy chip selected → auto-start LLM
-  const handleStrategySelect = async (s: typeof STRATEGY_OPTIONS[number]) => {
+  const handleStrategySelect = async (s: StrategyOption) => {
     setStrategy(s.value);
     setPhase("chatting");
-    await runStream(`我想通过「${s.label}」开始——${s.desc}`);
+    setMessages((prev) => prev.filter((m) => m.role !== "choices"));
+    await runStream(`我想从「${s.label}」方向开始`);
+  };
+
+  const handleClarifyChoice = async (text: string) => {
+    setMessages((prev) => prev.filter((m) => m.role !== "clarify"));
+    await runStream(text);
   };
 
   // User types and sends
@@ -359,7 +457,7 @@ function ExpertQATab({
   const handleReset = () => {
     handleStop();
     setPhase("choosing");
-    setMessages([OPENING_MSG]);
+    setMessages(makeInitialMessages(isPostReview));
     setRoundNumber(1);
     setNewKiIds([]);
     setMaterialId(null);
@@ -401,24 +499,12 @@ function ExpertQATab({
         </>
       )}
 
-      <ChatArea messages={messages} streaming={streaming} />
-
-      {/* Strategy chips — shown while choosing */}
-      {phase === "choosing" && !isPostReview && (
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
-          {STRATEGY_OPTIONS.map((s) => (
-            <Button
-              key={s.value}
-              size="small"
-              onClick={() => void handleStrategySelect(s)}
-              disabled={streaming}
-              style={{ borderRadius: 16 }}
-            >
-              {s.label}
-            </Button>
-          ))}
-        </div>
-      )}
+      <ChatArea
+        messages={messages}
+        streaming={streaming}
+        onStrategyChoose={(opt) => void handleStrategySelect(opt)}
+        onClarify={(text) => void handleClarifyChoice(text)}
+      />
 
       {/* Input row */}
       <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
@@ -677,12 +763,7 @@ export default function ExtractionPage() {
   }, []);
 
   useEffect(() => {
-    getExpertProfile()
-      .then((p) => {
-        setProfile(p);
-        if (!p.domains.length && !p.background) setProfileModalOpen(true);
-      })
-      .catch(() => setProfileModalOpen(true));
+    getExpertProfile().then(setProfile).catch(() => {});
   }, []);
 
   const handleSaveProfile = async (data: ExpertProfileData) => {
