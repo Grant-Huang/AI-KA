@@ -82,7 +82,7 @@ import {
   type DiscoveredVault,
 } from "./api";
 import { parseMemoryInjectedItemsFromMilestonesRaw, useConversationReplay } from "./hooks/useConversationReplay";
-import SimpleMarkdown from "./SimpleMarkdown";
+import SimpleMarkdown, { ThinkableMarkdown } from "./SimpleMarkdown";
 import HelpPage from "./pages/help";
 import SystemSettingPage from "./pages/system_setting";
 import ExtractionPage, { ReviewQueueTab } from "./ExtractionPage";
@@ -3787,7 +3787,7 @@ export default function App() {
                         <div className={`conv-msg-body${m.role === "user" ? " conv-msg-body--user" : ""}`}>
                           {m.created_at ? <div className="conv-msg-meta">{formatConversationTime(m.created_at)}</div> : null}
                           {m.role === "assistant" ? (
-                            <SimpleMarkdown markdown={String(m.content || "")} />
+                            <ThinkableMarkdown markdown={String(m.content || "")} />
                           ) : (
                             <div className="conv-msg-plain">{String(m.content || "")}</div>
                           )}
@@ -3803,7 +3803,7 @@ export default function App() {
                           <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6 }}>
                             {formatConversationTime(e.createdAt)} · {e.kind}
                           </div>
-                          <SimpleMarkdown markdown={e.markdown} />
+                          <ThinkableMarkdown markdown={e.markdown} />
                         </div>
                       ))}
                     </div>
@@ -3819,7 +3819,7 @@ export default function App() {
                           <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6 }}>
                             {formatLocalDateTime(new Date(e.at))} · {e.title}
                           </div>
-                          <SimpleMarkdown markdown={e.markdown} />
+                          <ThinkableMarkdown markdown={e.markdown} />
                         </div>
                       ))}
                     </div>
