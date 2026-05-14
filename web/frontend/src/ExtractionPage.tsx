@@ -6,7 +6,7 @@ import {
 } from "antd";
 
 import {
-  CheckOutlined, CloseOutlined, ClockCircleOutlined, DeleteOutlined, InboxOutlined,
+  CheckOutlined, ClockCircleOutlined, CloseOutlined, DeleteOutlined, InboxOutlined,
   PaperClipOutlined, PlusOutlined, ReloadOutlined, UserOutlined, WarningOutlined,
 } from "@ant-design/icons";
 import type {
@@ -286,7 +286,6 @@ function ExpertQATab({
   onFirstMessage: (title: string, strategy: string) => Promise<number>;
   onRoundComplete: (sid: number, messages: Array<{ role: string; content: string }>) => void;
 }) {
-  // phase: "choosing" shows opening question; "chatting" is active conversation
   const [phase, setPhase] = useState<"choosing" | "chatting">("choosing");
   const [strategy, setStrategy] = useState("gap_based");
   const [rqItems, setRqItems] = useState<ReviewQueueItem[]>([]);
@@ -340,7 +339,6 @@ function ExpertQATab({
     .map((m) => ({ role: m.role as string, content: m.content }));
 
   const runStream = async (userText: string) => {
-    // Auto-create session on first user message
     let sid = sessionId;
     if (sid === null) {
       try {
@@ -424,7 +422,6 @@ function ExpertQATab({
         },
       );
 
-      // Persist the round to the session
       const fullAssistant = acc.join("");
       if (sid !== null) {
         const toSave: Array<{ role: string; content: string }> = [
@@ -442,7 +439,6 @@ function ExpertQATab({
     }
   };
 
-  // Strategy chip selected → auto-start LLM
   const handleStrategySelect = async (s: StrategyOption) => {
     setStrategy(s.value);
     setPhase("chatting");
@@ -455,7 +451,6 @@ function ExpertQATab({
     await runStream(text);
   };
 
-  // User types and sends
   const handleSend = async () => {
     const text = input.trim();
     if (!text || streaming) return;
@@ -464,7 +459,6 @@ function ExpertQATab({
     await runStream(text);
   };
 
-  // Post-review auto-start
   const handlePostReviewStart = async () => {
     setPhase("chatting");
     await runStream("请开始分析，帮我识别可以提炼的知识");
@@ -543,7 +537,6 @@ function ExpertQATab({
         onClarify={(text) => void handleClarifyChoice(text)}
       />
 
-      {/* Input row */}
       <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
         <div style={{ flex: 1, position: "relative" }}>
           <TextArea
@@ -560,7 +553,6 @@ function ExpertQATab({
             autoSize={{ minRows: 2, maxRows: 6 }}
             disabled={streaming}
           />
-          {/* Inline upload button */}
           {!isPostReview && (
             <Upload
               accept=".md,.html"
@@ -787,20 +779,11 @@ export default function ExtractionPage() {
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [postReviewCtx, setPostReviewCtx] = useState<{ projectId: number; conversationId: number } | null>(null);
 
-  // Session state
+  // Session history state
   const [sessions, setSessions] = useState<ExtractionSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
   const [preloadMessages, setPreloadMessages] = useState<ChatMsg[]>([]);
-  const [sessionKey, setSessionKey] = useState(0); // force remount ExpertQATab
-
-  const loadSessions = useCallback(async () => {
-    try {
-      const { sessions: s } = await listExtractionSessions();
-      setSessions(s);
-    } catch { /* ignore */ }
-  }, []);
-
-  useEffect(() => { void loadSessions(); }, [loadSessions]);
+  const [sessionKey, setSessionKey] = useState(0);
 
   useEffect(() => {
     const raw = window.sessionStorage.getItem("aika_post_review_ctx");
@@ -818,6 +801,15 @@ export default function ExtractionPage() {
     getExpertProfile().then(setProfile).catch(() => {});
   }, []);
 
+  const loadSessions = useCallback(async () => {
+    try {
+      const { sessions: s } = await listExtractionSessions();
+      setSessions(s);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { void loadSessions(); }, [loadSessions]);
+
   const handleSaveProfile = async (data: ExpertProfileData) => {
     const saved = await putExpertProfile(data);
     setProfile(saved);
@@ -833,8 +825,8 @@ export default function ExtractionPage() {
 
   const handleSelectSession = async (sid: number) => {
     try {
-      const { messages: msgs } = await getExtractionSessionMessages(sid);
-      const chatMsgs: ChatMsg[] = msgs
+      const { messages } = await getExtractionSessionMessages(sid);
+      const chatMsgs: ChatMsg[] = messages
         .filter((m) => m.role === "user" || m.role === "assistant")
         .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
       setCurrentSessionId(sid);
@@ -844,7 +836,7 @@ export default function ExtractionPage() {
     } catch { /* ignore */ }
   };
 
-  const handleDeleteSession = async (sid: number, ev: React.MouseEvent) => {
+  const handleDeleteSession = (sid: number, ev: React.MouseEvent) => {
     ev.stopPropagation();
     Modal.confirm({
       title: "确认删除会话",
@@ -855,14 +847,14 @@ export default function ExtractionPage() {
       onOk: async () => {
         await deleteExtractionSession(sid);
         if (currentSessionId === sid) handleNewSession();
-        else await loadSessions();
+        await loadSessions();
         message.success("会话已删除");
       },
     });
   };
 
-  const handleFirstMessage = async (title: string, strategy: string): Promise<number> => {
-    const s = await createExtractionSession(title, strategy);
+  const handleFirstMessage = async (title: string, strat: string): Promise<number> => {
+    const s = await createExtractionSession(title, strat);
     setCurrentSessionId(s.id);
     void loadSessions();
     return s.id;
@@ -896,26 +888,33 @@ export default function ExtractionPage() {
 
   return (
     <div className="extraction-page" style={{ display: "flex", height: "100%", overflow: "hidden" }}>
-      {/* ── Left sidebar ── */}
+      {/* ── Left session sidebar ── */}
       <div style={{
-        width: 200, flexShrink: 0, borderRight: "1px solid var(--color-border, #e0e0d8)",
+        width: 200, flexShrink: 0,
+        borderRight: "1px solid var(--color-border, #e0e0d8)",
         display: "flex", flexDirection: "column", overflow: "hidden",
         background: "var(--color-bg-sidebar, #f7f7f3)",
       }}>
-        <div style={{ padding: "12px 10px 8px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{
+          padding: "12px 10px 8px",
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          borderBottom: "1px solid var(--color-border, #e0e0d8)",
+        }}>
           <Text strong style={{ fontSize: 13 }}>会话历史</Text>
           <Button size="small" icon={<PlusOutlined />} onClick={handleNewSession} title="新会话" />
         </div>
-        <div style={{ flex: 1, overflowY: "auto", padding: "0 6px 8px" }}>
+        <div style={{ flex: 1, overflowY: "auto", padding: "6px 6px 8px" }}>
           {sessions.length === 0 ? (
-            <Text type="secondary" style={{ fontSize: 12, padding: "8px 4px", display: "block" }}>暂无历史会话</Text>
+            <Text type="secondary" style={{ fontSize: 12, padding: "8px 4px", display: "block" }}>
+              暂无历史会话
+            </Text>
           ) : (
             sessions.map((s) => (
               <div
                 key={s.id}
                 onClick={() => void handleSelectSession(s.id)}
                 style={{
-                  padding: "7px 8px",
+                  padding: "7px 8px 7px 10px",
                   borderRadius: 6,
                   cursor: "pointer",
                   marginBottom: 2,
@@ -927,9 +926,7 @@ export default function ExtractionPage() {
                 <div style={{
                   fontSize: 13,
                   fontWeight: s.id === currentSessionId ? 600 : 400,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                   paddingRight: 20,
                 }}>
                   {s.title}
@@ -943,7 +940,7 @@ export default function ExtractionPage() {
                   icon={<CloseOutlined />}
                   size="small"
                   style={{ position: "absolute", top: 4, right: 2, opacity: 0.5 }}
-                  onClick={(e) => void handleDeleteSession(s.id, e)}
+                  onClick={(e) => handleDeleteSession(s.id, e)}
                 />
               </div>
             ))
@@ -961,11 +958,7 @@ export default function ExtractionPage() {
                 领域：{profile.domains.length > 0 ? profile.domains.join("、") : "未设置"}
               </Text>
             )}
-            <Button
-              icon={<UserOutlined />}
-              size="small"
-              onClick={() => setProfileModalOpen(true)}
-            >
+            <Button icon={<UserOutlined />} size="small" onClick={() => setProfileModalOpen(true)}>
               专家背景
             </Button>
           </div>
