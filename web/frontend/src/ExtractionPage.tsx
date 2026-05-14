@@ -363,31 +363,26 @@ function ExpertQATab({
 
   return (
     <div style={{ padding: "16px 0" }}>
-      {newKiIds.length > 0 && (
-        <Alert
-          type="success"
-          message={`已生成 ${newKiIds.length} 条知识条目，请到「待批准规则」页面审批后写入规则库。`}
-          style={{ marginBottom: 12 }}
-          closable
-        />
-      )}
+      <Upload.Dragger
+        accept=".md,.html"
+        beforeUpload={(file) => { void handleUpload(file); return false; }}
+        showUploadList={false}
+        disabled={uploading}
+        style={{ marginBottom: 16 }}
+      >
+        <p className="ant-upload-drag-icon">
+          {uploading ? <Spin /> : <InboxOutlined style={{ fontSize: 32, color: "#527c5e" }} />}
+        </p>
+        <p>拖拽或点击上传规则文档（.md / .html）</p>
+        <p style={{ fontSize: 12, color: "#888" }}>上传后 LLM 将基于文档内容做知识澄清</p>
+      </Upload.Dragger>
 
-      {/* RQ selector and doc badge */}
-      {!isPostReview && (
-        <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
-          <Select
-            value={rqItemId}
-            onChange={(val) => setRqItemId(val ?? null)}
-            placeholder="关联审查队列条目（可选）"
-            style={{ flex: 1, minWidth: 200 }}
-            allowClear
-            onClear={() => setRqItemId(null)}
-            options={rqItems
-              .filter((x) => x.status !== "rejected" && x.status !== "archived")
-              .map((x) => ({
-                value: x.id,
-                label: `[${x.focus_id}] ${x.suggestion.slice(0, 50)}… (×${x.occurrences})`,
-              }))}
+      {materialId && (
+        <>
+          <Alert
+            type="info"
+            message={`已加载文档：${docName}（material_id: ${materialId}）`}
+            style={{ marginBottom: 12 }}
           />
           {docName && (
             <Tag

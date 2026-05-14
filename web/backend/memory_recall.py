@@ -128,3 +128,39 @@ def recall_memory_snippets(
         if len(out) >= limit:
             break
     return out
+
+
+def recall_combined(
+    *,
+    memory_root: Path,
+    project_id: int,
+    query: str,
+    already_surfaced: set[str],
+    project_limit: int = 4,
+    personal_limit: int = 2,
+    db_conn: Any = None,
+    embed_query_vec: list[float] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    项目记忆 + 个人记忆的组合召回，统一封装 embed 向量和 already_surfaced 去重逻辑。
+
+    返回合并后的列表（项目记忆在前，个人记忆在后）。
+    """
+    from backend.personal_memory import recall_personal_memory
+
+    project_snippets = recall_memory_snippets(
+        memory_root=memory_root,
+        project_id=project_id,
+        query=query,
+        already_surfaced=already_surfaced,
+        limit=project_limit,
+        db_conn=db_conn,
+        embed_query_vec=embed_query_vec,
+    )
+    personal_snippets = recall_personal_memory(
+        query,
+        already_surfaced=already_surfaced | {str(s.get("id") or "") for s in project_snippets},
+        limit=personal_limit,
+        embed_query_vec=embed_query_vec,
+    )
+    return project_snippets + personal_snippets
