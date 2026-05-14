@@ -59,6 +59,10 @@ export async function apiJson<T>(
   if (body.status === "success" && "data" in body) {
     return body.data as T;
   }
+  // Some endpoints return plain JSON objects without a status wrapper — return as-is
+  if (!("status" in body)) {
+    return body as unknown as T;
+  }
   throw new Error(`Unexpected API shape HTTP ${r.status}`);
 }
 
@@ -461,7 +465,7 @@ export type KnowledgeCard = {
   exceptions: string | null; confidence: string; status: string;
   source_turn: number | null; created_at: string; updated_at: string;
 };
-export type ExtractionSession = {
+export type LegacyExtractionSession = {
   session_id: number; id?: number; title: string; created_at: string; card_count: number;
   confirmed_cards?: number; total_cards?: number;
 };
@@ -476,13 +480,13 @@ export async function authMe(): Promise<AuthUser> {
   return apiJson("/api/v1/auth/me");
 }
 
-export async function createExtractionSession(body?: { title?: string; focus_label?: string }): Promise<{ session_id: number; opening: string; profile_completed: boolean }> {
+export async function createLegacyExtractionSession(body?: { title?: string; focus_label?: string }): Promise<{ session_id: number; opening: string; profile_completed: boolean }> {
   return apiJson("/api/v1/extraction/sessions", { method: "POST", body: JSON.stringify(body ?? {}) });
 }
-export async function listExtractionSessions(): Promise<{ sessions: ExtractionSession[] }> {
+export async function listLegacyExtractionSessions(): Promise<{ sessions: LegacyExtractionSession[] }> {
   return apiJson("/api/v1/extraction/sessions");
 }
-export async function getExtractionSession(sessionId: number): Promise<{ session_id: number; messages: Array<{role: string; content: string}>; cards: KnowledgeCard[] }> {
+export async function getLegacyExtractionSession(sessionId: number): Promise<{ session_id: number; messages: Array<{role: string; content: string}>; cards: KnowledgeCard[] }> {
   return apiJson(`/api/v1/extraction/sessions/${sessionId}`);
 }
 export async function postExtractionChatStream(
@@ -602,3 +606,40 @@ export async function exportConversationToObsidian(
     { method: "POST", body: JSON.stringify(body) },
   );
 }
+
+// ── Extraction Sessions ──────────────────────────────────────────────────────
+
+export interface ExtractionSession {
+  id: number;
+  title: string;
+  strategy: string | null;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+}
+
+export const listExtractionSessions = () =>
+  apiJson<{ sessions: ExtractionSession[] }>("/api/v1/extraction/sessions");
+
+export const createExtractionSession = (title: string, strategy?: string | null) =>
+  apiJson<ExtractionSession>("/api/v1/extraction/sessions", {
+    method: "POST",
+    body: JSON.stringify({ title, strategy: strategy ?? null }),
+  });
+
+export const getExtractionSessionMessages = (sid: number) =>
+  apiJson<{ messages: Array<{ role: string; content: string; created_at: string }> }>(
+    `/api/v1/extraction/sessions/${sid}/messages`,
+  );
+
+export const deleteExtractionSession = (sid: number) =>
+  apiJson<{ ok: boolean }>(`/api/v1/extraction/sessions/${sid}`, { method: "DELETE" });
+
+export const appendExtractionMessages = (
+  sid: number,
+  messages: Array<{ role: string; content: string }>,
+) =>
+  apiJson<{ ok: boolean }>(`/api/v1/extraction/sessions/${sid}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ messages }),
+  });
