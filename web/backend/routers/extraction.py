@@ -577,6 +577,8 @@ def _build_active_extraction_system_prompt(
 2. 确保每条规则都有明确的适用范围
 3. 追问例外条件，避免规则过于绝对
 
+**每轮只问 1 个问题**。如果识别到多个待追问主题，先列出清单，只追问第一个，等专家回答形成结论后再继续下一个。
+
 {_EXPERT_MODELING_PROTOCOL}
 
 {KI_INSTRUCTION}
@@ -836,7 +838,7 @@ def doc_extraction_stream(body: DocExtractionBody) -> StreamingResponse:
             profile_str = f"专家领域：{', '.join(expert_profile.domains)}\n"
         domain_str = f"【当前审查域背景】\n{domain_intro}\n\n" if domain_intro else ""
 
-        system_prompt = f"""你是知识工程师，负责从规则文档中提取隐性知识并对照现有规则进行澄清。
+        system_prompt = f"""你是知识工程师，负责从规则文档中**全面**提取隐性知识，并逐条澄清。
 
 {profile_str}
 {domain_str}【现有相关规则摘要】
@@ -844,18 +846,25 @@ def doc_extraction_stream(body: DocExtractionBody) -> StreamingResponse:
 
 {strategy_hint}
 
-你的任务：
-1. 读取下方文档内容
-2. 识别文档中明确或隐含的规则/判断原则
-3. 对照现有规则，找出：(a) 新增内容；(b) 与现有规则的差异；(c) 文档中未说明适用条件的规则
-4. 对每条提取到的规则，追问适用范围
+## 工作方式（重要）
+
+**第一轮**（文档首次上传时）：
+1. 通读全文，**完整列举**所有识别到的规则或判断原则（编号列表，不要遗漏）
+2. 每条标注置信度：明确说明 / 隐含推断 / 待验证
+3. 列完后，**只针对第一条**（或最不清晰的一条）提出 1 个澄清问题
+4. 在列表末说明：「共识别到 N 条，将逐条澄清」
+
+**后续轮次**（专家回答后）：
+- 每轮只问 **1个问题**，等待专家回答后再继续
+- 在每轮开头简短提示进度：「第 X / N 条 · 还有 Y 条待处理」
+- 当某条规则的答案充分时，提炼知识卡片，然后自动移至下一条
 
 {KI_INSTRUCTION}
 
 已提取条目数：{len(existing_items)}（不重复已有规则）
 """.strip()
 
-        doc_section = f"\n\n【文档内容】\n{doc_text[:6000]}"
+        doc_section = f"\n\n【文档内容】\n{doc_text[:20000]}"
         user_msg = (body.user_input or "请分析此文档中的规则和判断原则，提取可复用的知识条目。") + doc_section
 
         yield _sse_line({"type": "status", "msg": "分析文档中…"})
