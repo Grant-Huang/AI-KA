@@ -436,11 +436,8 @@ body {
 
 /* Collapsed state: hide text, center icons */
 .app-sidebar--collapsed .app-sidebar__logo,
-.app-sidebar--collapsed .app-sidebar__action-btn span,
-.app-sidebar--collapsed .app-sidebar__section-header span,
+.app-sidebar--collapsed .app-sidebar__label,
 .app-sidebar--collapsed .app-sidebar__session-list,
-.app-sidebar--collapsed .app-sidebar__pending span,
-.app-sidebar--collapsed .app-sidebar__user span,
 .app-sidebar--collapsed .app-sidebar__footer .ant-btn:last-child {
   display: none;
 }
