@@ -2,6 +2,7 @@
   /* 首页审查报告 / 过程流 / 会话历史 共用阅读宽度 */
   --main-content-max-width: 820px;
   --composer-bar-max-width: 900px;
+  --sidebar-width: 230px;
   /*
    * 主输出列底部「可滚动垫高」：给固定底栏留出空白，避免挡住导出/点赞。
    * 仅影响整页滚到**最底部**时多出来的空白高度；不改输入框高度、也不改首屏布局。
@@ -192,6 +193,10 @@ body {
 
 .app-sidebar--collapsed {
   width: 48px;
+}
+
+.app-layout:has(.app-sidebar--collapsed) {
+  --sidebar-width: 48px;
 }
 
 .app-sidebar__header {
@@ -463,6 +468,39 @@ body {
   justify-content: center;
 }
 
+/* ── Page header bar ─────────────────────────────────────────────────────── */
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px 8px;
+  border-bottom: 1px solid var(--color-border, #e0e0d8);
+  background: var(--color-bg, #f4f6f2);
+  flex-shrink: 0;
+  min-height: 42px;
+}
+
+.page-header__title {
+  font-size: 14px;
+  font-weight: 650;
+  color: rgba(47, 58, 50, 0.9);
+  letter-spacing: 0.1px;
+}
+
+.page-header__sep {
+  font-size: 13px;
+  color: rgba(47, 58, 50, 0.35);
+}
+
+.page-header__sub {
+  font-size: 13px;
+  color: rgba(47, 58, 50, 0.6);
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Main area next to sidebar */
 .app-main {
   flex: 1;
@@ -492,7 +530,7 @@ body {
 
 .composer-overlay {
   position: fixed;
-  left: 52px;
+  left: var(--sidebar-width, 230px);
   right: 0;
   z-index: 50;
   pointer-events: none;

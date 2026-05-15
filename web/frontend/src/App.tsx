@@ -7,6 +7,7 @@ import {
   Collapse,
   Divider,
   Drawer,
+  Dropdown,
   Form,
   Input,
   InputNumber,
@@ -53,6 +54,7 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   PushpinOutlined,
+  ArrowLeftOutlined,
 } from "@ant-design/icons";
 import {
   apiJson,
@@ -3185,14 +3187,14 @@ export default function App() {
             <div className="app-sidebar__section">
               <Tooltip title={sidebarCollapsed ? "项目审查" : undefined} placement="right">
                 <button
-                  className={`app-sidebar__section-header${appMode === "review" && mainPanel === "analyze" && !chatsOpen ? " app-sidebar__section-header--active" : ""}`}
+                  className={`app-sidebar__section-header${appMode === "review" && mainPanel === "analyze" && reviewMainTab === "analyze" ? " app-sidebar__section-header--active" : ""}`}
                   onClick={() => { setAppMode("review"); setChatsOpen(false); setMainPanel("analyze"); setReviewMainTab("analyze"); }}
                 >
                   <AuditOutlined />
                   <span className="app-sidebar__label">项目审查</span>
                 </button>
               </Tooltip>
-              {!sidebarCollapsed && appMode === "review" && mainPanel === "analyze" && !chatsOpen && (
+              {!sidebarCollapsed && appMode === "review" && mainPanel === "analyze" && reviewMainTab === "analyze" && !chatsOpen && (
                 <div className="app-sidebar__session-list">
                   {conversations.slice(0, 8).map((c) => {
                     const { headline } = conversationListDisplay(c);
@@ -3322,8 +3324,13 @@ export default function App() {
 
           {chatsOpen && appMode === "review" ? (
             <div className="chat-history-page">
+              <div className="page-header" style={{ marginBottom: 0 }}>
+                <Button type="text" size="small" icon={<ArrowLeftOutlined />}
+                  onClick={() => setChatsOpen(false)} title="返回" style={{ marginRight: 4 }} />
+                <span className="page-header__title">所有审查会话</span>
+              </div>
               <div className="chat-history-toolbar">
-                <Title level={4} className="chat-history-title">所有审查会话</Title>
+                <div />
                 <Button type="default" icon={<PlusOutlined />} onClick={startNewConversationPage}>新对话</Button>
               </div>
               <Input
@@ -3397,9 +3404,9 @@ export default function App() {
 
           {!chatsOpen && appMode === "review" && mainPanel === "ingest" ? (
             <div style={{ maxWidth: 980, margin: "0 auto", padding: "10px 10px 18px" }}>
-              <Title level={4} style={{ margin: "6px 0 10px" }}>
-                项目初始化
-              </Title>
+              <div className="page-header">
+                <span className="page-header__title">项目初始化</span>
+              </div>
               <Text type="secondary">
                 这里用于注册项目目录并完成文档转换与索引。初始化完成后，请切回“分析”视图进行流式审查与多轮追问。
               </Text>
@@ -3576,6 +3583,15 @@ export default function App() {
             reviewDomainPageNode
           ) : !chatsOpen && appMode === "review" && showMainOutput ? (
             <>
+              <div className="page-header">
+                <span className="page-header__title">项目审查</span>
+                {initializedProjects.find((p) => p.id === selectedId)?.name && (
+                  <>
+                    <span className="page-header__sep">·</span>
+                    <span className="page-header__sub">{initializedProjects.find((p) => p.id === selectedId)?.name}</span>
+                  </>
+                )}
+              </div>
               <div className="pipeline-output-panel pipeline-output-panel--footer-clear">
                 {pipelineRunning && lastSubmittedUserMessage?.text ? (
                   <div className="pipeline-output-intro">
@@ -4409,12 +4425,19 @@ export default function App() {
       {!chatsOpen && appMode === "review" && mainPanel === "analyze" ? (
         <>
           {reviewMainTab === "result_review" ? (
-            <div style={{ padding: "0 24px", maxWidth: 980, margin: "0 auto", width: "100%" }}>
-              <ReviewQueueTab
-                onStartExtraction={(item) => {
-                  void handleStartFromReviewQueue(item);
-                }}
-              />
+            <div style={{ maxWidth: 980, margin: "0 auto", width: "100%" }}>
+              <div className="page-header">
+                <Button type="text" size="small" icon={<ArrowLeftOutlined />}
+                  onClick={() => setReviewMainTab("analyze")} title="返回" style={{ marginRight: 4 }} />
+                <span className="page-header__title">待批准规则</span>
+              </div>
+              <div style={{ padding: "0 24px" }}>
+                <ReviewQueueTab
+                  onStartExtraction={(item) => {
+                    void handleStartFromReviewQueue(item);
+                  }}
+                />
+              </div>
             </div>
           ) : (
         <div
@@ -4444,36 +4467,58 @@ export default function App() {
                 />
                 <div className="composer-toolbar">
                   <div className="composer-left">
-                    <Select
-                      className="composer-project"
-                      placeholder="选择已初始化项目"
-                      showSearch
-                      value={selectedId != null ? String(selectedId) : undefined}
-                      options={[
-                        ...initializedProjects.map((p) => ({ value: String(p.id), label: p.name })),
-                        { value: "__ingest__", label: "加载项目（需初始化）…" },
-                      ]}
-                      filterOption={(input, opt) => String(opt?.label || "").toLowerCase().includes(String(input || "").toLowerCase())}
-                      onChange={(v) => {
-                        if (v === "__ingest__") {
-                          setChatsOpen(false);
-                          setMainPanel("ingest");
-                          return;
-                        }
-                        const pid = Number(v);
-                        if (!Number.isFinite(pid)) return;
-                        setSelectedId(pid);
-                        setProjectViewOnlyReason("");
-                        setCorpusStaleReason("");
-                      }}
-                    />
+                    {/* "+" dropdown for project selection and other actions */}
+                    <Dropdown
+                      trigger={["click"]}
+                      placement="topLeft"
+                      dropdownRender={() => (
+                        <div style={{
+                          background: "#fff", border: "1px solid #e0e0d8", borderRadius: 10,
+                          padding: "10px 12px", minWidth: 240,
+                          boxShadow: "0 4px 16px rgba(0,0,0,0.10)",
+                        }}>
+                          <div style={{ fontSize: 11, color: "#999", marginBottom: 6 }}>选择项目</div>
+                          <Select
+                            size="small"
+                            placeholder="选择已初始化项目"
+                            showSearch
+                            value={selectedId != null ? String(selectedId) : undefined}
+                            options={[
+                              ...initializedProjects.map((p) => ({ value: String(p.id), label: p.name })),
+                            ]}
+                            filterOption={(input, opt) => String(opt?.label || "").toLowerCase().includes(String(input || "").toLowerCase())}
+                            onChange={(v) => {
+                              const pid = Number(v);
+                              if (!Number.isFinite(pid)) return;
+                              setSelectedId(pid);
+                              setProjectViewOnlyReason("");
+                              setCorpusStaleReason("");
+                            }}
+                            style={{ width: "100%" }}
+                          />
+                          <div style={{ marginTop: 8, borderTop: "1px solid #f0f0f0", paddingTop: 8 }}>
+                            <Button type="text" size="small" icon={<FolderOpenOutlined />} block
+                              style={{ textAlign: "left", justifyContent: "flex-start" }}
+                              onClick={() => { setChatsOpen(false); setMainPanel("ingest"); }}>
+                              初始化新项目
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                    >
+                      <Button size="small" type="text" icon={<PlusOutlined />}
+                        style={{ borderRadius: 6, fontWeight: 600, fontSize: 15 }} title="选择项目 / 更多" />
+                    </Dropdown>
+                    {/* Show selected project name as compact indicator */}
+                    {selectedId != null && initializedProjects.find((p) => p.id === selectedId) && (
+                      <span style={{ fontSize: 12, color: "#527c5e", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {initializedProjects.find((p) => p.id === selectedId)?.name}
+                      </span>
+                    )}
                     {/* 模式 C：不展示预设；由后端 Agent 自动路由关注点组合 */}
                     {!focusPresets.length && settingsDraft.review_domain_path ? (
-                      <Text type="secondary" style={{ fontSize: 11, maxWidth: 360 }}>
-                        无组合预设：后端正在读取{" "}
-                        <Text code>{settingsDraft.review_domain_path}</Text>
-                        。若与预期不符，请检查 <Text code>AIKA_REPO_ROOT</Text> 与 <Text code>AIKA_REVIEW_SKILL_PACKAGES_ROOT</Text>{" "}
-                        或在设置 → 审查域中查看说明。
+                      <Text type="secondary" style={{ fontSize: 11, maxWidth: 240 }}>
+                        无预设（读取 <Text code>{settingsDraft.review_domain_path}</Text>）
                       </Text>
                     ) : null}
                     {/* 深度模式开关 */}

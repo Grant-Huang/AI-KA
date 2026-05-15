@@ -8,7 +8,7 @@ import { ChatWindow } from "./ChatWindow";
 
 import {
   CheckOutlined, ClockCircleOutlined, CloseOutlined, DeleteOutlined, InboxOutlined,
-  PaperClipOutlined, PlusOutlined, ReloadOutlined, WarningOutlined,
+  PaperClipOutlined, PlusOutlined, ReloadOutlined, RetweetOutlined, WarningOutlined,
 } from "@ant-design/icons";
 import type {
   ExtractionSession, PendingRuleItem, ReviewQueueItem,
@@ -81,7 +81,7 @@ function ChatArea({
     <div style={{
       border: "1px solid var(--color-border, #e0e0d8)", borderRadius: 8,
       background: "var(--color-bg-card, #fff)",
-      minHeight: 200, maxHeight: 420, overflowY: "auto",
+      flex: 1, overflow: "hidden", display: "flex", flexDirection: "column",
     }}>
       <ChatWindow<ChatMsg>
         messages={messages}
@@ -143,6 +143,7 @@ function ChatArea({
           }
           return null;
         }}
+        style={{ flex: 1, overflowY: "auto", padding: "12px 14px", maxWidth: "none", margin: 0 }}
       />
     </div>
   );
@@ -373,86 +374,102 @@ function ExpertQATab({
   };
 
   return (
-    <div style={{ padding: "16px 0" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", padding: "12px 16px" }}>
       {materialId && docName && (
         <Tag closable onClose={() => { setMaterialId(null); setDocName(""); }}
-          icon={<PaperClipOutlined />} style={{ marginBottom: 10 }}>
+          icon={<PaperClipOutlined />} style={{ marginBottom: 8, flexShrink: 0 }}>
           {docName}
         </Tag>
       )}
 
-      <ChatArea
-        messages={messages}
-        streaming={streaming}
-        onStrategyChoose={(opt) => void handleStrategySelect(opt)}
-        onClarify={(text) => void handleClarifyChoice(text)}
-      />
+      {/* Chat area fills available height */}
+      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", marginBottom: 10 }}>
+        <ChatArea
+          messages={messages}
+          streaming={streaming}
+          onStrategyChoose={(opt) => void handleStrategySelect(opt)}
+          onClarify={(text) => void handleClarifyChoice(text)}
+        />
+      </div>
 
-      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-        <div style={{ flex: 1 }}>
-          <div style={{
-            border: "1px solid var(--color-border, #e0e0d8)", borderRadius: 10,
-            background: "#fff", overflow: "hidden",
-          }}>
-            <TextArea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void handleSend(); }
-              }}
-              placeholder={
-                isPostReview
-                  ? "描述遗漏的问题或补充发现（Shift+Enter 换行）"
-                  : "输入 A / B / C / D，或直接说你想聊的…（Shift+Enter 换行）"
+      {/* Input box pinned at bottom */}
+      <div style={{ flexShrink: 0 }}>
+        <div style={{
+          border: "1px solid var(--color-border, #e0e0d8)", borderRadius: 10,
+          background: "#fff", overflow: "hidden",
+        }}>
+          <TextArea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void handleSend(); }
+            }}
+            placeholder={
+              isPostReview
+                ? "描述遗漏的问题或补充发现（Shift+Enter 换行）"
+                : "输入 A / B / C / D，或直接说你想聊的…（Shift+Enter 换行）"
+            }
+            autoSize={{ minRows: 2, maxRows: 6 }}
+            disabled={streaming}
+            style={{ border: "none", boxShadow: "none", resize: "none", padding: "10px 12px" }}
+          />
+          {/* Input toolbar */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 8px 6px" }}>
+            <div style={{ display: "flex", gap: 4 }}>
+              {!isPostReview && (
+                <Tooltip
+                  trigger="click"
+                  placement="topLeft"
+                  title={
+                    <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: "2px 0" }}>
+                      <Upload accept=".md,.html" beforeUpload={(file) => { void handleUpload(file); return false; }}
+                        showUploadList={false} disabled={uploading || streaming}>
+                        <div style={{
+                          display: "flex", alignItems: "center", gap: 8, padding: "6px 10px",
+                          cursor: "pointer", borderRadius: 6, color: "#fff", fontSize: 13,
+                          whiteSpace: "nowrap",
+                        }}
+                          onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.15)")}
+                          onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                        >
+                          <PaperClipOutlined />
+                          <span>{uploading ? "上传中…" : "上传规则文档 (.md/.html)"}</span>
+                        </div>
+                      </Upload>
+                    </div>
+                  }
+                  overlayInnerStyle={{ padding: "4px 0" }}
+                >
+                  <Button size="small" type="text" icon={<PlusOutlined />}
+                    style={{ borderRadius: 6, fontWeight: 600, fontSize: 15 }}
+                    title="更多操作" disabled={streaming} />
+                </Tooltip>
+              )}
+              {/* 换个方向：mid-session strategy pivot */}
+              {!isPostReview && phase === "chatting" && !streaming && (
+                <Tooltip title="换个方向" placement="top">
+                  <Button size="small" type="text" icon={<RetweetOutlined />}
+                    style={{ borderRadius: 6 }}
+                    onClick={() => {
+                      setMessages((prev) => [
+                        ...prev.filter((m) => m.role !== "choices"),
+                        { role: "choices", options: STRATEGY_OPTIONS },
+                      ]);
+                    }}
+                  />
+                </Tooltip>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              {isPostReview && !streaming && messages.filter((m) => m.role !== "status" && m.role !== "assistant").length === 0 ? (
+                <Button type="primary" size="small" onClick={() => void handlePostReviewStart()}>开始提取</Button>
+              ) : (
+                <Button type="primary" size="small" onClick={() => void handleSend()} disabled={!input.trim() || streaming}>发送</Button>
+              )}
+              {streaming
+                ? <Button danger size="small" onClick={handleStop}>停止</Button>
+                : <Button size="small" onClick={handleReset} disabled={streaming}>清空</Button>
               }
-              autoSize={{ minRows: 2, maxRows: 6 }}
-              disabled={streaming}
-              style={{ border: "none", boxShadow: "none", resize: "none", padding: "10px 12px" }}
-            />
-            {/* Input toolbar */}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 8px 6px" }}>
-              <div style={{ display: "flex", gap: 4 }}>
-                {!isPostReview && (
-                  <Tooltip
-                    trigger="click"
-                    placement="topLeft"
-                    title={
-                      <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: "2px 0" }}>
-                        <Upload accept=".md,.html" beforeUpload={(file) => { void handleUpload(file); return false; }}
-                          showUploadList={false} disabled={uploading || streaming}>
-                          <div style={{
-                            display: "flex", alignItems: "center", gap: 8, padding: "6px 10px",
-                            cursor: "pointer", borderRadius: 6, color: "#fff", fontSize: 13,
-                            whiteSpace: "nowrap",
-                          }}
-                            onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.15)")}
-                            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                          >
-                            <PaperClipOutlined />
-                            <span>{uploading ? "上传中…" : "上传规则文档 (.md/.html)"}</span>
-                          </div>
-                        </Upload>
-                      </div>
-                    }
-                    overlayInnerStyle={{ padding: "4px 0" }}
-                  >
-                    <Button size="small" type="text" icon={<PlusOutlined />}
-                      style={{ borderRadius: 6, fontWeight: 600, fontSize: 15 }}
-                      title="更多操作" disabled={streaming} />
-                  </Tooltip>
-                )}
-              </div>
-              <div style={{ display: "flex", gap: 6 }}>
-                {isPostReview && !streaming && messages.filter((m) => m.role !== "status" && m.role !== "assistant").length === 0 ? (
-                  <Button type="primary" size="small" onClick={() => void handlePostReviewStart()}>开始提取</Button>
-                ) : (
-                  <Button type="primary" size="small" onClick={() => void handleSend()} disabled={!input.trim() || streaming}>发送</Button>
-                )}
-                {streaming
-                  ? <Button danger size="small" onClick={handleStop}>停止</Button>
-                  : <Button size="small" onClick={handleReset} disabled={streaming}>清空</Button>
-                }
-              </div>
             </div>
           </div>
         </div>
@@ -719,57 +736,73 @@ export default function ExtractionPage() {
     void appendExtractionMessages(sid, msgs).then(() => loadSessions());
   };
 
+  const currentSession = sessions.find((s) => s.id === currentSessionId) ?? null;
+
   return (
-    <div className="extraction-page" style={{ display: "flex", height: "100%", overflow: "hidden" }}>
-      {/* ── Left session sidebar ── */}
-      <div style={{
-        width: 200, flexShrink: 0, borderRight: "1px solid var(--color-border, #e0e0d8)",
-        display: "flex", flexDirection: "column", overflow: "hidden",
-        background: "var(--color-bg-sidebar, #f7f7f3)",
-      }}>
-        <div style={{
-          padding: "12px 10px 8px", display: "flex", alignItems: "center", justifyContent: "space-between",
-          borderBottom: "1px solid var(--color-border, #e0e0d8)",
-        }}>
-          <Text strong style={{ fontSize: 13 }}>会话历史</Text>
-          <Button size="small" icon={<PlusOutlined />} onClick={handleNewSession} title="新会话" />
-        </div>
-        <div style={{ flex: 1, overflowY: "auto", padding: "6px 6px 8px" }}>
-          {sessions.length === 0 ? (
-            <Text type="secondary" style={{ fontSize: 12, padding: "8px 4px", display: "block" }}>暂无历史会话</Text>
-          ) : sessions.map((s) => (
-            <div key={s.id} onClick={() => void handleSelectSession(s.id)} style={{
-              padding: "7px 8px 7px 10px", borderRadius: 6, cursor: "pointer", marginBottom: 2,
-              background: s.id === currentSessionId ? "rgba(82,124,94,0.12)" : "transparent",
-              borderLeft: s.id === currentSessionId ? "3px solid #527c5e" : "3px solid transparent",
-              position: "relative",
-            }}>
-              <div style={{ fontSize: 13, fontWeight: s.id === currentSessionId ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", paddingRight: 20 }}>
-                {s.title}
-              </div>
-              <div style={{ fontSize: 11, color: "#999", marginTop: 2 }}>
-                <ClockCircleOutlined style={{ marginRight: 3 }} />
-                {s.updated_at.slice(0, 16).replace("T", " ")}
-              </div>
-              <Button type="text" icon={<CloseOutlined />} size="small"
-                style={{ position: "absolute", top: 4, right: 2, opacity: 0.5 }}
-                onClick={(e) => handleDeleteSession(s.id, e)}
-              />
-            </div>
-          ))}
-        </div>
+    <div className="extraction-page" style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+      {/* ── Page header ── */}
+      <div className="page-header">
+        <span className="page-header__title">知识归纳</span>
+        {currentSession && (
+          <>
+            <span className="page-header__sep">·</span>
+            <span className="page-header__sub">{currentSession.title}</span>
+          </>
+        )}
       </div>
 
-      {/* ── Main content (no tabs) ── */}
-      <div style={{ flex: 1, overflow: "auto", padding: "0 4px" }}>
-        <ExpertQATab
-          key={sessionKey}
-          postReviewCtx={postReviewCtx}
-          preloadMessages={preloadMessages}
-          sessionId={currentSessionId}
-          onFirstMessage={handleFirstMessage}
-          onRoundComplete={handleRoundComplete}
-        />
+      {/* ── Two-column content ── */}
+      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+        {/* Left session sidebar */}
+        <div style={{
+          width: 200, flexShrink: 0, borderRight: "1px solid var(--color-border, #e0e0d8)",
+          display: "flex", flexDirection: "column", overflow: "hidden",
+          background: "var(--color-bg-sidebar, #f7f7f3)",
+        }}>
+          <div style={{
+            padding: "12px 10px 8px", display: "flex", alignItems: "center", justifyContent: "space-between",
+            borderBottom: "1px solid var(--color-border, #e0e0d8)",
+          }}>
+            <Text strong style={{ fontSize: 13 }}>会话历史</Text>
+            <Button size="small" icon={<PlusOutlined />} onClick={handleNewSession} title="新会话" />
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", padding: "6px 6px 8px" }}>
+            {sessions.length === 0 ? (
+              <Text type="secondary" style={{ fontSize: 12, padding: "8px 4px", display: "block" }}>暂无历史会话</Text>
+            ) : sessions.map((s) => (
+              <div key={s.id} onClick={() => void handleSelectSession(s.id)} style={{
+                padding: "7px 8px 7px 10px", borderRadius: 6, cursor: "pointer", marginBottom: 2,
+                background: s.id === currentSessionId ? "rgba(82,124,94,0.12)" : "transparent",
+                borderLeft: s.id === currentSessionId ? "3px solid #527c5e" : "3px solid transparent",
+                position: "relative",
+              }}>
+                <div style={{ fontSize: 13, fontWeight: s.id === currentSessionId ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", paddingRight: 20 }}>
+                  {s.title}
+                </div>
+                <div style={{ fontSize: 11, color: "#999", marginTop: 2 }}>
+                  <ClockCircleOutlined style={{ marginRight: 3 }} />
+                  {s.updated_at.slice(0, 16).replace("T", " ")}
+                </div>
+                <Button type="text" icon={<CloseOutlined />} size="small"
+                  style={{ position: "absolute", top: 4, right: 2, opacity: 0.5 }}
+                  onClick={(e) => handleDeleteSession(s.id, e)}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Main content */}
+        <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+          <ExpertQATab
+            key={sessionKey}
+            postReviewCtx={postReviewCtx}
+            preloadMessages={preloadMessages}
+            sessionId={currentSessionId}
+            onFirstMessage={handleFirstMessage}
+            onRoundComplete={handleRoundComplete}
+          />
+        </div>
       </div>
     </div>
   );
