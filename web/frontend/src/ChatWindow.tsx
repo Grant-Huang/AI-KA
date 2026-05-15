@@ -1,5 +1,6 @@
-import React, { ReactNode, useEffect, useRef } from "react";
-import { Spin } from "antd";
+import React, { ReactNode, useEffect, useRef, useState } from "react";
+import { Spin, message as antdMsg } from "antd";
+import { CopyOutlined, LikeOutlined, DislikeOutlined, ReloadOutlined } from "@ant-design/icons";
 import { ThinkableMarkdown } from "./SimpleMarkdown";
 
 export interface ChatWindowMsg {
@@ -13,6 +14,7 @@ interface ChatWindowProps<T extends ChatWindowMsg> {
   messages: T[];
   isStreaming?: boolean;
   renderSpecialMsg?: (msg: T, index: number) => ReactNode | null | undefined;
+  onRegenerate?: (index: number) => void;
   style?: React.CSSProperties;
   className?: string;
   "aria-label"?: string;
@@ -22,21 +24,57 @@ function formatMsgTime(ts: string): string {
   try {
     const d = new Date(ts.trim().replace(" ", "T"));
     if (!Number.isNaN(d.getTime())) {
-      return d.toLocaleString("zh-CN", {
-        month: "2-digit", day: "2-digit",
-        hour: "2-digit", minute: "2-digit",
-      });
+      return d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
     }
-  } catch {
-    // ignore
-  }
+  } catch { /* ignore */ }
   return ts;
+}
+
+function AssistantActions({
+  content,
+  index,
+  onRegenerate,
+}: {
+  content: string;
+  index: number;
+  onRegenerate?: (i: number) => void;
+}) {
+  const [liked, setLiked] = useState<"like" | "dislike" | null>(null);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(content);
+      antdMsg.success("已复制", 1.5);
+    } catch {
+      antdMsg.error("复制失败");
+    }
+  };
+
+  return (
+    <div className="chat-bubble__actions">
+      <CopyOutlined title="复制" onClick={handleCopy} />
+      <LikeOutlined
+        title="有帮助"
+        className={liked === "like" ? "active" : ""}
+        onClick={() => setLiked((v) => (v === "like" ? null : "like"))}
+      />
+      <DislikeOutlined
+        title="没帮助"
+        className={liked === "dislike" ? "active" : ""}
+        onClick={() => setLiked((v) => (v === "dislike" ? null : "dislike"))}
+      />
+      {onRegenerate && (
+        <ReloadOutlined title="重新生成" onClick={() => onRegenerate(index)} />
+      )}
+    </div>
+  );
 }
 
 export function ChatWindow<T extends ChatWindowMsg>({
   messages,
   isStreaming = false,
   renderSpecialMsg,
+  onRegenerate,
   style,
   className,
   "aria-label": ariaLabel,
@@ -54,45 +92,62 @@ export function ChatWindow<T extends ChatWindowMsg>({
 
   return (
     <div
-      className={`conv-thread${className ? ` ${className}` : ""}`}
+      className={`chat-thread${className ? ` ${className}` : ""}`}
       style={style}
       aria-label={ariaLabel}
     >
       {messages.map((msg, i) => {
         const special = renderSpecialMsg?.(msg, i);
         if (special != null) {
-          return <div key={msg.id ?? i}>{special}</div>;
+          return <div key={msg.id ?? i} className="chat-bubble-row">{special}</div>;
         }
 
         if (msg.role === "status") {
           return (
-            <div key={msg.id ?? i} style={{ padding: "2px 6px" }}>
-              <span style={{ fontSize: 12, color: "rgba(47,58,50,0.55)" }}>{msg.content}</span>
+            <div key={msg.id ?? i} className="chat-status-line">
+              {msg.content}
             </div>
           );
         }
 
         const isUser = msg.role === "user";
+        const isAssistant = msg.role === "assistant";
+        const isLast = i === messages.length - 1;
+
         return (
-          <div key={msg.id ?? i} className="conv-msg">
-            <div className="conv-msg-role">{isUser ? "用户" : "助手"}</div>
-            <div className={`conv-msg-body${isUser ? " conv-msg-body--user" : ""}`}>
-              {msg.created_at && (
-                <div className="conv-msg-meta">{formatMsgTime(msg.created_at)}</div>
-              )}
-              {isUser ? (
-                <div className="conv-msg-plain">{String(msg.content ?? "")}</div>
-              ) : (
+          <div key={msg.id ?? i} className={`chat-bubble-row${isUser ? " chat-bubble-row--user" : " chat-bubble-row--assistant"}`}>
+            {isUser ? (
+              <div className="chat-bubble chat-bubble--user">
+                {msg.created_at && (
+                  <div className="chat-bubble__meta">{formatMsgTime(msg.created_at)}</div>
+                )}
+                <div className="chat-bubble__text">{String(msg.content ?? "")}</div>
+              </div>
+            ) : isAssistant ? (
+              <div className="chat-bubble chat-bubble--assistant">
+                {msg.created_at && (
+                  <div className="chat-bubble__meta">{formatMsgTime(msg.created_at)}</div>
+                )}
                 <ThinkableMarkdown markdown={String(msg.content ?? "")} />
-              )}
-            </div>
+                {/* Show actions when not streaming, or streaming on non-last assistant */}
+                {(!isStreaming || !isLast) && (
+                  <AssistantActions
+                    content={String(msg.content ?? "")}
+                    index={i}
+                    onRegenerate={onRegenerate}
+                  />
+                )}
+              </div>
+            ) : null}
           </div>
         );
       })}
       {isStreaming && lastAssistantIdx < 0 && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
-          <Spin size="small" />
-          <span style={{ fontSize: 12, color: "rgba(47,58,50,0.55)" }}>Agent思考中...</span>
+        <div className="chat-bubble-row chat-bubble-row--assistant">
+          <div className="chat-thinking">
+            <Spin size="small" />
+            <span>Agent思考中...</span>
+          </div>
         </div>
       )}
       <div ref={bottomRef} />

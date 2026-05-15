@@ -616,6 +616,7 @@ export interface ExtractionSession {
   created_at: string;
   updated_at: string;
   message_count: number;
+  starred: boolean;
 }
 
 export const listExtractionSessions = () =>
@@ -634,6 +635,24 @@ export const getExtractionSessionMessages = (sid: number) =>
 
 export const deleteExtractionSession = (sid: number) =>
   apiJson<{ ok: boolean }>(`/api/v1/extraction/sessions/${sid}`, { method: "DELETE" });
+
+export const patchExtractionSession = (
+  sid: number,
+  data: { title?: string; starred?: boolean },
+) =>
+  apiJson<{ ok: boolean }>(`/api/v1/extraction/sessions/${sid}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+
+export const generateExtractionSessionTitle = (
+  sid: number,
+  messages: Array<{ role: string; content: string }>,
+) =>
+  apiJson<{ title: string }>(`/api/v1/extraction/sessions/${sid}/generate-title`, {
+    method: "POST",
+    body: JSON.stringify({ messages }),
+  });
 
 export const appendExtractionMessages = (
   sid: number,

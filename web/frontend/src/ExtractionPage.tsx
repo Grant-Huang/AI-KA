@@ -1,14 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Alert, Badge, Button, Card, Empty, Input,
+  Alert, Badge, Button, Card, Dropdown, Empty, Input,
   Modal, Space, Table, Tag,
   Tooltip, Typography, Upload, message,
 } from "antd";
 import { ChatWindow } from "./ChatWindow";
 
 import {
-  CheckOutlined, ClockCircleOutlined, CloseOutlined, DeleteOutlined, InboxOutlined,
-  PaperClipOutlined, PlusOutlined, ReloadOutlined, RetweetOutlined, WarningOutlined,
+  CheckOutlined, ClockCircleOutlined, CloseOutlined, DeleteOutlined, EditOutlined,
+  EllipsisOutlined, InboxOutlined, PaperClipOutlined, PlusOutlined,
+  ReloadOutlined, RetweetOutlined, StarFilled, StarOutlined, WarningOutlined,
 } from "@ant-design/icons";
 import type {
   ExtractionSession, PendingRuleItem, ReviewQueueItem,
@@ -16,10 +17,11 @@ import type {
 import {
   appendExtractionMessages, approvePendingRule, createExtractionSession,
   deleteExtractionSession, deleteReviewQueueItem,
+  generateExtractionSessionTitle,
   getExtractionSessionMessages, getPendingRules, getReviewQueue,
-  listExtractionSessions, patchReviewQueueItem, postActiveExtractionStream,
-  postDocExtractionStream, postReviewExtractionStream, rejectPendingRule,
-  uploadExtractionMaterial,
+  listExtractionSessions, patchExtractionSession, patchReviewQueueItem,
+  postActiveExtractionStream, postDocExtractionStream, postReviewExtractionStream,
+  rejectPendingRule, uploadExtractionMaterial,
 } from "./api";
 import SimpleMarkdown from "./SimpleMarkdown";
 
@@ -162,7 +164,7 @@ function ExpertQATab({
   preloadMessages: ChatMsg[];
   sessionId: number | null;
   onFirstMessage: (title: string, strategy: string) => Promise<number>;
-  onRoundComplete: (sid: number, messages: Array<{ role: string; content: string }>) => void;
+  onRoundComplete: (sid: number, messages: Array<{ role: string; content: string }>, roundNum: number) => void;
 }) {
   const [phase, setPhase] = useState<"choosing" | "chatting">("choosing");
   const [strategy, setStrategy] = useState("gap_based");
@@ -306,7 +308,7 @@ function ExpertQATab({
           { role: "user", content: userText },
         ];
         if (fullAssistant) toSave.push({ role: "assistant", content: fullAssistant });
-        onRoundComplete(sid, toSave);
+        onRoundComplete(sid, toSave, roundNumber);
       }
     } catch (e) {
       if ((e as Error)?.name !== "AbortError") {
@@ -422,7 +424,7 @@ function ExpertQATab({
                   placement="topLeft"
                   title={
                     <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: "2px 0" }}>
-                      <Upload accept=".md,.html" beforeUpload={(file) => { void handleUpload(file); return false; }}
+                      <Upload accept=".md,.html,.htm,.txt,.docx,.pdf,.xlsx,.csv,.pptx" beforeUpload={(file) => { void handleUpload(file); return false; }}
                         showUploadList={false} disabled={uploading || streaming}>
                         <div style={{
                           display: "flex", alignItems: "center", gap: 8, padding: "6px 10px",
@@ -433,7 +435,7 @@ function ExpertQATab({
                           onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                         >
                           <PaperClipOutlined />
-                          <span>{uploading ? "上传中…" : "上传规则文档 (.md/.html)"}</span>
+                          <span>{uploading ? "上传中…" : "上传参考文档"}</span>
                         </div>
                       </Upload>
                     </div>
@@ -670,6 +672,13 @@ export default function ExtractionPage() {
   const [preloadMessages, setPreloadMessages] = useState<ChatMsg[]>([]);
   const [sessionKey, setSessionKey] = useState(0);
 
+  // Rename state
+  const [renameTargetId, setRenameTargetId] = useState<number | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+
+  // Accumulated messages for title generation
+  const accumulatedMsgsRef = useRef<Array<{ role: string; content: string }>>([]);
+
   useEffect(() => {
     const raw = window.sessionStorage.getItem("aika_post_review_ctx");
     if (raw) {
@@ -694,6 +703,7 @@ export default function ExtractionPage() {
     setCurrentSessionId(null);
     setPreloadMessages([]);
     setSessionKey((k) => k + 1);
+    accumulatedMsgsRef.current = [];
   };
 
   const handleSelectSession = async (sid: number) => {
@@ -725,15 +735,39 @@ export default function ExtractionPage() {
     });
   };
 
+  const handleStarSession = async (sid: number, starred: boolean) => {
+    try {
+      await patchExtractionSession(sid, { starred });
+      await loadSessions();
+    } catch { /* ignore */ }
+  };
+
+  const handleRenameSubmit = async () => {
+    const name = renameValue.trim();
+    if (!name || renameTargetId === null) { setRenameTargetId(null); return; }
+    try {
+      await patchExtractionSession(renameTargetId, { title: name });
+      await loadSessions();
+    } catch { /* ignore */ }
+    setRenameTargetId(null);
+  };
+
   const handleFirstMessage = async (title: string, strat: string): Promise<number> => {
+    accumulatedMsgsRef.current = [];
     const s = await createExtractionSession(title, strat);
     setCurrentSessionId(s.id);
     void loadSessions();
     return s.id;
   };
 
-  const handleRoundComplete = (sid: number, msgs: Array<{ role: string; content: string }>) => {
-    void appendExtractionMessages(sid, msgs).then(() => loadSessions());
+  const handleRoundComplete = (sid: number, msgs: Array<{ role: string; content: string }>, roundNum: number) => {
+    accumulatedMsgsRef.current = [...accumulatedMsgsRef.current, ...msgs];
+    void appendExtractionMessages(sid, msgs).then(() => void loadSessions());
+    if (roundNum === 5) {
+      void generateExtractionSessionTitle(sid, accumulatedMsgsRef.current)
+        .then(() => void loadSessions())
+        .catch(() => {});
+    }
   };
 
   const currentSession = sessions.find((s) => s.id === currentSessionId) ?? null;
@@ -754,39 +788,76 @@ export default function ExtractionPage() {
       {/* ── Two-column content ── */}
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
         {/* Left session sidebar */}
-        <div style={{
-          width: 200, flexShrink: 0, borderRight: "1px solid var(--color-border, #e0e0d8)",
-          display: "flex", flexDirection: "column", overflow: "hidden",
-          background: "var(--color-bg-sidebar, #f7f7f3)",
-        }}>
-          <div style={{
-            padding: "12px 10px 8px", display: "flex", alignItems: "center", justifyContent: "space-between",
-            borderBottom: "1px solid var(--color-border, #e0e0d8)",
-          }}>
-            <Text strong style={{ fontSize: 13 }}>会话历史</Text>
+        <div className="session-col">
+          <div className="session-col__header">
+            <Text strong style={{ fontSize: 13 }}>知识归纳</Text>
             <Button size="small" icon={<PlusOutlined />} onClick={handleNewSession} title="新会话" />
           </div>
-          <div style={{ flex: 1, overflowY: "auto", padding: "6px 6px 8px" }}>
+          <div className="session-col__list">
             {sessions.length === 0 ? (
               <Text type="secondary" style={{ fontSize: 12, padding: "8px 4px", display: "block" }}>暂无历史会话</Text>
             ) : sessions.map((s) => (
-              <div key={s.id} onClick={() => void handleSelectSession(s.id)} style={{
-                padding: "7px 8px 7px 10px", borderRadius: 6, cursor: "pointer", marginBottom: 2,
-                background: s.id === currentSessionId ? "rgba(82,124,94,0.12)" : "transparent",
-                borderLeft: s.id === currentSessionId ? "3px solid #527c5e" : "3px solid transparent",
-                position: "relative",
-              }}>
-                <div style={{ fontSize: 13, fontWeight: s.id === currentSessionId ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", paddingRight: 20 }}>
-                  {s.title}
+              <div
+                key={s.id}
+                className={`session-item${s.id === currentSessionId ? " session-item--active" : ""}`}
+                onClick={() => void handleSelectSession(s.id)}
+              >
+                {s.starred && <span className="session-item__star"><StarFilled /></span>}
+                <div className="session-item__body">
+                  <Tooltip title={s.title} placement="right" mouseEnterDelay={0.5}>
+                    <div className="session-item__title">{s.title}</div>
+                  </Tooltip>
+                  <div className="session-item__time">
+                    <ClockCircleOutlined style={{ marginRight: 3 }} />
+                    {s.updated_at.slice(0, 16).replace("T", " ")}
+                  </div>
                 </div>
-                <div style={{ fontSize: 11, color: "#999", marginTop: 2 }}>
-                  <ClockCircleOutlined style={{ marginRight: 3 }} />
-                  {s.updated_at.slice(0, 16).replace("T", " ")}
-                </div>
-                <Button type="text" icon={<CloseOutlined />} size="small"
-                  style={{ position: "absolute", top: 4, right: 2, opacity: 0.5 }}
-                  onClick={(e) => handleDeleteSession(s.id, e)}
-                />
+                <Dropdown
+                  trigger={["click"]}
+                  placement="bottomRight"
+                  menu={{
+                    items: [
+                      {
+                        key: "star",
+                        label: s.starred ? "取消收藏" : "收藏",
+                        icon: s.starred ? <StarFilled style={{ color: "#f59e0b" }} /> : <StarOutlined />,
+                        onClick: ({ domEvent }) => {
+                          domEvent.stopPropagation();
+                          void handleStarSession(s.id, !s.starred);
+                        },
+                      },
+                      {
+                        key: "rename",
+                        label: "重命名",
+                        icon: <EditOutlined />,
+                        onClick: ({ domEvent }) => {
+                          domEvent.stopPropagation();
+                          setRenameTargetId(s.id);
+                          setRenameValue(s.title);
+                        },
+                      },
+                      { type: "divider" as const },
+                      {
+                        key: "delete",
+                        label: "删除",
+                        icon: <DeleteOutlined />,
+                        danger: true,
+                        onClick: ({ domEvent }) => {
+                          domEvent.stopPropagation();
+                          handleDeleteSession(s.id, domEvent as unknown as React.MouseEvent);
+                        },
+                      },
+                    ],
+                  }}
+                >
+                  <Button
+                    type="text"
+                    size="small"
+                    className="session-item__menu"
+                    icon={<EllipsisOutlined />}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                </Dropdown>
               </div>
             ))}
           </div>
@@ -804,6 +875,24 @@ export default function ExtractionPage() {
           />
         </div>
       </div>
+
+      {/* Rename modal */}
+      <Modal
+        title="重命名会话"
+        open={renameTargetId !== null}
+        onCancel={() => setRenameTargetId(null)}
+        onOk={() => void handleRenameSubmit()}
+        okText="保存"
+        cancelText="取消"
+      >
+        <Input
+          value={renameValue}
+          onChange={(e) => setRenameValue(e.target.value)}
+          onPressEnter={() => void handleRenameSubmit()}
+          maxLength={60}
+          autoFocus
+        />
+      </Modal>
     </div>
   );
 }
