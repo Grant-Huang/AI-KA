@@ -50,6 +50,9 @@ import {
   LogoutOutlined,
   TagOutlined,
   PaperClipOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
+  PushpinOutlined,
 } from "@ant-design/icons";
 import {
   apiJson,
@@ -548,6 +551,9 @@ export default function App() {
   const [newConversationOpen, setNewConversationOpen] = useState(false);
   const [chatsOpen, setChatsOpen] = useState(false);
   const [chatSearchQuery, setChatSearchQuery] = useState("");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem("aika_sidebar_collapsed") === "1"
+  );
   const [analysisTypeDraft, setAnalysisTypeDraft] = useState("KA");
   const [draftText, setDraftText] = useState("");
   /** 为 true 后不再显示「目的：」占位，直至 composer_hint 从服务端变化 */
@@ -3148,103 +3154,203 @@ export default function App() {
     );
   }
 
+  const toggleSidebar = () => {
+    setSidebarCollapsed((v) => {
+      localStorage.setItem("aika_sidebar_collapsed", v ? "0" : "1");
+      return !v;
+    });
+  };
+
   return (
     <div className={`app-layout${isStandalone ? " app-layout--standalone" : ""}`}>
-      <div className="side-nav">
-        <Button
-          type="text"
-          className={`side-nav-btn${appMode === "review" ? " side-nav-btn--active" : ""}`}
-          icon={<AuditOutlined />}
-          title="项目审查"
-          onClick={() => setAppMode("review")}
-        />
-        <Button
-          type="text"
-          className={`side-nav-btn${appMode === "extraction" ? " side-nav-btn--active" : ""}`}
-          icon={<BulbOutlined />}
-          title="知识提取"
-          onClick={() => {
-            setAppMode("extraction");
-            setChatsOpen(false);
-          }}
-        />
-        <div className="side-nav-separator" aria-hidden="true" />
-        {appMode === "review" ? (
-          <>
-            <Button
-              type="text"
-              className="side-nav-btn"
-              icon={<PlusOutlined />}
-              title="新审查会话"
-              onClick={startNewConversationPage}
-            />
-            <Button
-              type="text"
-              className="side-nav-btn"
-              icon={<CommentOutlined />}
-              title="审查历史"
-              onClick={() => setChatsOpen(true)}
-            />
-            <div className="side-nav-separator" aria-hidden="true" />
-            <Button
-              type="text"
-              className="side-nav-btn"
-              icon={<FolderOpenOutlined />}
-              title="项目初始化"
-              onClick={() => {
-                setChatsOpen(false);
-                setMainPanel("ingest");
-              }}
-            />
-            <Button
-              type="text"
-              className="side-nav-btn"
-              icon={<FileSearchOutlined />}
-              title="审查域设定"
-              onClick={() => {
-                setChatsOpen(false);
-                setMainPanel("review_domain");
-                // 进入独立页面时刷新一次，避免显示旧值
-                void loadSettings({ snapshot_chunk_strategy: true });
-              }}
-            />
-            <div className="side-nav-separator" aria-hidden="true" />
-          </>
-        ) : (
-          <></>
-        )}
-        <div className="side-nav-spacer" />
-        <div className="side-nav-bottom">
-          <Button
-            type="text"
-            className="side-nav-btn"
-            icon={<QuestionCircleOutlined />}
-            title="帮助（新窗口）"
-            onClick={() => openStandaloneWindow("help")}
-          />
-          <Button
-            type="text"
-            className="side-nav-btn"
-            icon={<SettingOutlined />}
-            title="设置（新窗口）"
-            onClick={() => openStandaloneWindow("settings")}
-          />
-          <Tooltip
-            title={currentUser ? `${currentUser.display_name}（点击退出登录）` : "未登录"}
-            placement="right"
-          >
-            <Button
-              type="text"
-              className="side-nav-btn"
-              icon={currentUser ? <LogoutOutlined /> : <UserOutlined />}
-              title={currentUser ? "退出登录" : "登录"}
-              onClick={currentUser ? handleLogout : () => setLoginOpen(true)}
-            />
-          </Tooltip>
-        </div>
-      </div>
 
-      <div className="app-shell">
+      {/* ── New Sidebar ── */}
+      {!isStandalone && (
+        <div className={`app-sidebar${sidebarCollapsed ? " app-sidebar--collapsed" : ""}`}>
+          {/* Header */}
+          <div className="app-sidebar__header">
+            {!sidebarCollapsed && <span className="app-sidebar__logo">AI-KA</span>}
+            <Button
+              type="text"
+              size="small"
+              className="app-sidebar__toggle"
+              icon={sidebarCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+              onClick={toggleSidebar}
+              title={sidebarCollapsed ? "展开侧边栏" : "收缩侧边栏"}
+            />
+          </div>
+
+          {/* Actions */}
+          <div className="app-sidebar__actions">
+            <Tooltip title={sidebarCollapsed ? "新建" : undefined} placement="right">
+              <button
+                className="app-sidebar__action-btn"
+                onClick={() => { setAppMode("review"); startNewConversationPage(); setChatsOpen(false); }}
+              >
+                <PlusOutlined />
+                <span>新建</span>
+              </button>
+            </Tooltip>
+            <Tooltip title={sidebarCollapsed ? "搜索" : undefined} placement="right">
+              <button
+                className="app-sidebar__action-btn"
+                onClick={() => { setAppMode("review"); setChatsOpen(true); }}
+              >
+                <SearchOutlined />
+                <span>搜索会话</span>
+              </button>
+            </Tooltip>
+          </div>
+
+          <div className="app-sidebar__divider" />
+
+          {/* Session list body */}
+          <div className="app-sidebar__body">
+            {/* ─ 项目审查 section ─ */}
+            <div className="app-sidebar__section">
+              <Tooltip title={sidebarCollapsed ? "项目审查" : undefined} placement="right">
+                <button
+                  className={`app-sidebar__section-header${appMode === "review" ? " app-sidebar__section-header--active" : ""}`}
+                  onClick={() => { setAppMode("review"); setChatsOpen(false); setMainPanel("analyze"); }}
+                >
+                  <AuditOutlined />
+                  <span>项目审查</span>
+                </button>
+              </Tooltip>
+              {!sidebarCollapsed && appMode === "review" && (
+                <div className="app-sidebar__session-list">
+                  {conversations.slice(0, 8).map((c) => {
+                    const { headline } = conversationListDisplay(c);
+                    const active = c.id === selectedConversationId && mainPanel === "analyze";
+                    return (
+                      <div
+                        key={c.id}
+                        className={`app-sidebar__session-item${active ? " app-sidebar__session-item--active" : ""}`}
+                        onClick={() => {
+                          const pid = c.project_id;
+                          if (typeof pid === "number") setSelectedId(pid);
+                          if (c.project_available === false) {
+                            setProjectViewOnlyReason("项目不可用或已删除：仅可查看历史会话，无法继续审查/追问。");
+                          } else {
+                            setProjectViewOnlyReason("");
+                          }
+                          setMainPanel("analyze");
+                          setSelectedConversationId(c.id);
+                          setChatsOpen(false);
+                        }}
+                      >
+                        <span className="app-sidebar__session-title">{headline}</span>
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<CloseOutlined />}
+                          className="app-sidebar__session-del"
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            const pid = c.project_id;
+                            if (typeof pid !== "number") return;
+                            Modal.confirm({
+                              title: "确认删除会话",
+                              content: `将删除会话「${headline}」。此操作不可撤销。`,
+                              okText: "删除", okButtonProps: { danger: true }, cancelText: "取消",
+                              onOk: async () => {
+                                await deleteConversation(pid, c.id);
+                                setSelectedConversationId((prev) => (prev === c.id ? null : prev));
+                                await loadConversations({ q: chatSearchQuery });
+                              },
+                            });
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
+                  <button
+                    className="app-sidebar__all-link"
+                    onClick={() => { setAppMode("review"); setChatsOpen(true); }}
+                  >
+                    <span>○</span>
+                    <span>所有审查会话</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* ─ 知识提取 section ─ */}
+            <div className="app-sidebar__section">
+              <Tooltip title={sidebarCollapsed ? "知识提取" : undefined} placement="right">
+                <button
+                  className={`app-sidebar__section-header${appMode === "extraction" ? " app-sidebar__section-header--active" : ""}`}
+                  onClick={() => { setAppMode("extraction"); setChatsOpen(false); }}
+                >
+                  <BulbOutlined />
+                  <span>知识提取</span>
+                </button>
+              </Tooltip>
+            </div>
+
+            <div className="app-sidebar__divider" />
+
+            {/* ─ 待批准规则 ─ */}
+            <Tooltip title={sidebarCollapsed ? "待批准规则" : undefined} placement="right">
+              <button
+                className={`app-sidebar__pending${appMode === "extraction" ? " app-sidebar__pending--active" : ""}`}
+                onClick={() => setAppMode("extraction")}
+              >
+                <PushpinOutlined />
+                <span>待批准规则</span>
+              </button>
+            </Tooltip>
+
+            <div className="app-sidebar__divider" />
+
+            {/* ─ Review utilities ─ */}
+            <Tooltip title={sidebarCollapsed ? "项目初始化" : undefined} placement="right">
+              <button
+                className="app-sidebar__action-btn"
+                onClick={() => { setAppMode("review"); setChatsOpen(false); setMainPanel("ingest"); }}
+              >
+                <FolderOpenOutlined />
+                <span>项目初始化</span>
+              </button>
+            </Tooltip>
+            <Tooltip title={sidebarCollapsed ? "审查域设定" : undefined} placement="right">
+              <button
+                className="app-sidebar__action-btn"
+                onClick={() => {
+                  setAppMode("review"); setChatsOpen(false); setMainPanel("review_domain");
+                  void loadSettings({ snapshot_chunk_strategy: true });
+                }}
+              >
+                <FileSearchOutlined />
+                <span>审查域设定</span>
+              </button>
+            </Tooltip>
+          </div>
+
+          {/* Footer */}
+          <div className="app-sidebar__footer">
+            <div className="app-sidebar__user">
+              <UserOutlined />
+              <span>{currentUser?.display_name ?? "未登录"}</span>
+            </div>
+            <div style={{ display: "flex", gap: 2 }}>
+              <Button type="text" size="small" icon={<SettingOutlined />} title="设置" onClick={() => openStandaloneWindow("settings")} />
+              <Button type="text" size="small" icon={currentUser ? <LogoutOutlined /> : <UserOutlined />}
+                title={currentUser ? "退出登录" : "登录"}
+                onClick={currentUser ? handleLogout : () => setLoginOpen(true)} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Main area ── */}
+      <div className="app-main">
+        {appMode === "extraction" ? (
+          <div className="extraction-overlay">
+            <ExtractionPage />
+          </div>
+        ) : (
+        <div className="app-shell">
         <div className="main-surface">
           {reviewDomainError ? (
             <Alert
@@ -3267,12 +3373,8 @@ export default function App() {
           {chatsOpen && appMode === "review" ? (
             <div className="chat-history-page">
               <div className="chat-history-toolbar">
-                <Title level={4} className="chat-history-title">
-                  会话历史
-                </Title>
-                <Button type="default" icon={<PlusOutlined />} onClick={startNewConversationPage}>
-                  新对话
-                </Button>
+                <Title level={4} className="chat-history-title">所有审查会话</Title>
+                <Button type="default" icon={<PlusOutlined />} onClick={startNewConversationPage}>新对话</Button>
               </div>
               <Input
                 allowClear
@@ -3282,15 +3384,6 @@ export default function App() {
                 value={chatSearchQuery}
                 onChange={(e) => setChatSearchQuery(e.target.value)}
               />
-              {selected ? (
-                <Text type="secondary" className="chat-history-project-hint">
-                  当前项目：{displayProjectSubject(selected)}
-                </Text>
-              ) : (
-                <Text type="secondary" className="chat-history-project-hint">
-                  全局会话历史：可直接选择会话打开。
-                </Text>
-              )}
               <div className="chat-history-list" role="list">
                 {filteredConversations.length ? (
                   filteredConversations.map((c) => {
@@ -3316,15 +3409,8 @@ export default function App() {
                         >
                           <div className="chat-history-item-title">{headline}</div>
                           {subline ? <div className="chat-history-item-time">{subline}</div> : null}
-                          {c.project_name ? (
-                            <div className="chat-history-item-time">项目：{String(c.project_name)}</div>
-                          ) : null}
-                          {c.preset_id ? (
-                            <div className="chat-history-item-time">组合：{String(c.preset_id)}</div>
-                          ) : null}
-                          {c.project_available === false ? (
-                            <div className="chat-history-item-time">（项目不可用：仅可回看）</div>
-                          ) : null}
+                          {c.project_name ? <div className="chat-history-item-time">项目：{String(c.project_name)}</div> : null}
+                          {c.project_available === false ? <div className="chat-history-item-time">（项目不可用：仅可回看）</div> : null}
                         </button>
                         <div className="chat-history-item-delete">
                           <Button
@@ -3339,15 +3425,10 @@ export default function App() {
                               Modal.confirm({
                                 title: "确认删除会话",
                                 content: `将删除会话「${headline}」。此操作不可撤销。`,
-                                okText: "删除",
-                                okButtonProps: { danger: true },
-                                cancelText: "取消",
+                                okText: "删除", okButtonProps: { danger: true }, cancelText: "取消",
                                 onOk: async () => {
                                   await deleteConversation(pid, c.id);
-                                  message.success("会话已删除");
-                                  // 若删的是当前会话，回到空白会话页
                                   setSelectedConversationId((prev) => (prev === c.id ? null : prev));
-                                  // 刷新全局会话列表
                                   await loadConversations({ q: chatSearchQuery });
                                 },
                               });
@@ -4326,14 +4407,8 @@ export default function App() {
       </Modal>
         </div>
       </div>
-
-      {/* ── Knowledge Extraction Panel ── */}
-      {appMode === "extraction" ? (
-        <div className="extraction-overlay">
-          <ExtractionPage />
-        </div>
-      ) : null}
-
+        )}
+      </div>{/* end app-main */}
 
       {/* ── Expert Profile Modal ── */}
       <Modal
