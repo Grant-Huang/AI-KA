@@ -22,7 +22,7 @@ import {
 } from "./api";
 import SimpleMarkdown, { ThinkableMarkdown } from "./SimpleMarkdown";
 
-const { Text } = Typography;
+const { Text, Title } = Typography;
 const { TextArea } = Input;
 
 // ── Constants ────────────────────────────────────────────────────────────────
