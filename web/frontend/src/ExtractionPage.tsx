@@ -1,28 +1,28 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert, Badge, Button, Card, Empty, Input,
-  Modal, Select, Space, Spin, Table, Tag,
+  Modal, Space, Spin, Table, Tag,
   Tooltip, Typography, Upload, message,
 } from "antd";
 
 import {
   CheckOutlined, ClockCircleOutlined, CloseOutlined, DeleteOutlined, InboxOutlined,
-  PaperClipOutlined, PlusOutlined, ReloadOutlined, UserOutlined, WarningOutlined,
+  PaperClipOutlined, PlusOutlined, ReloadOutlined, WarningOutlined,
 } from "@ant-design/icons";
 import type {
-  ExpertProfileData, ExtractionSession, PendingRuleItem, ReviewQueueItem,
+  ExtractionSession, PendingRuleItem, ReviewQueueItem,
 } from "./api";
 import {
   appendExtractionMessages, approvePendingRule, createExtractionSession,
-  deleteExtractionSession, deleteReviewQueueItem, getExpertProfile,
+  deleteExtractionSession, deleteReviewQueueItem,
   getExtractionSessionMessages, getPendingRules, getReviewQueue,
   listExtractionSessions, patchReviewQueueItem, postActiveExtractionStream,
-  postDocExtractionStream, postReviewExtractionStream, putExpertProfile, rejectPendingRule,
+  postDocExtractionStream, postReviewExtractionStream, rejectPendingRule,
   uploadExtractionMaterial,
 } from "./api";
 import SimpleMarkdown, { ThinkableMarkdown } from "./SimpleMarkdown";
 
-const { Text, Title } = Typography;
+const { Text } = Typography;
 const { TextArea } = Input;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -52,86 +52,6 @@ type ChatMsg =
   | { role: "choices"; options: StrategyOption[] }
   | { role: "clarify"; questions: string[] };
 type ActiveTab = "extract" | "pending";
-
-// ── ExpertProfileModal ───────────────────────────────────────────────────────
-
-function ExpertProfileModal({
-  open, profile, onSave, onClose,
-}: {
-  open: boolean;
-  profile: ExpertProfileData | null;
-  onSave: (p: ExpertProfileData) => Promise<void>;
-  onClose: () => void;
-}) {
-  const [domains, setDomains] = useState<string[]>(profile?.domains ?? []);
-  const [background, setBackground] = useState(profile?.background ?? "");
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (open) {
-      setDomains(profile?.domains ?? []);
-      setBackground(profile?.background ?? "");
-    }
-  }, [open, profile]);
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      await onSave({ domains, background });
-      onClose();
-    } catch (e) {
-      message.error(`保存失败: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Modal
-      title="专家背景设置"
-      open={open}
-      onCancel={onClose}
-      onOk={handleSave}
-      okText="保存"
-      cancelText="取消"
-      confirmLoading={saving}
-      width={480}
-    >
-      <div style={{ marginBottom: 16 }}>
-        <Text type="secondary" style={{ fontSize: 13 }}>
-          填写您的专业领域与背景，LLM 将据此优化提问策略。
-        </Text>
-      </div>
-      <div style={{ marginBottom: 12 }}>
-        <div style={{ marginBottom: 6 }}>
-          <Text strong>擅长领域（多选）</Text>
-        </div>
-        <Select
-          mode="multiple"
-          value={domains}
-          onChange={setDomains}
-          options={DOMAIN_OPTIONS.map((d) => ({ value: d, label: d }))}
-          placeholder="选择领域..."
-          style={{ width: "100%" }}
-          allowClear
-        />
-      </div>
-      <div>
-        <div style={{ marginBottom: 6 }}>
-          <Text strong>背景描述</Text>
-        </div>
-        <TextArea
-          value={background}
-          onChange={(e) => setBackground(e.target.value)}
-          placeholder="简要描述您的工作经验与专长（可选）"
-          rows={4}
-          showCount
-          maxLength={500}
-        />
-      </div>
-    </Modal>
-  );
-}
 
 // ── ChatArea ─────────────────────────────────────────────────────────────────
 
@@ -775,8 +695,6 @@ function PendingRulesTab() {
 
 export default function ExtractionPage() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("extract");
-  const [profile, setProfile] = useState<ExpertProfileData | null>(null);
-  const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [postReviewCtx, setPostReviewCtx] = useState<{ projectId: number; conversationId: number } | null>(null);
 
   // Session history state
@@ -797,10 +715,6 @@ export default function ExtractionPage() {
     }
   }, []);
 
-  useEffect(() => {
-    getExpertProfile().then(setProfile).catch(() => {});
-  }, []);
-
   const loadSessions = useCallback(async () => {
     try {
       const { sessions: s } = await listExtractionSessions();
@@ -809,12 +723,6 @@ export default function ExtractionPage() {
   }, []);
 
   useEffect(() => { void loadSessions(); }, [loadSessions]);
-
-  const handleSaveProfile = async (data: ExpertProfileData) => {
-    const saved = await putExpertProfile(data);
-    setProfile(saved);
-    message.success("专家背景已保存");
-  };
 
   const handleNewSession = () => {
     setCurrentSessionId(null);
@@ -949,29 +857,15 @@ export default function ExtractionPage() {
       </div>
 
       {/* ── Main content ── */}
-      <div style={{ flex: 1, overflow: "auto", display: "flex", flexDirection: "column" }}>
-        <div className="extraction-page-header">
-          <Title level={4} style={{ margin: 0 }}>知识提取</Title>
-          <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
-            {profile && (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                领域：{profile.domains.length > 0 ? profile.domains.join("、") : "未设置"}
-              </Text>
-            )}
-            <Button icon={<UserOutlined />} size="small" onClick={() => setProfileModalOpen(true)}>
-              专家背景
-            </Button>
-          </div>
-        </div>
-
-        <div style={{ borderBottom: "1px solid var(--color-border, #e0e0d8)", marginBottom: 0 }}>
+      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+        <div style={{ borderBottom: "1px solid var(--color-border, #e0e0d8)" }}>
           <div style={{ display: "flex", gap: 0 }}>
             {tabItems.map((tab) => (
               <button
                 key={tab.key}
                 onClick={() => setActiveTab(tab.key)}
                 style={{
-                  padding: "8px 20px",
+                  padding: "10px 20px",
                   border: "none",
                   borderBottom: activeTab === tab.key ? "2px solid #527c5e" : "2px solid transparent",
                   background: "none",
@@ -988,17 +882,10 @@ export default function ExtractionPage() {
           </div>
         </div>
 
-        <div style={{ padding: "0 4px", flex: 1 }}>
+        <div style={{ flex: 1, overflow: "auto", padding: "0 4px" }}>
           {tabItems.find((t) => t.key === activeTab)?.children}
         </div>
       </div>
-
-      <ExpertProfileModal
-        open={profileModalOpen}
-        profile={profile}
-        onSave={handleSaveProfile}
-        onClose={() => setProfileModalOpen(false)}
-      />
     </div>
   );
 }
