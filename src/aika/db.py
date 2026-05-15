@@ -307,8 +307,9 @@ CREATE INDEX IF NOT EXISTS idx_obsidian_vaults_role ON obsidian_vaults(role);
 
 CREATE TABLE IF NOT EXISTS extraction_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  title TEXT NOT NULL DEFAULT '新提取会话',
+  title TEXT NOT NULL DEFAULT '新会话',
   strategy TEXT,
+  starred INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -2539,6 +2540,7 @@ class ExtractionSessionRow:
     created_at: str
     updated_at: str
     message_count: int = 0
+    starred: bool = False
 
 
 def _migrate_obsidian_vaults_table(conn: sqlite3.Connection) -> None:
@@ -2648,8 +2650,14 @@ def delete_obsidian_vault(conn: sqlite3.Connection, vault_id: int) -> bool:
 # ---------------------------------------------------------------------------
 
 def _migrate_extraction_sessions_table(conn: sqlite3.Connection) -> None:
-    """extraction_sessions + extraction_messages are created by SCHEMA_SQL; no-op stub."""
-    pass
+    """Add starred column if missing (new schema addition)."""
+    existing = _table_column_names(conn, "extraction_sessions")
+    if "starred" not in existing:
+        try:
+            conn.execute("ALTER TABLE extraction_sessions ADD COLUMN starred INTEGER NOT NULL DEFAULT 0")
+            conn.commit()
+        except Exception:
+            pass
 
 
 def create_extraction_session(
@@ -2665,13 +2673,37 @@ def create_extraction_session(
     conn.commit()
     sid = int(cur.lastrowid)
     r = conn.execute(
-        "SELECT id, title, strategy, created_at, updated_at FROM extraction_sessions WHERE id=?",
+        "SELECT id, title, strategy, starred, created_at, updated_at FROM extraction_sessions WHERE id=?",
         (sid,),
     ).fetchone()
     return ExtractionSessionRow(
         id=int(r["id"]), title=str(r["title"]), strategy=r["strategy"],
         created_at=str(r["created_at"]), updated_at=str(r["updated_at"]),
+        starred=bool(r["starred"]),
     )
+
+
+def update_extraction_session(
+    conn: sqlite3.Connection,
+    session_id: int,
+    *,
+    title: str | None = None,
+    starred: bool | None = None,
+) -> bool:
+    updates: list[str] = ["updated_at=datetime('now')"]
+    params: list[Any] = []
+    if title is not None:
+        updates.append("title=?")
+        params.append(str(title)[:60])
+    if starred is not None:
+        updates.append("starred=?")
+        params.append(1 if starred else 0)
+    if len(updates) == 1:
+        return False
+    params.append(session_id)
+    cur = conn.execute(f"UPDATE extraction_sessions SET {', '.join(updates)} WHERE id=?", params)
+    conn.commit()
+    return bool(cur.rowcount)
 
 
 def list_extraction_sessions(
@@ -2679,12 +2711,12 @@ def list_extraction_sessions(
 ) -> list[ExtractionSessionRow]:
     rows = conn.execute(
         """
-        SELECT s.id, s.title, s.strategy, s.created_at, s.updated_at,
+        SELECT s.id, s.title, s.strategy, s.starred, s.created_at, s.updated_at,
                COUNT(m.id) AS message_count
         FROM extraction_sessions s
         LEFT JOIN extraction_messages m ON m.session_id = s.id
         GROUP BY s.id
-        ORDER BY s.updated_at DESC
+        ORDER BY s.starred DESC, s.updated_at DESC
         LIMIT ?
         """,
         (limit,),
@@ -2694,6 +2726,7 @@ def list_extraction_sessions(
             id=int(r["id"]), title=str(r["title"]), strategy=r["strategy"],
             created_at=str(r["created_at"]), updated_at=str(r["updated_at"]),
             message_count=int(r["message_count"]),
+            starred=bool(r["starred"]),
         )
         for r in rows
     ]

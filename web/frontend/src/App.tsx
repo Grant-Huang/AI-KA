@@ -24,6 +24,7 @@ import {
 } from "antd";
 import {
   CopyOutlined,
+  DeleteOutlined,
   DownloadOutlined,
   LikeOutlined,
   DislikeOutlined,
@@ -47,6 +48,7 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   EditOutlined,
+  EllipsisOutlined,
   HistoryOutlined,
   LogoutOutlined,
   TagOutlined,
@@ -552,7 +554,6 @@ export default function App() {
   const [projectViewOnlyReason, setProjectViewOnlyReason] = useState<string>("");
   // 2026-04：新对话直接进入空白会话页，不再弹窗
   const [newConversationOpen, setNewConversationOpen] = useState(false);
-  const [chatsOpen, setChatsOpen] = useState(false);
   const [chatSearchQuery, setChatSearchQuery] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => localStorage.getItem("aika_sidebar_collapsed") === "1"
@@ -959,7 +960,6 @@ export default function App() {
   const handleStartFromReviewQueue = (item: ReviewQueueItem) => {
     window.sessionStorage.setItem("aika_initial_rq_item", JSON.stringify(item));
     setAppMode("extraction");
-    setChatsOpen(false);
   };
 
   const loadProjects = useCallback(async () => {
@@ -1079,13 +1079,9 @@ export default function App() {
   }, [focusPresets, selectedPresetId]);
 
   useEffect(() => {
-    if (!chatsOpen) return;
+    if (appMode !== "review") return;
     loadConversations({ q: chatSearchQuery }).catch((e) => message.error(String((e as Error).message)));
-  }, [chatsOpen, chatSearchQuery, loadConversations]);
-
-  useEffect(() => {
-    if (!chatsOpen) return;
-  }, [chatsOpen, selectedId, chatSearchQuery, conversations.length, isStandalone, standaloneView, conversations]);
+  }, [appMode, chatSearchQuery, loadConversations]);
 
   /** 项目列表变化后，若当前选中 id 已不存在则清空（不自动改选其它项目） */
   useEffect(() => {
@@ -1123,10 +1119,6 @@ export default function App() {
       </div>
     );
   }
-
-  useEffect(() => {
-    if (!chatsOpen) setChatSearchQuery("");
-  }, [chatsOpen]);
 
   const selected = useMemo(() => projects.find((p) => p.id === selectedId) || null, [projects, selectedId]);
 
@@ -1205,8 +1197,8 @@ export default function App() {
                 <Text type="secondary">
                   当前项目在该审查组合下已有历史会话。此提示仅用于提醒你可在会话历史中回看；本次不会自动切换会话。
                 </Text>
-                <Button type="link" onClick={() => setChatsOpen(true)}>
-                  打开会话历史
+                <Button type="link" onClick={() => { setAppMode("review"); setMainPanel("analyze"); }}>
+                  打开项目审查
                 </Button>
               </Space>
             ),
@@ -2382,7 +2374,6 @@ export default function App() {
   };
 
   const showMainOutput = useMemo(() => {
-    if (chatsOpen) return false;
     if (pipelineRunning) return true;
     if (finalMarkdown.trim()) return true;
     if (milestones.length) return true;
@@ -2391,7 +2382,6 @@ export default function App() {
     if (selectedConversationId != null && conversationMessages.length) return true;
     return false;
   }, [
-    chatsOpen,
     pipelineRunning,
     finalMarkdown,
     milestones.length,
@@ -2401,8 +2391,7 @@ export default function App() {
   ]);
 
   const startNewConversationPage = useCallback(() => {
-    // 不弹窗、不强制选预设：进入“空白会话页”，由用户在该页选择预设与加载项目
-    setChatsOpen(false);
+    // 不弹窗、不强制选预设：进入”空白会话页”，由用户在该页选择预设与加载项目
     setNewConversationOpen(false);
     setMainPanel("analyze");
     setSelectedConversationId(null);
@@ -2435,16 +2424,6 @@ export default function App() {
     if (!draftText.trim()) return false;
     return true;
   }, [pipelineRunning, selectedId, projectViewOnlyReason, corpusStaleReason, draftText]);
-
-  const filteredConversations = useMemo(() => {
-    const q = chatSearchQuery.trim().toLowerCase();
-    if (!q) return conversations;
-    return conversations.filter((c) => {
-      const { headline, subline } = conversationListDisplay(c);
-      const hay = `${headline} ${subline} ${c.title || ""}`.toLowerCase();
-      return hay.includes(q);
-    });
-  }, [conversations, chatSearchQuery]);
 
   const initializedProjects = useMemo(() => {
     const items = projects.filter((p) => !!projectIngest[p.id]?.initialized);
@@ -3188,59 +3167,19 @@ export default function App() {
               <Tooltip title={sidebarCollapsed ? "项目审查" : undefined} placement="right">
                 <button
                   className={`app-sidebar__section-header${appMode === "review" && mainPanel === "analyze" && reviewMainTab === "analyze" ? " app-sidebar__section-header--active" : ""}`}
-                  onClick={() => { setAppMode("review"); setChatsOpen(false); setMainPanel("analyze"); setReviewMainTab("analyze"); }}
+                  onClick={() => { setAppMode("review"); setMainPanel("analyze"); setReviewMainTab("analyze"); }}
                 >
                   <AuditOutlined />
                   <span className="app-sidebar__label">项目审查</span>
                 </button>
               </Tooltip>
-              {!sidebarCollapsed && appMode === "review" && mainPanel === "analyze" && reviewMainTab === "analyze" && !chatsOpen && (
-                <div className="app-sidebar__session-list">
-                  {conversations.slice(0, 8).map((c) => {
-                    const { headline } = conversationListDisplay(c);
-                    const active = c.id === selectedConversationId;
-                    return (
-                      <div key={c.id}
-                        className={`app-sidebar__session-item${active ? " app-sidebar__session-item--active" : ""}`}
-                        onClick={() => {
-                          const pid = c.project_id;
-                          if (typeof pid === "number") setSelectedId(pid);
-                          setProjectViewOnlyReason(c.project_available === false ? "项目不可用或已删除：仅可查看历史会话，无法继续审查/追问。" : "");
-                          setMainPanel("analyze"); setSelectedConversationId(c.id); setChatsOpen(false); setReviewMainTab("analyze");
-                        }}
-                      >
-                        <span className="app-sidebar__session-title">{headline}</span>
-                        <Button type="text" size="small" icon={<CloseOutlined />} className="app-sidebar__session-del"
-                          onClick={(ev) => {
-                            ev.stopPropagation();
-                            const pid = c.project_id;
-                            if (typeof pid !== "number") return;
-                            Modal.confirm({
-                              title: "确认删除会话", content: `将删除会话「${headline}」。此操作不可撤销。`,
-                              okText: "删除", okButtonProps: { danger: true }, cancelText: "取消",
-                              onOk: async () => {
-                                await deleteConversation(pid, c.id);
-                                setSelectedConversationId((prev) => prev === c.id ? null : prev);
-                                await loadConversations({ q: chatSearchQuery });
-                              },
-                            });
-                          }}
-                        />
-                      </div>
-                    );
-                  })}
-                  <button className="app-sidebar__all-link" onClick={() => { setAppMode("review"); setChatsOpen(true); }}>
-                    <span>○</span><span className="app-sidebar__label">所有审查会话</span>
-                  </button>
-                </div>
-              )}
             </div>
 
             {/* ─ 知识归纳 ─ */}
             <Tooltip title={sidebarCollapsed ? "知识归纳" : undefined} placement="right">
               <button
                 className={`app-sidebar__section-header${appMode === "extraction" && reviewMainTab !== "result_review" ? " app-sidebar__section-header--active" : ""}`}
-                onClick={() => { setAppMode("extraction"); setChatsOpen(false); setReviewMainTab("analyze"); }}
+                onClick={() => { setAppMode("extraction"); setReviewMainTab("analyze"); }}
               >
                 <BulbOutlined />
                 <span className="app-sidebar__label">知识归纳</span>
@@ -3251,7 +3190,7 @@ export default function App() {
             <Tooltip title={sidebarCollapsed ? "待批准规则" : undefined} placement="right">
               <button
                 className={`app-sidebar__section-header${reviewMainTab === "result_review" ? " app-sidebar__section-header--active" : ""}`}
-                onClick={() => { setAppMode("review"); setChatsOpen(false); setMainPanel("analyze"); setReviewMainTab("result_review"); }}
+                onClick={() => { setAppMode("review"); setMainPanel("analyze"); setReviewMainTab("result_review"); }}
               >
                 <PushpinOutlined />
                 <span className="app-sidebar__label">待批准规则</span>
@@ -3263,7 +3202,7 @@ export default function App() {
             {/* ─ 工具入口 ─ */}
             <Tooltip title={sidebarCollapsed ? "项目初始化" : undefined} placement="right">
               <button className={`app-sidebar__section-header${appMode === "review" && mainPanel === "ingest" ? " app-sidebar__section-header--active" : ""}`}
-                onClick={() => { setAppMode("review"); setChatsOpen(false); setMainPanel("ingest"); }}
+                onClick={() => { setAppMode("review"); setMainPanel("ingest"); }}
               >
                 <FolderOpenOutlined />
                 <span className="app-sidebar__label">项目初始化</span>
@@ -3271,7 +3210,7 @@ export default function App() {
             </Tooltip>
             <Tooltip title={sidebarCollapsed ? "审查域设定" : undefined} placement="right">
               <button className={`app-sidebar__section-header${appMode === "review" && mainPanel === "review_domain" ? " app-sidebar__section-header--active" : ""}`}
-                onClick={() => { setAppMode("review"); setChatsOpen(false); setMainPanel("review_domain"); void loadSettings({ snapshot_chunk_strategy: true }); }}
+                onClick={() => { setAppMode("review"); setMainPanel("review_domain"); void loadSettings({ snapshot_chunk_strategy: true }); }}
               >
                 <FileSearchOutlined />
                 <span className="app-sidebar__label">审查域设定</span>
@@ -3302,6 +3241,85 @@ export default function App() {
             <ExtractionPage />
           </div>
         ) : (
+        <>
+          {/* Session history column for review mode */}
+          {appMode === "review" && mainPanel === "analyze" && reviewMainTab === "analyze" && (
+            <div className="session-col">
+              <div className="session-col__header">
+                <Text strong style={{ fontSize: 13 }}>项目审查</Text>
+                <Button size="small" icon={<PlusOutlined />} onClick={startNewConversationPage} title="新会话" />
+              </div>
+              <div className="session-col__list">
+                {conversations.length === 0 ? (
+                  <Text type="secondary" style={{ fontSize: 12, padding: "8px 4px", display: "block" }}>暂无历史会话</Text>
+                ) : conversations.map((c) => {
+                  const { headline, subline } = conversationListDisplay(c);
+                  const active = c.id === selectedConversationId;
+                  return (
+                    <div
+                      key={c.id}
+                      className={`session-item${active ? " session-item--active" : ""}`}
+                      onClick={() => {
+                        const pid = c.project_id;
+                        if (typeof pid === "number") setSelectedId(pid);
+                        setProjectViewOnlyReason(c.project_available === false ? "项目不可用或已删除：仅可查看历史会话，无法继续审查/追问。" : "");
+                        setMainPanel("analyze");
+                        setSelectedConversationId(c.id);
+                        setReviewMainTab("analyze");
+                      }}
+                    >
+                      <div className="session-item__body">
+                        <Tooltip title={headline} placement="right" mouseEnterDelay={0.5}>
+                          <div className="session-item__title">{headline}</div>
+                        </Tooltip>
+                        {subline && <div className="session-item__time">{subline}</div>}
+                        {c.project_name && <div className="session-item__time">项目：{String(c.project_name)}</div>}
+                        {c.project_available === false && <div className="session-item__time">（仅可回看）</div>}
+                      </div>
+                      <Dropdown
+                        trigger={["click"]}
+                        placement="bottomRight"
+                        menu={{
+                          items: [
+                            {
+                              key: "delete",
+                              label: "删除",
+                              icon: <DeleteOutlined />,
+                              danger: true,
+                              onClick: ({ domEvent }) => {
+                                domEvent.stopPropagation();
+                                const pid = c.project_id;
+                                if (typeof pid !== "number") return;
+                                Modal.confirm({
+                                  title: "确认删除会话",
+                                  content: `将删除会话「${headline}」。此操作不可撤销。`,
+                                  okText: "删除", okButtonProps: { danger: true }, cancelText: "取消",
+                                  onOk: async () => {
+                                    await deleteConversation(pid, c.id);
+                                    setSelectedConversationId((prev) => (prev === c.id ? null : prev));
+                                    await loadConversations({ q: chatSearchQuery });
+                                  },
+                                });
+                              },
+                            },
+                          ],
+                        }}
+                      >
+                        <Button
+                          type="text"
+                          size="small"
+                          className="session-item__menu"
+                          icon={<EllipsisOutlined />}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      </Dropdown>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
         <div className="app-shell">
         <div className="main-surface">
           {reviewDomainError ? (
@@ -3322,87 +3340,7 @@ export default function App() {
             />
           ) : null}
 
-          {chatsOpen && appMode === "review" ? (
-            <div className="chat-history-page">
-              <div className="page-header" style={{ marginBottom: 0 }}>
-                <Button type="text" size="small" icon={<ArrowLeftOutlined />}
-                  onClick={() => setChatsOpen(false)} title="返回" style={{ marginRight: 4 }} />
-                <span className="page-header__title">所有审查会话</span>
-              </div>
-              <div className="chat-history-toolbar">
-                <div />
-                <Button type="default" icon={<PlusOutlined />} onClick={startNewConversationPage}>新对话</Button>
-              </div>
-              <Input
-                allowClear
-                className="chat-history-search"
-                placeholder="搜索会话…"
-                prefix={<SearchOutlined />}
-                value={chatSearchQuery}
-                onChange={(e) => setChatSearchQuery(e.target.value)}
-              />
-              <div className="chat-history-list" role="list">
-                {filteredConversations.length ? (
-                  filteredConversations.map((c) => {
-                    const { headline, subline } = conversationListDisplay(c);
-                    const active = c.id === selectedConversationId;
-                    return (
-                      <div key={c.id} className="chat-history-item-row" role="listitem">
-                        <button
-                          type="button"
-                          className={`chat-history-item${active ? " chat-history-item--active" : ""}`}
-                          onClick={() => {
-                            const pid = c.project_id;
-                            if (typeof pid === "number") setSelectedId(pid);
-                            if (c.project_available === false) {
-                              setProjectViewOnlyReason("项目不可用或已删除：仅可查看历史会话，无法继续审查/追问。");
-                            } else {
-                              setProjectViewOnlyReason("");
-                            }
-                            setMainPanel("analyze");
-                            setSelectedConversationId(c.id);
-                            setChatsOpen(false);
-                          }}
-                        >
-                          <div className="chat-history-item-title">{headline}</div>
-                          {subline ? <div className="chat-history-item-time">{subline}</div> : null}
-                          {c.project_name ? <div className="chat-history-item-time">项目：{String(c.project_name)}</div> : null}
-                          {c.project_available === false ? <div className="chat-history-item-time">（项目不可用：仅可回看）</div> : null}
-                        </button>
-                        <div className="chat-history-item-delete">
-                          <Button
-                            type="text"
-                            icon={<CloseOutlined />}
-                            title="删除会话"
-                            onClick={(ev) => {
-                              ev.preventDefault();
-                              ev.stopPropagation();
-                              const pid = c.project_id;
-                              if (typeof pid !== "number") return;
-                              Modal.confirm({
-                                title: "确认删除会话",
-                                content: `将删除会话「${headline}」。此操作不可撤销。`,
-                                okText: "删除", okButtonProps: { danger: true }, cancelText: "取消",
-                                onOk: async () => {
-                                  await deleteConversation(pid, c.id);
-                                  setSelectedConversationId((prev) => (prev === c.id ? null : prev));
-                                  await loadConversations({ q: chatSearchQuery });
-                                },
-                              });
-                            }}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <Text type="secondary">{conversations.length ? "无匹配会话" : "暂无历史对话"}</Text>
-                )}
-              </div>
-            </div>
-          ) : null}
-
-          {!chatsOpen && appMode === "review" && mainPanel === "ingest" ? (
+          {appMode === "review" && mainPanel === "ingest" ? (
             <div style={{ maxWidth: 980, margin: "0 auto", padding: "10px 10px 18px" }}>
               <div className="page-header">
                 <span className="page-header__title">项目初始化</span>
@@ -3579,9 +3517,9 @@ export default function App() {
                 ) : null}
               </Space>
             </div>
-          ) : !chatsOpen && appMode === "review" && mainPanel === "review_domain" ? (
+          ) : appMode === "review" && mainPanel === "review_domain" ? (
             reviewDomainPageNode
-          ) : !chatsOpen && appMode === "review" && showMainOutput ? (
+          ) : appMode === "review" && showMainOutput ? (
             <>
               <div className="page-header">
                 <span className="page-header__title">项目审查</span>
@@ -4362,6 +4300,7 @@ export default function App() {
       </Modal>
         </div>
       </div>
+        </>
         )}
       </div>{/* end app-main */}
 
@@ -4422,7 +4361,7 @@ export default function App() {
       </Modal>
 
 
-      {!chatsOpen && appMode === "review" && mainPanel === "analyze" ? (
+      {appMode === "review" && mainPanel === "analyze" ? (
         <>
           {reviewMainTab === "result_review" ? (
             <div style={{ maxWidth: 980, margin: "0 auto", width: "100%" }}>
@@ -4499,7 +4438,7 @@ export default function App() {
                           <div style={{ marginTop: 8, borderTop: "1px solid #f0f0f0", paddingTop: 8 }}>
                             <Button type="text" size="small" icon={<FolderOpenOutlined />} block
                               style={{ textAlign: "left", justifyContent: "flex-start" }}
-                              onClick={() => { setChatsOpen(false); setMainPanel("ingest"); }}>
+                              onClick={() => { setMainPanel("ingest"); }}>
                               初始化新项目
                             </Button>
                           </div>

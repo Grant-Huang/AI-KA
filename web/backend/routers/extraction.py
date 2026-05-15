@@ -765,7 +765,7 @@ async def upload_extraction_material(
     Returns a material_id that can be used with /api/v1/extraction/doc-stream.
     The file is stored in a temp staging area; text extraction is done on-demand.
     """
-    allowed_exts = {".pdf", ".docx", ".doc", ".md", ".txt"}
+    allowed_exts = {".pdf", ".docx", ".doc", ".md", ".txt", ".html", ".htm", ".xlsx", ".csv", ".pptx"}
     original_name = file.filename or "upload"
     suffix = Path(original_name).suffix.lower()
     if suffix not in allowed_exts:
@@ -924,10 +924,19 @@ def doc_extraction_stream(body: DocExtractionBody) -> StreamingResponse:
 
 
 def _extract_doc_text(path: Path) -> str:
-    """Extract plain text from a document file."""
+    """Extract plain text from a document file using markitdown (preferred) or fallback."""
+    try:
+        from markitdown import MarkItDown
+        md = MarkItDown()
+        result = md.convert(str(path))
+        return result.text_content or ""
+    except Exception:
+        pass
+
+    # Fallback for plain text formats
     suffix = path.suffix.lower()
     try:
-        if suffix in (".md", ".txt"):
+        if suffix in (".md", ".txt", ".html", ".htm"):
             return path.read_text(encoding="utf-8", errors="replace")
         if suffix in (".docx", ".doc"):
             try:
@@ -935,17 +944,16 @@ def _extract_doc_text(path: Path) -> str:
                 doc = docx.Document(str(path))
                 return "\n".join(p.text for p in doc.paragraphs)
             except ImportError:
-                return path.read_text(encoding="utf-8", errors="replace")
+                pass
         if suffix == ".pdf":
             try:
                 import pypdf
                 reader = pypdf.PdfReader(str(path))
-                parts = [page.extract_text() or "" for page in reader.pages]
-                return "\n".join(parts)
+                return "\n".join(page.extract_text() or "" for page in reader.pages)
             except ImportError:
-                return ""
+                pass
     except Exception:
-        return ""
+        pass
     return ""
 
 
@@ -1104,11 +1112,20 @@ class StrategyPatternCreate(BaseModel):
 
 
 class _CreateSessionBody(BaseModel):
-    title: str = "新提取会话"
+    title: str = "新会话"
     strategy: str | None = None
 
 
 class _AppendMessagesBody(BaseModel):
+    messages: list[dict[str, str]]
+
+
+class _PatchSessionBody(BaseModel):
+    title: str | None = None
+    starred: bool | None = None
+
+
+class _GenerateTitleBody(BaseModel):
     messages: list[dict[str, str]]
 
 
@@ -1145,6 +1162,51 @@ def append_extraction_messages_api(sid: int, body: _AppendMessagesBody):
     conn = get_conn()
     dbm.append_extraction_messages(conn, sid, body.messages)
     return {"ok": True}
+
+
+@router.patch("/api/v1/extraction/sessions/{sid}")
+def patch_extraction_session_api(sid: int, body: _PatchSessionBody):
+    conn = get_conn()
+    dbm.update_extraction_session(conn, sid, title=body.title, starred=body.starred)
+    return {"ok": True}
+
+
+@router.post("/api/v1/extraction/sessions/{sid}/generate-title")
+async def generate_extraction_session_title_api(sid: int, body: _GenerateTitleBody) -> JSONResponse:
+    """Call LLM to generate a short session title from conversation messages."""
+    if not body.messages:
+        return err("No messages provided")
+    try:
+        provider, cfg = _get_llm_provider()
+    except Exception as e:
+        return err(f"LLM provider unavailable: {e}")
+
+    lines = []
+    for m in body.messages[:10]:
+        role = "用户" if m.get("role") == "user" else "助手"
+        content = str(m.get("content", ""))[:300]
+        lines.append(f"[{role}]: {content}")
+
+    prompt = (
+        "以下是一段工作经验总结对话。请生成一个10-15字的中文标题，"
+        "直接输出标题文字，不要任何额外说明：\n\n" + "\n".join(lines)
+    )
+    acc: list[str] = []
+    try:
+        for chunk in provider.chat_stream(
+            system="你是专业的对话标题生成助手，只输出标题，不超过20字。",
+            user=prompt,
+            config=cfg,
+        ):
+            text = chunk.get("content") or chunk.get("text") or "" if isinstance(chunk, dict) else str(chunk)
+            acc.append(text)
+    except Exception as e:
+        return err(f"LLM error: {e}")
+
+    title = "".join(acc).strip().strip('"').strip("'")[:40]
+    conn = get_conn()
+    dbm.update_extraction_session(conn, sid, title=title)
+    return ok({"title": title})
 
 
 @router.get("/api/v1/extraction/strategies")
