@@ -93,26 +93,34 @@ function ChatArea({
     }}>
       {messages.map((msg, i) => {
         if (msg.role === "choices") {
+          const letters = ["A", "B", "C", "D"];
           return (
-            <div key={i} style={{ marginBottom: 12, paddingLeft: 4 }}>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {msg.options.map((opt) => (
-                  <Tooltip
-                    key={opt.value}
-                    title={<div style={{ maxWidth: 240 }}><div>{opt.desc}</div><div style={{ marginTop: 4, opacity: 0.75, fontSize: 12 }}>{opt.example}</div></div>}
-                    placement="bottom"
-                  >
-                    <Button
-                      size="small"
-                      onClick={() => onStrategyChoose?.(opt)}
-                      disabled={streaming}
-                      style={{ borderRadius: 16 }}
-                    >
-                      {opt.label}
-                    </Button>
-                  </Tooltip>
-                ))}
-              </div>
+            <div key={i} style={{ marginBottom: 16, paddingLeft: 2 }}>
+              {msg.options.map((opt, oi) => (
+                <div
+                  key={opt.value}
+                  onClick={() => !streaming && onStrategyChoose?.(opt)}
+                  style={{
+                    display: "flex", gap: 10, padding: "8px 10px", borderRadius: 8,
+                    cursor: streaming ? "default" : "pointer", marginBottom: 4,
+                    transition: "background 0.12s",
+                    opacity: streaming ? 0.5 : 1,
+                  }}
+                  onMouseEnter={(e) => { if (!streaming) (e.currentTarget as HTMLElement).style.background = "rgba(82,124,94,0.07)"; }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "transparent"; }}
+                >
+                  <span style={{ fontWeight: 600, color: "#527c5e", minWidth: 18, flexShrink: 0, paddingTop: 1 }}>
+                    {letters[oi]}
+                  </span>
+                  <div>
+                    <div style={{ fontWeight: 500, fontSize: 14, color: "#222", lineHeight: 1.4 }}>{opt.label}</div>
+                    <div style={{ fontSize: 13, color: "#666", marginTop: 2, lineHeight: 1.45 }}>{opt.desc}</div>
+                    {opt.example && (
+                      <div style={{ fontSize: 12, color: "#999", marginTop: 3, lineHeight: 1.45 }}>↳ {opt.example}</div>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           );
         }
@@ -231,7 +239,7 @@ function ExpertQATab({
       role: "assistant",
       content: postReview
         ? `已关联本次审查结果（项目 #${postReviewCtx!.projectId}）。请描述遗漏或补充发现，或直接点击「开始提取」。`
-        : "你好！今天想从哪里开始？选一个方向，或直接输入你想聊的内容。",
+        : "你好！今天想总结些什么经验？选一个方向，或者直接告诉我你想聊什么：",
     };
     if (postReview) return [opening];
     return [opening, { role: "choices", options: STRATEGY_OPTIONS }];
@@ -472,7 +480,7 @@ function ExpertQATab({
             placeholder={
               isPostReview
                 ? "描述遗漏的问题或补充发现（Shift+Enter 换行）"
-                : "输入您的想法或回答 LLM 的问题（Shift+Enter 换行）"
+                : "输入 A / B / C / D，或直接说你想聊的…（Shift+Enter 换行）"
             }
             autoSize={{ minRows: 2, maxRows: 6 }}
             disabled={streaming}
