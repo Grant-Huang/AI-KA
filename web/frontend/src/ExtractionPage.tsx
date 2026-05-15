@@ -34,10 +34,10 @@ const DOMAIN_OPTIONS = [
 ];
 
 const STRATEGY_OPTIONS = [
-  { value: "gap_based", label: "发现规则盲点", desc: "找出哪些经验还没有被总结成规律" },
-  { value: "fuzzy_signal", label: "澄清模糊印象", desc: "把说不清的直觉转化成清晰的规则" },
-  { value: "critical_incident", label: "复盘具体案例", desc: "从一次实际经历提炼可复用的经验" },
-  { value: "reverse_validation", label: "挑战现有规则", desc: "检验一条规则是否在各种情境下都成立" },
+  { value: "gap_based", label: "发现规则盲点", desc: "找出哪些经验还没有被总结成规律", example: "例：我做完项目复盘时总感觉有哪些坑没预见到，但不知道规律在哪" },
+  { value: "fuzzy_signal", label: "澄清模糊印象", desc: "把说不清的直觉转化成清晰的规则", example: "例：碰到某类客户我会有点警觉，但我说不清楚具体在看什么" },
+  { value: "critical_incident", label: "复盘具体案例", desc: "从一次实际经历提炼可复用的经验", example: "例：上次那个项目延期了，我们来拆解一下当时发生了什么" },
+  { value: "reverse_validation", label: "挑战现有规则", desc: "检验一条规则是否在各种情境下都成立", example: "例：我一直觉得蓝图要在两周内锁定，但真的每次都该这样吗？" },
 ];
 
 const CONFIDENCE_COLOR: Record<string, string> = {
@@ -97,16 +97,20 @@ function ChatArea({
             <div key={i} style={{ marginBottom: 12, paddingLeft: 4 }}>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 {msg.options.map((opt) => (
-                  <Button
+                  <Tooltip
                     key={opt.value}
-                    size="small"
-                    onClick={() => onStrategyChoose?.(opt)}
-                    disabled={streaming}
-                    title={opt.desc}
-                    style={{ borderRadius: 16 }}
+                    title={<div style={{ maxWidth: 240 }}><div>{opt.desc}</div><div style={{ marginTop: 4, opacity: 0.75, fontSize: 12 }}>{opt.example}</div></div>}
+                    placement="bottom"
                   >
-                    {opt.label}
-                  </Button>
+                    <Button
+                      size="small"
+                      onClick={() => onStrategyChoose?.(opt)}
+                      disabled={streaming}
+                      style={{ borderRadius: 16 }}
+                    >
+                      {opt.label}
+                    </Button>
+                  </Tooltip>
                 ))}
               </div>
             </div>
