@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert, Badge, Button, Card, Empty, Input,
-  Modal, Space, Spin, Table, Tag,
+  Modal, Space, Table, Tag,
   Tooltip, Typography, Upload, message,
 } from "antd";
+import { ChatWindow } from "./ChatWindow";
 
 import {
   CheckOutlined, ClockCircleOutlined, CloseOutlined, DeleteOutlined, InboxOutlined,
@@ -20,7 +21,7 @@ import {
   postDocExtractionStream, postReviewExtractionStream, rejectPendingRule,
   uploadExtractionMaterial,
 } from "./api";
-import SimpleMarkdown, { ThinkableMarkdown } from "./SimpleMarkdown";
+import SimpleMarkdown from "./SimpleMarkdown";
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
@@ -63,19 +64,10 @@ function ChatArea({
   onStrategyChoose?: (opt: StrategyOption) => void;
   onClarify?: (text: string) => void;
 }) {
-  const bottomRef = useRef<HTMLDivElement>(null);
   const [otherInput, setOtherInput] = useState("");
   const [showOther, setShowOther] = useState(false);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
   useEffect(() => { setShowOther(false); setOtherInput(""); }, [messages.length]);
-
-  const lastAssistantIdx = messages.reduce(
-    (last, m, i) => (m.role === "assistant" ? i : last), -1,
-  );
 
   const submitOther = () => {
     const t = otherInput.trim();
@@ -88,117 +80,70 @@ function ChatArea({
   return (
     <div style={{
       border: "1px solid var(--color-border, #e0e0d8)", borderRadius: 8,
-      padding: "12px 14px", background: "var(--color-bg-card, #fff)",
+      background: "var(--color-bg-card, #fff)",
       minHeight: 200, maxHeight: 420, overflowY: "auto",
     }}>
-      {messages.map((msg, i) => {
-        if (msg.role === "choices") {
-          const letters = ["A", "B", "C", "D"];
-          return (
-            <div key={i} style={{ marginBottom: 16, paddingLeft: 2 }}>
-              {msg.options.map((opt, oi) => (
-                <div
-                  key={opt.value}
-                  onClick={() => !streaming && onStrategyChoose?.(opt)}
-                  style={{
-                    display: "flex", gap: 10, padding: "8px 10px", borderRadius: 8,
-                    cursor: streaming ? "default" : "pointer", marginBottom: 4,
-                    transition: "background 0.12s",
-                    opacity: streaming ? 0.5 : 1,
-                  }}
-                  onMouseEnter={(e) => { if (!streaming) (e.currentTarget as HTMLElement).style.background = "rgba(82,124,94,0.07)"; }}
-                  onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "transparent"; }}
-                >
-                  <span style={{ fontWeight: 600, color: "#527c5e", minWidth: 18, flexShrink: 0, paddingTop: 1 }}>
-                    {letters[oi]}
-                  </span>
-                  <div>
-                    <div style={{ fontWeight: 500, fontSize: 14, color: "#222", lineHeight: 1.4 }}>{opt.label}</div>
-                    <div style={{ fontSize: 13, color: "#666", marginTop: 2, lineHeight: 1.45 }}>{opt.desc}</div>
-                    {opt.example && (
-                      <div style={{ fontSize: 12, color: "#999", marginTop: 3, lineHeight: 1.45 }}>↳ {opt.example}</div>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          );
-        }
-
-        if (msg.role === "clarify") {
-          return (
-            <div key={i} style={{ marginBottom: 12, paddingLeft: 4 }}>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: showOther ? 8 : 0 }}>
-                {msg.questions.map((q, qi) => (
-                  <Button
-                    key={qi}
-                    size="small"
-                    onClick={() => onClarify?.(q)}
-                    disabled={streaming}
-                    style={{ borderRadius: 16 }}
+      <ChatWindow<ChatMsg>
+        messages={messages}
+        isStreaming={streaming}
+        renderSpecialMsg={(msg) => {
+          if (msg.role === "choices") {
+            const letters = ["A", "B", "C", "D"];
+            return (
+              <div style={{ paddingLeft: 2 }}>
+                {msg.options.map((opt, oi) => (
+                  <div
+                    key={opt.value}
+                    onClick={() => !streaming && onStrategyChoose?.(opt)}
+                    style={{
+                      display: "flex", gap: 10, padding: "8px 10px", borderRadius: 8,
+                      cursor: streaming ? "default" : "pointer", marginBottom: 4,
+                      transition: "background 0.12s", opacity: streaming ? 0.5 : 1,
+                    }}
+                    onMouseEnter={(e) => { if (!streaming) (e.currentTarget as HTMLElement).style.background = "rgba(82,124,94,0.07)"; }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "transparent"; }}
                   >
-                    {q}
-                  </Button>
+                    <span style={{ fontWeight: 600, color: "#527c5e", minWidth: 18, flexShrink: 0, paddingTop: 1 }}>
+                      {letters[oi]}
+                    </span>
+                    <div>
+                      <div style={{ fontWeight: 500, fontSize: 14, color: "#222", lineHeight: 1.4 }}>{opt.label}</div>
+                      <div style={{ fontSize: 13, color: "#666", marginTop: 2, lineHeight: 1.45 }}>{opt.desc}</div>
+                      {opt.example && (
+                        <div style={{ fontSize: 12, color: "#999", marginTop: 3, lineHeight: 1.45 }}>↳ {opt.example}</div>
+                      )}
+                    </div>
+                  </div>
                 ))}
-                <Button
-                  size="small"
-                  onClick={() => setShowOther((v) => !v)}
-                  disabled={streaming}
-                  style={{ borderRadius: 16 }}
-                >
-                  其他…
-                </Button>
               </div>
-              {showOther && (
-                <div style={{ display: "flex", gap: 6 }}>
-                  <Input
-                    size="small"
-                    value={otherInput}
-                    onChange={(e) => setOtherInput(e.target.value)}
-                    onPressEnter={submitOther}
-                    placeholder="输入自定义回复…"
-                    autoFocus
-                    style={{ flex: 1 }}
-                  />
-                  <Button size="small" type="primary" onClick={submitOther}>发送</Button>
+            );
+          }
+          if (msg.role === "clarify") {
+            return (
+              <div style={{ paddingLeft: 4 }}>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: showOther ? 8 : 0 }}>
+                  {msg.questions.map((q, qi) => (
+                    <Button key={qi} size="small" onClick={() => onClarify?.(q)} disabled={streaming} style={{ borderRadius: 16 }}>
+                      {q}
+                    </Button>
+                  ))}
+                  <Button size="small" onClick={() => setShowOther((v) => !v)} disabled={streaming} style={{ borderRadius: 16 }}>
+                    其他…
+                  </Button>
                 </div>
-              )}
-            </div>
-          );
-        }
-
-        return (
-          <div
-            key={i}
-            style={{
-              marginBottom: 12,
-              padding: msg.role === "status" ? "4px 8px" : "8px 12px",
-              borderRadius: 6,
-              background: msg.role === "user"
-                ? "rgba(82, 124, 94, 0.08)"
-                : msg.role === "status"
-                  ? "transparent"
-                  : "var(--color-bg-card, #fff)",
-              borderLeft: msg.role === "assistant" ? "3px solid rgba(82,124,94,0.4)" : "none",
-            }}
-          >
-            {msg.role === "status" ? (
-              <Text type="secondary" style={{ fontSize: 12 }}>{msg.content}</Text>
-            ) : msg.role === "user" ? (
-              <Text>{msg.content}</Text>
-            ) : (
-              <ThinkableMarkdown markdown={msg.content} />
-            )}
-          </div>
-        );
-      })}
-      {streaming && lastAssistantIdx < 0 && (
-        <div style={{ padding: "4px 0" }}>
-          <Spin size="small" />
-          <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>Agent思考中...</Text>
-        </div>
-      )}
-      <div ref={bottomRef} />
+                {showOther && (
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <Input size="small" value={otherInput} onChange={(e) => setOtherInput(e.target.value)}
+                      onPressEnter={submitOther} placeholder="输入自定义回复…" autoFocus style={{ flex: 1 }} />
+                    <Button size="small" type="primary" onClick={submitOther}>发送</Button>
+                  </div>
+                )}
+              </div>
+            );
+          }
+          return null;
+        }}
+      />
     </div>
   );
 }

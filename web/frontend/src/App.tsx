@@ -86,6 +86,7 @@ import {
 } from "./api";
 import { parseMemoryInjectedItemsFromMilestonesRaw, useConversationReplay } from "./hooks/useConversationReplay";
 import SimpleMarkdown, { ThinkableMarkdown } from "./SimpleMarkdown";
+import { ChatWindow } from "./ChatWindow";
 import HelpPage from "./pages/help";
 import SystemSettingPage from "./pages/system_setting";
 import ExtractionPage, { ReviewQueueTab } from "./ExtractionPage";
@@ -3808,21 +3809,10 @@ export default function App() {
                 </div>
                 {/* 会话历史：以消息流为准（同一会话多轮对话合并展示）。replay.entries 仅保留作兼容兜底。 */}
                 {!pipelineRunning && selectedConversationId != null && visibleConversationMessages.length ? (
-                  <div className="conv-thread" aria-label="会话消息">
-                    {visibleConversationMessages.map((m) => (
-                      <div key={m.id} className="conv-msg">
-                        <div className="conv-msg-role">{m.role === "user" ? "用户" : "助手"}</div>
-                        <div className={`conv-msg-body${m.role === "user" ? " conv-msg-body--user" : ""}`}>
-                          {m.created_at ? <div className="conv-msg-meta">{formatConversationTime(m.created_at)}</div> : null}
-                          {m.role === "assistant" ? (
-                            <ThinkableMarkdown markdown={String(m.content || "")} />
-                          ) : (
-                            <div className="conv-msg-plain">{String(m.content || "")}</div>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                  <ChatWindow
+                    messages={visibleConversationMessages}
+                    aria-label="会话消息"
+                  />
                 ) : !pipelineRunning && replay.entries.length ? (
                   <div className="pipeline-final-report">
                     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
