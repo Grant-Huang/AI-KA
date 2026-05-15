@@ -3164,98 +3164,60 @@ export default function App() {
   return (
     <div className={`app-layout${isStandalone ? " app-layout--standalone" : ""}`}>
 
-      {/* ── New Sidebar ── */}
+      {/* ── Sidebar ── */}
       {!isStandalone && (
         <div className={`app-sidebar${sidebarCollapsed ? " app-sidebar--collapsed" : ""}`}>
           {/* Header */}
           <div className="app-sidebar__header">
-            {!sidebarCollapsed && <span className="app-sidebar__logo">AI-KA</span>}
-            <Button
-              type="text"
-              size="small"
-              className="app-sidebar__toggle"
+            <span className="app-sidebar__logo">AI-KA</span>
+            <Button type="text" size="small" className="app-sidebar__toggle"
               icon={sidebarCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
               onClick={toggleSidebar}
               title={sidebarCollapsed ? "展开侧边栏" : "收缩侧边栏"}
             />
           </div>
 
-          {/* Actions */}
-          <div className="app-sidebar__actions">
-            <Tooltip title={sidebarCollapsed ? "新建" : undefined} placement="right">
-              <button
-                className="app-sidebar__action-btn"
-                onClick={() => { setAppMode("review"); startNewConversationPage(); setChatsOpen(false); }}
-              >
-                <PlusOutlined />
-                <span>新建</span>
-              </button>
-            </Tooltip>
-            <Tooltip title={sidebarCollapsed ? "搜索" : undefined} placement="right">
-              <button
-                className="app-sidebar__action-btn"
-                onClick={() => { setAppMode("review"); setChatsOpen(true); }}
-              >
-                <SearchOutlined />
-                <span>搜索会话</span>
-              </button>
-            </Tooltip>
-          </div>
-
           <div className="app-sidebar__divider" />
 
-          {/* Session list body */}
           <div className="app-sidebar__body">
-            {/* ─ 项目审查 section ─ */}
+            {/* ─ 项目审查 ─ */}
             <div className="app-sidebar__section">
               <Tooltip title={sidebarCollapsed ? "项目审查" : undefined} placement="right">
                 <button
-                  className={`app-sidebar__section-header${appMode === "review" ? " app-sidebar__section-header--active" : ""}`}
-                  onClick={() => { setAppMode("review"); setChatsOpen(false); setMainPanel("analyze"); }}
+                  className={`app-sidebar__section-header${appMode === "review" && mainPanel === "analyze" && !chatsOpen ? " app-sidebar__section-header--active" : ""}`}
+                  onClick={() => { setAppMode("review"); setChatsOpen(false); setMainPanel("analyze"); setReviewMainTab("analyze"); }}
                 >
                   <AuditOutlined />
-                  <span>项目审查</span>
+                  <span className="app-sidebar__label">项目审查</span>
                 </button>
               </Tooltip>
-              {!sidebarCollapsed && appMode === "review" && (
+              {!sidebarCollapsed && appMode === "review" && mainPanel === "analyze" && !chatsOpen && (
                 <div className="app-sidebar__session-list">
                   {conversations.slice(0, 8).map((c) => {
                     const { headline } = conversationListDisplay(c);
-                    const active = c.id === selectedConversationId && mainPanel === "analyze";
+                    const active = c.id === selectedConversationId;
                     return (
-                      <div
-                        key={c.id}
+                      <div key={c.id}
                         className={`app-sidebar__session-item${active ? " app-sidebar__session-item--active" : ""}`}
                         onClick={() => {
                           const pid = c.project_id;
                           if (typeof pid === "number") setSelectedId(pid);
-                          if (c.project_available === false) {
-                            setProjectViewOnlyReason("项目不可用或已删除：仅可查看历史会话，无法继续审查/追问。");
-                          } else {
-                            setProjectViewOnlyReason("");
-                          }
-                          setMainPanel("analyze");
-                          setSelectedConversationId(c.id);
-                          setChatsOpen(false);
+                          setProjectViewOnlyReason(c.project_available === false ? "项目不可用或已删除：仅可查看历史会话，无法继续审查/追问。" : "");
+                          setMainPanel("analyze"); setSelectedConversationId(c.id); setChatsOpen(false); setReviewMainTab("analyze");
                         }}
                       >
                         <span className="app-sidebar__session-title">{headline}</span>
-                        <Button
-                          type="text"
-                          size="small"
-                          icon={<CloseOutlined />}
-                          className="app-sidebar__session-del"
+                        <Button type="text" size="small" icon={<CloseOutlined />} className="app-sidebar__session-del"
                           onClick={(ev) => {
                             ev.stopPropagation();
                             const pid = c.project_id;
                             if (typeof pid !== "number") return;
                             Modal.confirm({
-                              title: "确认删除会话",
-                              content: `将删除会话「${headline}」。此操作不可撤销。`,
+                              title: "确认删除会话", content: `将删除会话「${headline}」。此操作不可撤销。`,
                               okText: "删除", okButtonProps: { danger: true }, cancelText: "取消",
                               onOk: async () => {
                                 await deleteConversation(pid, c.id);
-                                setSelectedConversationId((prev) => (prev === c.id ? null : prev));
+                                setSelectedConversationId((prev) => prev === c.id ? null : prev);
                                 await loadConversations({ q: chatSearchQuery });
                               },
                             });
@@ -3264,65 +3226,52 @@ export default function App() {
                       </div>
                     );
                   })}
-                  <button
-                    className="app-sidebar__all-link"
-                    onClick={() => { setAppMode("review"); setChatsOpen(true); }}
-                  >
-                    <span>○</span>
-                    <span>所有审查会话</span>
+                  <button className="app-sidebar__all-link" onClick={() => { setAppMode("review"); setChatsOpen(true); }}>
+                    <span>○</span><span className="app-sidebar__label">所有审查会话</span>
                   </button>
                 </div>
               )}
             </div>
 
-            {/* ─ 知识提取 section ─ */}
-            <div className="app-sidebar__section">
-              <Tooltip title={sidebarCollapsed ? "知识提取" : undefined} placement="right">
-                <button
-                  className={`app-sidebar__section-header${appMode === "extraction" ? " app-sidebar__section-header--active" : ""}`}
-                  onClick={() => { setAppMode("extraction"); setChatsOpen(false); }}
-                >
-                  <BulbOutlined />
-                  <span>知识提取</span>
-                </button>
-              </Tooltip>
-            </div>
-
-            <div className="app-sidebar__divider" />
+            {/* ─ 知识归纳 ─ */}
+            <Tooltip title={sidebarCollapsed ? "知识归纳" : undefined} placement="right">
+              <button
+                className={`app-sidebar__section-header${appMode === "extraction" && reviewMainTab !== "result_review" ? " app-sidebar__section-header--active" : ""}`}
+                onClick={() => { setAppMode("extraction"); setChatsOpen(false); setReviewMainTab("analyze"); }}
+              >
+                <BulbOutlined />
+                <span className="app-sidebar__label">知识归纳</span>
+              </button>
+            </Tooltip>
 
             {/* ─ 待批准规则 ─ */}
             <Tooltip title={sidebarCollapsed ? "待批准规则" : undefined} placement="right">
               <button
-                className={`app-sidebar__pending${appMode === "extraction" ? " app-sidebar__pending--active" : ""}`}
-                onClick={() => setAppMode("extraction")}
+                className={`app-sidebar__section-header${reviewMainTab === "result_review" ? " app-sidebar__section-header--active" : ""}`}
+                onClick={() => { setAppMode("review"); setChatsOpen(false); setMainPanel("analyze"); setReviewMainTab("result_review"); }}
               >
                 <PushpinOutlined />
-                <span>待批准规则</span>
+                <span className="app-sidebar__label">待批准规则</span>
               </button>
             </Tooltip>
 
             <div className="app-sidebar__divider" />
 
-            {/* ─ Review utilities ─ */}
+            {/* ─ 工具入口 ─ */}
             <Tooltip title={sidebarCollapsed ? "项目初始化" : undefined} placement="right">
-              <button
-                className="app-sidebar__action-btn"
+              <button className={`app-sidebar__section-header${appMode === "review" && mainPanel === "ingest" ? " app-sidebar__section-header--active" : ""}`}
                 onClick={() => { setAppMode("review"); setChatsOpen(false); setMainPanel("ingest"); }}
               >
                 <FolderOpenOutlined />
-                <span>项目初始化</span>
+                <span className="app-sidebar__label">项目初始化</span>
               </button>
             </Tooltip>
             <Tooltip title={sidebarCollapsed ? "审查域设定" : undefined} placement="right">
-              <button
-                className="app-sidebar__action-btn"
-                onClick={() => {
-                  setAppMode("review"); setChatsOpen(false); setMainPanel("review_domain");
-                  void loadSettings({ snapshot_chunk_strategy: true });
-                }}
+              <button className={`app-sidebar__section-header${appMode === "review" && mainPanel === "review_domain" ? " app-sidebar__section-header--active" : ""}`}
+                onClick={() => { setAppMode("review"); setChatsOpen(false); setMainPanel("review_domain"); void loadSettings({ snapshot_chunk_strategy: true }); }}
               >
                 <FileSearchOutlined />
-                <span>审查域设定</span>
+                <span className="app-sidebar__label">审查域设定</span>
               </button>
             </Tooltip>
           </div>
@@ -3331,9 +3280,9 @@ export default function App() {
           <div className="app-sidebar__footer">
             <div className="app-sidebar__user">
               <UserOutlined />
-              <span>{currentUser?.display_name ?? "未登录"}</span>
+              <span className="app-sidebar__label">{currentUser?.display_name ?? "未登录"}</span>
             </div>
-            <div style={{ display: "flex", gap: 2 }}>
+            <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
               <Button type="text" size="small" icon={<SettingOutlined />} title="设置" onClick={() => openStandaloneWindow("settings")} />
               <Button type="text" size="small" icon={currentUser ? <LogoutOutlined /> : <UserOutlined />}
                 title={currentUser ? "退出登录" : "登录"}
@@ -4469,33 +4418,6 @@ export default function App() {
 
       {!chatsOpen && appMode === "review" && mainPanel === "analyze" ? (
         <>
-          {/* ── 项目审查主 tabs：对话 | 结果评审 ── */}
-          <div style={{
-            display: "flex", gap: 0,
-            borderBottom: "1px solid var(--color-border, #e0e0d8)",
-            position: "sticky", top: 0, background: "var(--color-bg, #f5f5f0)", zIndex: 10,
-          }}>
-            {(["analyze", "result_review"] as const).map((key) => {
-              const label = key === "analyze" ? "对话" : "结果评审";
-              return (
-                <button
-                  key={key}
-                  onClick={() => setReviewMainTab(key)}
-                  style={{
-                    padding: "8px 20px", border: "none",
-                    borderBottom: reviewMainTab === key ? "2px solid #527c5e" : "2px solid transparent",
-                    background: "none", cursor: "pointer",
-                    fontWeight: reviewMainTab === key ? 600 : 400,
-                    color: reviewMainTab === key ? "#527c5e" : "#666",
-                    fontSize: 14, transition: "all 0.15s",
-                  }}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-
           {reviewMainTab === "result_review" ? (
             <div style={{ padding: "0 24px", maxWidth: 980, margin: "0 auto", width: "100%" }}>
               <ReviewQueueTab

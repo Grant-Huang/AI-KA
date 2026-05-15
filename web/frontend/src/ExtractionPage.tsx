@@ -51,7 +51,7 @@ type ChatMsg =
   | { role: "user" | "assistant" | "status"; content: string }
   | { role: "choices"; options: StrategyOption[] }
   | { role: "clarify"; questions: string[] };
-type ActiveTab = "extract" | "pending";
+
 
 // ── ChatArea ─────────────────────────────────────────────────────────────────
 
@@ -429,37 +429,11 @@ function ExpertQATab({
 
   return (
     <div style={{ padding: "16px 0" }}>
-      <Upload.Dragger
-        accept=".md,.html"
-        beforeUpload={(file) => { void handleUpload(file); return false; }}
-        showUploadList={false}
-        disabled={uploading}
-        style={{ marginBottom: 16 }}
-      >
-        <p className="ant-upload-drag-icon">
-          {uploading ? <Spin /> : <InboxOutlined style={{ fontSize: 32, color: "#527c5e" }} />}
-        </p>
-        <p>拖拽或点击上传规则文档（.md / .html）</p>
-        <p style={{ fontSize: 12, color: "#888" }}>上传后 LLM 将基于文档内容做知识澄清</p>
-      </Upload.Dragger>
-
-      {materialId && (
-        <>
-          <Alert
-            type="info"
-            message={`已加载文档：${docName}（material_id: ${materialId}）`}
-            style={{ marginBottom: 12 }}
-          />
-          {docName && (
-            <Tag
-              closable
-              onClose={() => { setMaterialId(null); setDocName(""); }}
-              icon={<PaperClipOutlined />}
-            >
-              {docName}
-            </Tag>
-          )}
-        </>
+      {materialId && docName && (
+        <Tag closable onClose={() => { setMaterialId(null); setDocName(""); }}
+          icon={<PaperClipOutlined />} style={{ marginBottom: 10 }}>
+          {docName}
+        </Tag>
       )}
 
       <ChatArea
@@ -470,52 +444,72 @@ function ExpertQATab({
       />
 
       <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-        <div style={{ flex: 1, position: "relative" }}>
-          <TextArea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void handleSend(); }
-            }}
-            placeholder={
-              isPostReview
-                ? "描述遗漏的问题或补充发现（Shift+Enter 换行）"
-                : "输入 A / B / C / D，或直接说你想聊的…（Shift+Enter 换行）"
-            }
-            autoSize={{ minRows: 2, maxRows: 6 }}
-            disabled={streaming}
-          />
-          {!isPostReview && (
-            <Upload
-              accept=".md,.html"
-              beforeUpload={(file) => { void handleUpload(file); return false; }}
-              showUploadList={false}
-              disabled={uploading || streaming}
-            >
-              <Tooltip title="上传文档（.md / .html）开启文档澄清模式">
-                <Button
-                  icon={uploading ? <Spin size="small" /> : <PaperClipOutlined />}
-                  size="small"
-                  type="text"
-                  disabled={uploading || streaming}
-                  style={{ position: "absolute", bottom: 6, right: 6 }}
-                />
-              </Tooltip>
-            </Upload>
-          )}
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {isPostReview && !streaming && messages.filter((m) => m.role !== "status" && m.role !== "assistant").length === 0 ? (
-            <Button type="primary" onClick={() => void handlePostReviewStart()}>开始提取</Button>
-          ) : (
-            <Button type="primary" onClick={() => void handleSend()} disabled={!input.trim() || streaming}>
-              发送
-            </Button>
-          )}
-          {streaming
-            ? <Button danger onClick={handleStop}>停止</Button>
-            : <Button onClick={handleReset} disabled={messages.length <= 1}>清空</Button>
-          }
+        <div style={{ flex: 1 }}>
+          <div style={{
+            border: "1px solid var(--color-border, #e0e0d8)", borderRadius: 10,
+            background: "#fff", overflow: "hidden",
+          }}>
+            <TextArea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void handleSend(); }
+              }}
+              placeholder={
+                isPostReview
+                  ? "描述遗漏的问题或补充发现（Shift+Enter 换行）"
+                  : "输入 A / B / C / D，或直接说你想聊的…（Shift+Enter 换行）"
+              }
+              autoSize={{ minRows: 2, maxRows: 6 }}
+              disabled={streaming}
+              style={{ border: "none", boxShadow: "none", resize: "none", padding: "10px 12px" }}
+            />
+            {/* Input toolbar */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 8px 6px" }}>
+              <div style={{ display: "flex", gap: 4 }}>
+                {!isPostReview && (
+                  <Tooltip
+                    trigger="click"
+                    placement="topLeft"
+                    title={
+                      <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: "2px 0" }}>
+                        <Upload accept=".md,.html" beforeUpload={(file) => { void handleUpload(file); return false; }}
+                          showUploadList={false} disabled={uploading || streaming}>
+                          <div style={{
+                            display: "flex", alignItems: "center", gap: 8, padding: "6px 10px",
+                            cursor: "pointer", borderRadius: 6, color: "#fff", fontSize: 13,
+                            whiteSpace: "nowrap",
+                          }}
+                            onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.15)")}
+                            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                          >
+                            <PaperClipOutlined />
+                            <span>{uploading ? "上传中…" : "上传规则文档 (.md/.html)"}</span>
+                          </div>
+                        </Upload>
+                      </div>
+                    }
+                    overlayInnerStyle={{ padding: "4px 0" }}
+                  >
+                    <Button size="small" type="text" icon={<PlusOutlined />}
+                      style={{ borderRadius: 6, fontWeight: 600, fontSize: 15 }}
+                      title="更多操作" disabled={streaming} />
+                  </Tooltip>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {isPostReview && !streaming && messages.filter((m) => m.role !== "status" && m.role !== "assistant").length === 0 ? (
+                  <Button type="primary" size="small" onClick={() => void handlePostReviewStart()}>开始提取</Button>
+                ) : (
+                  <Button type="primary" size="small" onClick={() => void handleSend()} disabled={!input.trim() || streaming}>发送</Button>
+                )}
+                {streaming
+                  ? <Button danger size="small" onClick={handleStop}>停止</Button>
+                  : <Button size="small" onClick={handleReset} disabled={streaming}>清空</Button>
+                }
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -706,7 +700,6 @@ function PendingRulesTab() {
 // ── ExtractionPage (main) ─────────────────────────────────────────────────────
 
 export default function ExtractionPage() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>("extract");
   const [postReviewCtx, setPostReviewCtx] = useState<{ projectId: number; conversationId: number } | null>(null);
 
   // Session history state
@@ -722,7 +715,6 @@ export default function ExtractionPage() {
         const ctx = JSON.parse(raw) as { projectId: number; conversationId: number };
         window.sessionStorage.removeItem("aika_post_review_ctx");
         setPostReviewCtx(ctx);
-        setActiveTab("extract");
       } catch { /* ignore */ }
     }
   }, []);
@@ -740,7 +732,6 @@ export default function ExtractionPage() {
     setCurrentSessionId(null);
     setPreloadMessages([]);
     setSessionKey((k) => k + 1);
-    setActiveTab("extract");
   };
 
   const handleSelectSession = async (sid: number) => {
@@ -752,8 +743,7 @@ export default function ExtractionPage() {
       setCurrentSessionId(sid);
       setPreloadMessages(chatMsgs);
       setSessionKey((k) => k + 1);
-      setActiveTab("extract");
-    } catch { /* ignore */ }
+      } catch { /* ignore */ }
   };
 
   const handleDeleteSession = (sid: number, ev: React.MouseEvent) => {
@@ -784,40 +774,16 @@ export default function ExtractionPage() {
     void appendExtractionMessages(sid, msgs).then(() => loadSessions());
   };
 
-  const tabItems: Array<{ key: ActiveTab; label: string; children: React.ReactNode }> = [
-    {
-      key: "extract",
-      label: "专家答问",
-      children: (
-        <ExpertQATab
-          key={sessionKey}
-          postReviewCtx={activeTab === "extract" ? postReviewCtx : null}
-          preloadMessages={preloadMessages}
-          sessionId={currentSessionId}
-          onFirstMessage={handleFirstMessage}
-          onRoundComplete={handleRoundComplete}
-        />
-      ),
-    },
-    {
-      key: "pending",
-      label: "待批准规则",
-      children: <PendingRulesTab />,
-    },
-  ];
-
   return (
     <div className="extraction-page" style={{ display: "flex", height: "100%", overflow: "hidden" }}>
       {/* ── Left session sidebar ── */}
       <div style={{
-        width: 200, flexShrink: 0,
-        borderRight: "1px solid var(--color-border, #e0e0d8)",
+        width: 200, flexShrink: 0, borderRight: "1px solid var(--color-border, #e0e0d8)",
         display: "flex", flexDirection: "column", overflow: "hidden",
         background: "var(--color-bg-sidebar, #f7f7f3)",
       }}>
         <div style={{
-          padding: "12px 10px 8px",
-          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "12px 10px 8px", display: "flex", alignItems: "center", justifyContent: "space-between",
           borderBottom: "1px solid var(--color-border, #e0e0d8)",
         }}>
           <Text strong style={{ fontSize: 13 }}>会话历史</Text>
@@ -825,78 +791,40 @@ export default function ExtractionPage() {
         </div>
         <div style={{ flex: 1, overflowY: "auto", padding: "6px 6px 8px" }}>
           {sessions.length === 0 ? (
-            <Text type="secondary" style={{ fontSize: 12, padding: "8px 4px", display: "block" }}>
-              暂无历史会话
-            </Text>
-          ) : (
-            sessions.map((s) => (
-              <div
-                key={s.id}
-                onClick={() => void handleSelectSession(s.id)}
-                style={{
-                  padding: "7px 8px 7px 10px",
-                  borderRadius: 6,
-                  cursor: "pointer",
-                  marginBottom: 2,
-                  background: s.id === currentSessionId ? "rgba(82,124,94,0.12)" : "transparent",
-                  borderLeft: s.id === currentSessionId ? "3px solid #527c5e" : "3px solid transparent",
-                  position: "relative",
-                }}
-              >
-                <div style={{
-                  fontSize: 13,
-                  fontWeight: s.id === currentSessionId ? 600 : 400,
-                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                  paddingRight: 20,
-                }}>
-                  {s.title}
-                </div>
-                <div style={{ fontSize: 11, color: "#999", marginTop: 2 }}>
-                  <ClockCircleOutlined style={{ marginRight: 3 }} />
-                  {s.updated_at.slice(0, 16).replace("T", " ")}
-                </div>
-                <Button
-                  type="text"
-                  icon={<CloseOutlined />}
-                  size="small"
-                  style={{ position: "absolute", top: 4, right: 2, opacity: 0.5 }}
-                  onClick={(e) => handleDeleteSession(s.id, e)}
-                />
+            <Text type="secondary" style={{ fontSize: 12, padding: "8px 4px", display: "block" }}>暂无历史会话</Text>
+          ) : sessions.map((s) => (
+            <div key={s.id} onClick={() => void handleSelectSession(s.id)} style={{
+              padding: "7px 8px 7px 10px", borderRadius: 6, cursor: "pointer", marginBottom: 2,
+              background: s.id === currentSessionId ? "rgba(82,124,94,0.12)" : "transparent",
+              borderLeft: s.id === currentSessionId ? "3px solid #527c5e" : "3px solid transparent",
+              position: "relative",
+            }}>
+              <div style={{ fontSize: 13, fontWeight: s.id === currentSessionId ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", paddingRight: 20 }}>
+                {s.title}
               </div>
-            ))
-          )}
+              <div style={{ fontSize: 11, color: "#999", marginTop: 2 }}>
+                <ClockCircleOutlined style={{ marginRight: 3 }} />
+                {s.updated_at.slice(0, 16).replace("T", " ")}
+              </div>
+              <Button type="text" icon={<CloseOutlined />} size="small"
+                style={{ position: "absolute", top: 4, right: 2, opacity: 0.5 }}
+                onClick={(e) => handleDeleteSession(s.id, e)}
+              />
+            </div>
+          ))}
         </div>
       </div>
 
-      {/* ── Main content ── */}
-      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-        <div style={{ borderBottom: "1px solid var(--color-border, #e0e0d8)" }}>
-          <div style={{ display: "flex", gap: 0 }}>
-            {tabItems.map((tab) => (
-              <button
-                key={tab.key}
-                onClick={() => setActiveTab(tab.key)}
-                style={{
-                  padding: "10px 20px",
-                  border: "none",
-                  borderBottom: activeTab === tab.key ? "2px solid #527c5e" : "2px solid transparent",
-                  background: "none",
-                  cursor: "pointer",
-                  fontWeight: activeTab === tab.key ? 600 : 400,
-                  color: activeTab === tab.key ? "#527c5e" : "#666",
-                  fontSize: 14,
-                  transition: "all 0.15s",
-                }}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div style={{ flex: 1, overflow: "auto", padding: "0 4px" }}>
-          {tabItems.find((t) => t.key === activeTab)?.children}
-        </div>
+      {/* ── Main content (no tabs) ── */}
+      <div style={{ flex: 1, overflow: "auto", padding: "0 4px" }}>
+        <ExpertQATab
+          key={sessionKey}
+          postReviewCtx={postReviewCtx}
+          preloadMessages={preloadMessages}
+          sessionId={currentSessionId}
+          onFirstMessage={handleFirstMessage}
+          onRoundComplete={handleRoundComplete}
+        />
       </div>
     </div>
   );
