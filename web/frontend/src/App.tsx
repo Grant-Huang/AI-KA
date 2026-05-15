@@ -601,7 +601,6 @@ export default function App() {
           // Profile data (if any) will be loaded from DB-based profile endpoint
           void prof; // profile_completed is part of AuthUser already
         } catch { /* profile not yet saved */ }
-        if (!user.profile_completed) setProfileModalOpen(true);
       } catch {
         setCurrentUser(null);
         setLoginOpen(true);
@@ -919,7 +918,6 @@ export default function App() {
       setLoginOpen(false);
       setLoginUsername("");
       setLoginPassword("");
-      if (!user.profile_completed) setProfileModalOpen(true);
     } catch (e: unknown) {
       setLoginError(e instanceof Error ? e.message : "登录失败");
     } finally {
