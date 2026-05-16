@@ -35,7 +35,7 @@ from backend.prompt_builder import (
     format_chunk_index_lines_markdown,
     merge_rules,
 )
-from backend.repo_paths import project_export_dir, project_md_out_dir, repository_root
+from backend.repo_paths import project_export_dir, project_md_out_dir, relative_posix, repository_root
 from backend.response import err, ok
 from backend.routers.auth import router as auth_router
 from backend.routers.conversations import router as conversations_router
@@ -214,7 +214,7 @@ def list_project_memory_files(project_id: int) -> JSONResponse:
         return JSONResponse(err("project not found"), status_code=404)
     root = memory_root_under_repo(repository_root())
     files = iter_memory_candidate_files(root, project_id)
-    rels = [str(f.relative_to(root)).replace("\\", "/") for f in files]
+    rels = [relative_posix(f, root) for f in files]
     return JSONResponse(ok({"memory_root": str(root), "files": rels}))
 
 

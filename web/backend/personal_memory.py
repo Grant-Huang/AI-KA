@@ -13,6 +13,8 @@ import struct
 from pathlib import Path
 from typing import Any
 
+from backend.repo_paths import relative_posix
+
 
 def personal_aika_dir() -> Path:
     raw = os.environ.get("AIKA_PERSONAL_DIR", "").strip()
@@ -163,7 +165,7 @@ def recall_personal_memory(
     scored: list[tuple[float, Path, str]] = []
 
     for p in files:
-        rel = str(p.relative_to(mem_dir)).replace("\\", "/")
+        rel = relative_posix(p, mem_dir)
         if f"personal:{rel}" in already_surfaced:
             continue
         try:
@@ -193,7 +195,7 @@ def recall_personal_memory(
     scored.sort(key=lambda x: (-x[0], str(x[1])))
     out: list[dict[str, Any]] = []
     for sc, p, body in scored[:limit]:
-        rel = str(p.relative_to(mem_dir)).replace("\\", "/")
+        rel = relative_posix(p, mem_dir)
         if len(body) > 4000:
             body = body[:4000] + "\n（已截断）\n"
         out.append({
