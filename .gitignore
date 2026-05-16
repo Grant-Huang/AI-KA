@@ -35,6 +35,9 @@ docs/epic-doc/out/
 # Cursor / editor logs
 .cursor/
 
+# Claude Code agent worktrees (ephemeral, not for commit)
+.claude/
+
 # Local docs source files (not for commit)
 docs/*.docx
 
