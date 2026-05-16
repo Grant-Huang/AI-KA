@@ -1416,6 +1416,94 @@ body {
   opacity: 1;
 }
 
+.session-group-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(47, 58, 50, 0.42);
+  padding: 8px 10px 3px;
+  letter-spacing: 0.2px;
+}
+
+.session-col__all-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: rgba(47, 58, 50, 0.55);
+  margin: 4px 0 2px;
+  transition: background 0.12s, color 0.12s;
+}
+
+.session-col__all-btn:hover {
+  background: rgba(47, 58, 50, 0.06);
+  color: #2f3a32;
+}
+
+/* ── All Sessions Panel ──────────────────────────────────────────────────── */
+
+.all-sessions-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.all-sessions-panel__header {
+  font-size: 15px;
+  font-weight: 600;
+  color: #2f3a32;
+  padding: 16px 20px 10px;
+  flex-shrink: 0;
+}
+
+.all-sessions-panel__search {
+  padding: 0 20px 12px;
+  flex-shrink: 0;
+}
+
+.all-sessions-panel__list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 12px 20px;
+}
+
+.all-sessions-item {
+  padding: 9px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-bottom: 2px;
+  transition: background 0.12s;
+}
+
+.all-sessions-item:hover {
+  background: rgba(47, 58, 50, 0.06);
+}
+
+.all-sessions-item__title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.all-sessions-item__title {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #2f3a32;
+  flex: 1;
+}
+
+.all-sessions-item__time {
+  font-size: 11px;
+  color: #999;
+  margin-top: 3px;
+}
+
 /* ── Chat Bubble Design ─────────────────────────────────────────────────── */
 
 .chat-thread {
