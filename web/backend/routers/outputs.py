@@ -3,11 +3,10 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
-from aika import db as dbm
 from backend.path_validate import PathValidationError, validate_path_under_dir
 from backend.repo_paths import project_export_dir
-from backend.response import err, ok
-from backend.deps import get_conn
+from backend.response import ok
+from backend.deps import get_conn, get_conversation_or_404, get_project_or_404
 from backend.services.outputs_index_service import list_outputs_index
 
 
@@ -17,12 +16,8 @@ router = APIRouter()
 @router.get("/api/v1/projects/{project_id}/conversations/{conversation_id}/outputs-index")
 def get_conversation_outputs_index(project_id: int, conversation_id: int, limit: int = 50) -> JSONResponse:
     conn = get_conn()
-    prj = dbm.get_project_by_id(conn, project_id)
-    if prj is None:
-        return JSONResponse(err("project not found"), status_code=404)
-    conv = dbm.get_conversation(conn, conversation_id)
-    if conv is None or conv.project_id != project_id:
-        return JSONResponse(err("conversation not found"), status_code=404)
+    get_project_or_404(conn, project_id)
+    get_conversation_or_404(conn, conversation_id, project_id=project_id)
     items = list_outputs_index(
         conn, project_id=project_id, conversation_id=conversation_id, limit=int(limit)
     )

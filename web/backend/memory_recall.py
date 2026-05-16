@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from aika import db as dbm
+from backend.repo_paths import relative_posix
 
 
 def _tokenize(s: str) -> set[str]:
@@ -73,7 +74,7 @@ def recall_memory_snippets(
 
     for p in files:
         try:
-            rel = str(p.relative_to(memory_root)).replace("\\", "/")
+            rel = relative_posix(p, memory_root)
         except ValueError:
             continue
         if rel in already_surfaced:
@@ -112,7 +113,7 @@ def recall_memory_snippets(
     out: list[dict[str, Any]] = []
     for sc, p, body in scored:
         try:
-            rel = str(p.relative_to(memory_root)).replace("\\", "/")
+            rel = relative_posix(p, memory_root)
         except ValueError:
             continue
         if len(body) > max_body_chars:

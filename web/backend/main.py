@@ -35,7 +35,7 @@ from backend.prompt_builder import (
     format_chunk_index_lines_markdown,
     merge_rules,
 )
-from backend.repo_paths import project_export_dir, project_md_out_dir, repository_root
+from backend.repo_paths import project_export_dir, project_md_out_dir, relative_posix, repository_root
 from backend.response import err, ok
 from backend.routers.auth import router as auth_router
 from backend.routers.conversations import router as conversations_router
@@ -214,7 +214,7 @@ def list_project_memory_files(project_id: int) -> JSONResponse:
         return JSONResponse(err("project not found"), status_code=404)
     root = memory_root_under_repo(repository_root())
     files = iter_memory_candidate_files(root, project_id)
-    rels = [str(f.relative_to(root)).replace("\\", "/") for f in files]
+    rels = [relative_posix(f, root) for f in files]
     return JSONResponse(ok({"memory_root": str(root), "files": rels}))
 
 
@@ -253,7 +253,6 @@ def upsert_project_memory_file(project_id: int, payload: dict[str, Any]) -> JSON
     embed_status = "skipped"
     if embeddings_configured():
         try:
-            from backend.embedding_service import bytes_to_vec  # noqa: F401 (verify import)
             h = emb_content_hash(content)
             existing = dbm.get_memory_embedding(conn, path=rel, content_hash=h)
             if existing is None:
@@ -681,50 +680,35 @@ def _get_vl_llm_api_key_effective() -> str | None:
     return get_settings().llm_api_key
 
 
-def _get_text_model() -> str:
+def _llm_setting(key: str, default: str = "") -> str:
     app_cfg, _ = _read_app_settings_md()
     raw = (app_cfg.get("llm_settings") or {}) if isinstance(app_cfg, dict) else {}
-    v = raw.get("text_model") if isinstance(raw, dict) else None
-    if isinstance(v, str) and v.strip():
-        return v.strip()
-    return DEFAULT_TEXT_MODEL
+    v = raw.get(key) if isinstance(raw, dict) else None
+    return v.strip() if isinstance(v, str) and v.strip() else default
+
+
+def _get_text_model() -> str:
+    return _llm_setting("text_model", DEFAULT_TEXT_MODEL)
 
 
 def _get_text_provider() -> str:
-    app_cfg, _ = _read_app_settings_md()
-    raw = (app_cfg.get("llm_settings") or {}) if isinstance(app_cfg, dict) else {}
-    v = raw.get("text_provider") if isinstance(raw, dict) else None
-    if isinstance(v, str) and v.strip():
-        return v.strip()
+    v = _llm_setting("text_provider")
+    if v:
+        return v
     st = get_settings()
     return (st.llm_provider or "").strip() or DEFAULT_TEXT_PROVIDER
 
 
 def _get_text_base_url() -> str:
-    app_cfg, _ = _read_app_settings_md()
-    raw = (app_cfg.get("llm_settings") or {}) if isinstance(app_cfg, dict) else {}
-    v = raw.get("text_base_url") if isinstance(raw, dict) else None
-    if isinstance(v, str) and v.strip():
-        return v.strip()
-    return str(get_settings().llm_base_url or "").strip()
+    return _llm_setting("text_base_url") or str(get_settings().llm_base_url or "").strip()
 
 
 def _get_vl_model() -> str:
-    app_cfg, _ = _read_app_settings_md()
-    raw = (app_cfg.get("llm_settings") or {}) if isinstance(app_cfg, dict) else {}
-    v = raw.get("vl_model") if isinstance(raw, dict) else None
-    if isinstance(v, str) and v.strip():
-        return v.strip()
-    return DEFAULT_VL_MODEL
+    return _llm_setting("vl_model", DEFAULT_VL_MODEL)
 
 
 def _get_vl_base_url() -> str:
-    app_cfg, _ = _read_app_settings_md()
-    raw = (app_cfg.get("llm_settings") or {}) if isinstance(app_cfg, dict) else {}
-    v = raw.get("vl_base_url") if isinstance(raw, dict) else None
-    if isinstance(v, str) and v.strip():
-        return v.strip()
-    return str(get_settings().llm_base_url or "").strip()
+    return _llm_setting("vl_base_url") or str(get_settings().llm_base_url or "").strip()
 
 
 def _get_embedding_model() -> str:
@@ -734,23 +718,11 @@ def _get_embedding_model() -> str:
 
 
 def _get_embed_model_from_llm_settings() -> str:
-    app_cfg, _ = _read_app_settings_md()
-    llm = app_cfg.get("llm_settings") if isinstance(app_cfg, dict) else {}
-    if isinstance(llm, dict):
-        v = llm.get("embed_model")
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return ""
+    return _llm_setting("embed_model")
 
 
 def _get_embed_base_url_from_llm_settings() -> str:
-    app_cfg, _ = _read_app_settings_md()
-    llm = app_cfg.get("llm_settings") if isinstance(app_cfg, dict) else {}
-    if isinstance(llm, dict):
-        v = llm.get("embed_base_url")
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return ""
+    return _llm_setting("embed_base_url")
 
 
 def _get_llm_settings() -> dict[str, Any]:
