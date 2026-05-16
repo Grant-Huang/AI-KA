@@ -1,3 +1,10 @@
+/* Register --sidebar-width as animatable so var() consumers transition in sync with the sidebar */
+@property --sidebar-width {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 126px;
+}
+
 :root {
   /* 首页审查报告 / 过程流 / 会话历史 共用阅读宽度 */
   --main-content-max-width: 820px;
@@ -12,6 +19,7 @@
   --footer-clear-extra-lines: 6;
   /* 无单位数字，与下面 calc 中 * 1px 相乘得到像素 */
   --footer-clear-base-px: 36;
+  transition: --sidebar-width 0.2s ease;
 }
 
 body {
