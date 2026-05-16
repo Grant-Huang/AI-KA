@@ -3588,7 +3588,7 @@ export default function App() {
             <div style={{ padding: "8px 0 0" }}>
               <div className="chat-bubble-row chat-bubble-row--assistant">
                 <div className="chat-bubble chat-bubble--assistant">
-                  你好！今天想做哪些方面的项目审查？
+                  <ThinkableMarkdown markdown="你好！今天想做哪些方面的项目审查？" />
                 </div>
               </div>
             </div>
@@ -4493,11 +4493,11 @@ export default function App() {
               <div className="composer">
                 <Input.TextArea
                   className="composer-textarea"
-                  rows={4}
+                  autoSize={{ minRows: 2, maxRows: 6 }}
                   placeholder={composerTextPlaceholder}
                   value={draftText}
                   onChange={(e) => setDraftText(e.target.value)}
-                  style={{ resize: "none", background: "#fff" }}
+                  style={{ background: "#fff" }}
                 />
                 <div className="composer-toolbar">
                   <div className="composer-left">
