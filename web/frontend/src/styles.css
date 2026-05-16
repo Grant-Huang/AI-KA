@@ -698,7 +698,7 @@ body {
   width: 100%;
   border: 1px solid #d9dfd7;
   border-radius: 18px;
-  background: #ecefe9;
+  background: #fff;
   padding: 14px 14px 12px;
   box-shadow: 0 -2px 20px rgba(47, 58, 50, 0.06);
 }
@@ -709,7 +709,7 @@ body {
 
 .composer-textarea textarea {
   border-radius: 14px !important;
-  background: transparent !important;
+  background: #fff !important;
   color: #2f3a32 !important;
   caret-color: #2f3a32;
   font-size: 15px !important;
