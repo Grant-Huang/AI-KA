@@ -3585,9 +3585,11 @@ export default function App() {
           ) : appMode === "review" && mainPanel === "review_domain" ? (
             reviewDomainPageNode
           ) : appMode === "review" && !showMainOutput ? (
-            <div style={{ padding: "20px 4px 0" }}>
-              <div style={{ fontSize: 16, fontWeight: 500, color: "#2f3a32", lineHeight: 1.5 }}>
-                你好！今天想做哪些方面的项目审查？
+            <div style={{ padding: "8px 0 0" }}>
+              <div className="chat-bubble-row chat-bubble-row--assistant">
+                <div className="chat-bubble chat-bubble--assistant">
+                  你好！今天想做哪些方面的项目审查？
+                </div>
               </div>
             </div>
           ) : appMode === "review" && showMainOutput ? (
