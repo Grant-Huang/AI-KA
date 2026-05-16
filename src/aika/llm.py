@@ -129,19 +129,22 @@ class OpenAICompatibleProvider(LLMProvider):
         lo = (err_text or "").lower()
         return "response_format" in lo or "json_schema" in lo or "json_object" in lo
 
-    def chat(self, *, system: str, user: str, config: LLMConfig) -> LLMResult:
+    def _resolve_credentials(self, config: LLMConfig) -> tuple[str, str, str]:
         base = (config.base_url or "").rstrip("/")
         if not base:
             raise LLMError("base_url is required for openai_compatible provider")
         model = config.model or ""
         if not model:
             raise LLMError("model is required for openai_compatible provider")
-
         api_key = config.api_key
         if not api_key:
             api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("AIKA_LLM_API_KEY")
         if not api_key:
             raise LLMError("api_key missing (set in config or env OPENAI_API_KEY/AIKA_LLM_API_KEY)")
+        return base, model, api_key
+
+    def chat(self, *, system: str, user: str, config: LLMConfig) -> LLMResult:
+        base, model, api_key = self._resolve_credentials(config)
 
         url = self._chat_completions_url(base)
         payload = {
@@ -179,18 +182,7 @@ class OpenAICompatibleProvider(LLMProvider):
         config: LLMConfig,
         prior_messages: list[tuple[str, str]] | None = None,
     ) -> Iterator[str]:
-        base = (config.base_url or "").rstrip("/")
-        if not base:
-            raise LLMError("base_url is required for openai_compatible provider")
-        model = config.model or ""
-        if not model:
-            raise LLMError("model is required for openai_compatible provider")
-
-        api_key = config.api_key
-        if not api_key:
-            api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("AIKA_LLM_API_KEY")
-        if not api_key:
-            raise LLMError("api_key missing (set in config or env OPENAI_API_KEY/AIKA_LLM_API_KEY)")
+        base, model, api_key = self._resolve_credentials(config)
 
         url = self._chat_completions_url(base)
         payload = {
