@@ -96,7 +96,7 @@ import SimpleMarkdown, { ThinkableMarkdown } from "./SimpleMarkdown";
 import { ChatWindow } from "./ChatWindow";
 import HelpPage from "./pages/help";
 import SystemSettingPage from "./pages/system_setting";
-import ExtractionPage, { ReviewQueueTab } from "./ExtractionPage";
+import ExtractionPage, { ReviewQueueTab, PendingRulesTab } from "./ExtractionPage";
 import { FindingsPanel, type Finding } from "./FindingsPanel";
 import type { ReviewQueueItem } from "./api";
 
@@ -4477,11 +4477,7 @@ export default function App() {
                 <span className="page-header__title">待批准规则</span>
               </div>
               <div style={{ padding: "0 24px" }}>
-                <ReviewQueueTab
-                  onStartExtraction={(item) => {
-                    void handleStartFromReviewQueue(item);
-                  }}
-                />
+                <PendingRulesTab />
               </div>
             </div>
           ) : (
