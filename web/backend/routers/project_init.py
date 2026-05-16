@@ -1,11 +1,14 @@
 """
-Project Init via File Upload.
+Project Init / File Append via Upload.
 
 POST /api/v1/projects/init-from-upload
-  - Accept multipart: files[] + paths (JSON array of relative paths) + project_name + vault_id
-  - Convert non-markdown files via markitdown
-  - Write converted files to vault/Projects/{project_name}/
-  - Register project in DB via ensure_project logic
+  mode=init  (default): create/register a new project
+    - params: files[], paths (JSON), project_name, vault_id (optional)
+    - writes to vault/Projects/{name}/ or .tmp/uploads/{name}/
+
+  mode=append: add files to an existing project
+    - params: files[], paths (JSON), project_id (required)
+    - writes to the project's existing root_path
 """
 from __future__ import annotations
 
@@ -19,7 +22,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from aika import db as dbm
 from backend.deps import get_conn
 from backend.obsidian_service import ensure_vault_structure
-from backend.response import err, ok
+from backend.response import ok
 
 router = APIRouter(prefix="/api/v1/projects", tags=["project-init"])
 
@@ -29,89 +32,33 @@ CONVERTIBLE_EXTS = {".docx", ".doc", ".pdf", ".xlsx", ".xls", ".pptx", ".ppt", "
 
 def _convert_to_markdown(src: Path) -> str:
     from markitdown import MarkItDown
-    md = MarkItDown()
-    result = md.convert(str(src))
+    result = MarkItDown().convert(str(src))
     return result.text_content or ""
 
 
 def _safe_rel_path(rel: str) -> Path:
-    """Strip leading slashes/dots and ensure no path traversal."""
+    """Strip leading slashes/dots; block path traversal."""
     parts = [p for p in Path(rel).parts if p not in ("", ".", "..")]
     return Path(*parts) if parts else Path("upload")
 
 
-@router.post("/init-from-upload")
-async def init_project_from_upload(
-    files: Annotated[list[UploadFile], File(...)],
-    paths: Annotated[str, Form()] = "[]",
-    project_name: Annotated[str, Form()] = "",
-    vault_id: Annotated[int | None, Form()] = None,
-):
-    """
-    Upload files (or a directory) to initialize a project in an Obsidian Vault.
-    Files are converted to Markdown via markitdown and written to
-    vault/Projects/{project_name}/.
-    """
-    if not files:
-        raise HTTPException(status_code=400, detail="No files uploaded")
-
-    # Parse relative paths (same length as files, if provided)
-    try:
-        rel_paths: list[str] = json.loads(paths)
-    except Exception:
-        rel_paths = []
-
-    # Pad or default relative paths
-    while len(rel_paths) < len(files):
-        rel_paths.append(files[len(rel_paths)].filename or "upload.md")
-
-    # Resolve vault path
-    vault_path: Path | None = None
-    if vault_id is not None:
-        with get_conn() as conn:
-            vault_row = dbm.get_obsidian_vault_by_id(conn, vault_id)
-        if vault_row is None:
-            raise HTTPException(status_code=404, detail=f"Vault #{vault_id} not found")
-        vault_path = Path(vault_row["path"])
-        if not vault_path.is_dir():
-            raise HTTPException(status_code=400, detail=f"Vault path not accessible: {vault_path}")
-
-    # Determine project_name
-    name = project_name.strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="project_name is required")
-
-    # Decide destination
-    if vault_path is not None:
-        ensure_vault_structure(vault_path)
-        dest_root = vault_path / "Projects" / name
-    else:
-        # No vault: write to a temporary staging area under .tmp/uploads/
-        from backend.repo_paths import repository_root
-        dest_root = repository_root() / ".tmp" / "uploads" / name
-
-    dest_root.mkdir(parents=True, exist_ok=True)
-
+async def _write_files(files: list[UploadFile], rel_paths: list[str], dest_root: Path):
+    """Convert and write uploaded files into dest_root. Returns (results, errors)."""
     results: list[dict] = []
     errors: list[str] = []
-
     with tempfile.TemporaryDirectory() as tmpdir:
         for upload_file, rel_str in zip(files, rel_paths):
             rel = _safe_rel_path(rel_str)
             suffix = rel.suffix.lower()
-            original_name = rel.name
 
-            # Read uploaded bytes
             content = await upload_file.read()
             if not content:
                 errors.append(f"{rel_str}: empty file, skipped")
                 continue
 
-            # Write to temp file for conversion
-            tmp_src = Path(tmpdir) / original_name
+            tmp_src = Path(tmpdir) / rel.name
             tmp_src.write_bytes(content)
 
-            # Determine output path (always .md)
             if suffix in PASSTHROUGH_EXTS:
                 out_rel = rel
                 md_text = content.decode("utf-8", errors="replace")
@@ -123,23 +70,95 @@ async def init_project_from_upload(
                     errors.append(f"{rel_str}: conversion failed — {exc}")
                     continue
             else:
-                # Unknown extension: try conversion, fall back to plain text
                 out_rel = rel.with_suffix(".md")
                 try:
                     md_text = _convert_to_markdown(tmp_src)
                 except Exception:
                     md_text = content.decode("utf-8", errors="replace")
 
-            # Write output
             out_path = dest_root / out_rel
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(md_text, encoding="utf-8")
             results.append({"source": rel_str, "written": str(out_rel)})
+    return results, errors
 
+
+@router.post("/init-from-upload")
+async def init_project_from_upload(
+    files: Annotated[list[UploadFile], File(...)],
+    paths: Annotated[str, Form()] = "[]",
+    mode: Annotated[str, Form()] = "init",
+    project_name: Annotated[str, Form()] = "",
+    vault_id: Annotated[int | None, Form()] = None,
+    project_id: Annotated[int | None, Form()] = None,
+):
+    """
+    Upload files to initialize a new project (mode=init) or append to an
+    existing one (mode=append).
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded")
+
+    try:
+        rel_paths: list[str] = json.loads(paths)
+    except Exception:
+        rel_paths = []
+    while len(rel_paths) < len(files):
+        rel_paths.append(files[len(rel_paths)].filename or "upload.md")
+
+    # ── append mode ──────────────────────────────────────────────────────────
+    if mode == "append":
+        if project_id is None:
+            raise HTTPException(status_code=400, detail="project_id is required for append mode")
+        with get_conn() as conn:
+            project = dbm.get_project_by_id(conn, project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail=f"Project #{project_id} not found")
+        dest_root = Path(project.root_path)
+        if not dest_root.exists():
+            dest_root.mkdir(parents=True, exist_ok=True)
+
+        results, errors = await _write_files(files, rel_paths, dest_root)
+        if not results:
+            raise HTTPException(status_code=422, detail=f"No files were written. Errors: {errors}")
+
+        return ok({
+            "id": project.id,
+            "name": project.name,
+            "root_path": project.root_path,
+            "vault_id": project.vault_id,
+            "created": False,
+            "files_written": len(results),
+            "files": results,
+            "errors": errors,
+        })
+
+    # ── init mode (default) ──────────────────────────────────────────────────
+    name = project_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="project_name is required")
+
+    vault_path: Path | None = None
+    if vault_id is not None:
+        with get_conn() as conn:
+            vault_row = dbm.get_obsidian_vault_by_id(conn, vault_id)
+        if vault_row is None:
+            raise HTTPException(status_code=404, detail=f"Vault #{vault_id} not found")
+        vault_path = Path(vault_row["path"])
+        if not vault_path.is_dir():
+            raise HTTPException(status_code=400, detail=f"Vault path not accessible: {vault_path}")
+        ensure_vault_structure(vault_path)
+        dest_root = vault_path / "Projects" / name
+    else:
+        from backend.repo_paths import repository_root
+        dest_root = repository_root() / ".tmp" / "uploads" / name
+
+    dest_root.mkdir(parents=True, exist_ok=True)
+
+    results, errors = await _write_files(files, rel_paths, dest_root)
     if not results:
         raise HTTPException(status_code=422, detail=f"No files were written. Errors: {errors}")
 
-    # Register project in DB
     vault_subfolder = f"Projects/{name}" if vault_id is not None else None
     with get_conn() as conn:
         project = dbm.get_project_by_root_path(conn, str(dest_root))

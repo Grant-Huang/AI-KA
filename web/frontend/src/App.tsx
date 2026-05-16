@@ -748,15 +748,13 @@ export default function App() {
   const [reportLoading, setReportLoading] = useState(false);
   const [nativePickerAvailable, setNativePickerAvailable] = useState(true);
   const [pickLoading, setPickLoading] = useState(false);
-  const [manualRootInput, setManualRootInput] = useState("");
-  const [manualLoadLoading, setManualLoadLoading] = useState(false);
-  const [manualPickOpen, setManualPickOpen] = useState(false);
-  const [uploadInitOpen, setUploadInitOpen] = useState(false);
-  const [uploadInitFiles, setUploadInitFiles] = useState<File[]>([]);
-  const [uploadInitRelPaths, setUploadInitRelPaths] = useState<string[]>([]);
-  const [uploadInitName, setUploadInitName] = useState("");
-  const [uploadInitLoading, setUploadInitLoading] = useState(false);
-  const uploadInitInputRef = useRef<HTMLInputElement>(null);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [uploadModalMode, setUploadModalMode] = useState<"init" | "append">("init");
+  const [uploadFiles, setUploadFiles] = useState<File[]>([]);
+  const [uploadRelPaths, setUploadRelPaths] = useState<string[]>([]);
+  const [uploadProjectName, setUploadProjectName] = useState("");
+  const [uploadLoading, setUploadLoading] = useState(false);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const [focusPoints, setFocusPoints] = useState<string[]>([]);
   const [focusDefs, setFocusDefs] = useState<FocusPoint[]>([]);
   const [focusPresets, setFocusPresets] = useState<FocusPreset[]>([]);
@@ -1378,58 +1376,58 @@ export default function App() {
     }
   };
 
-  const onLoadManualPath = async () => {
-    const p = manualRootInput.trim();
-    if (!p) {
-      message.warning("请先填写项目根路径");
-      return;
-    }
-    setManualLoadLoading(true);
-    try {
-      await ensureProjectForPath(p);
-    } catch (e) {
-      message.error(String((e as Error).message));
-    } finally {
-      setManualLoadLoading(false);
-    }
+  const openUploadModal = (mode: "init" | "append") => {
+    setUploadModalMode(mode);
+    setUploadFiles([]);
+    setUploadRelPaths([]);
+    if (mode === "init") setUploadProjectName("");
+    setUploadModalOpen(true);
   };
 
-  const onUploadInitFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onUploadFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = Array.from(e.target.files || []);
     if (!fileList.length) return;
-    setUploadInitFiles(fileList);
-    // Collect relative paths from webkitRelativePath; fall back to filename
+    setUploadFiles(fileList);
     const paths = fileList.map((f) => (f as any).webkitRelativePath || f.name);
-    setUploadInitRelPaths(paths);
-    // Auto-detect project name from top-level folder name
-    if (!uploadInitName) {
+    setUploadRelPaths(paths);
+    // Auto-detect project name from folder name (init mode only)
+    if (uploadModalMode === "init" && !uploadProjectName) {
       const topFolder = paths[0]?.split("/")[0];
-      if (topFolder && topFolder !== paths[0]) setUploadInitName(topFolder);
+      if (topFolder && topFolder !== paths[0]) setUploadProjectName(topFolder);
     }
   };
 
-  const onDoUploadInit = async () => {
-    if (!uploadInitFiles.length) { message.warning("请先选择文件或目录"); return; }
-    if (!uploadInitName.trim()) { message.warning("请填写项目名称"); return; }
-    setUploadInitLoading(true);
+  const onDoUpload = async () => {
+    if (!uploadFiles.length) { message.warning("请先选择文件或目录"); return; }
+    if (uploadModalMode === "init" && !uploadProjectName.trim()) {
+      message.warning("请填写项目名称");
+      return;
+    }
+    setUploadLoading(true);
     try {
-      const result = await initProjectFromUpload(
-        uploadInitFiles, uploadInitRelPaths, uploadInitName.trim(),
-        selectedVaultId ?? null,
-      );
+      const isInit = uploadModalMode === "init";
+      const result = await initProjectFromUpload({
+        files: uploadFiles,
+        relPaths: uploadRelPaths,
+        mode: uploadModalMode,
+        projectName: isInit ? uploadProjectName.trim() : undefined,
+        vaultId: isInit ? (selectedVaultId ?? null) : undefined,
+        projectId: !isInit ? (selectedId ?? null) : undefined,
+      });
       await loadProjects();
       setSelectedId(result.id);
-      setUploadInitOpen(false);
-      setUploadInitFiles([]);
-      setUploadInitRelPaths([]);
-      setUploadInitName("");
-      if (uploadInitInputRef.current) uploadInitInputRef.current.value = "";
-      const errMsg = result.errors.length ? `（${result.errors.length} 个文件跳过）` : "";
-      message.success(`已${result.created ? "创建" : "加载"}项目「${result.name}」，转换 ${result.files_written} 个文件${errMsg}`);
+      setUploadModalOpen(false);
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+      const errNote = result.errors.length ? `（${result.errors.length} 个文件跳过）` : "";
+      if (isInit) {
+        message.success(`已${result.created ? "创建" : "加载"}项目「${result.name}」，转换 ${result.files_written} 个文件${errNote}`);
+      } else {
+        message.success(`已向「${result.name}」追加 ${result.files_written} 个文件${errNote}`);
+      }
     } catch (e) {
       message.error(String((e as Error).message));
     } finally {
-      setUploadInitLoading(false);
+      setUploadLoading(false);
     }
   };
 
@@ -3560,23 +3558,24 @@ export default function App() {
                     }}
                   />
                   <Space style={{ marginLeft: 8 }}>
-                    <Button type="default" loading={pickLoading} onClick={() => void openProjectPicker()}>
-                      选择目录并注册
-                    </Button>
-                    <Button type="default" onClick={() => setManualPickOpen(true)}>
-                      手动输入路径
-                    </Button>
                     <Button
-                      type="default"
+                      type="primary"
                       icon={<span style={{ marginRight: 4 }}>📤</span>}
-                      onClick={() => {
-                        setUploadInitOpen(true);
-                        setUploadInitFiles([]);
-                        setUploadInitRelPaths([]);
-                        setUploadInitName("");
-                      }}
+                      onClick={() => openUploadModal("init")}
                     >
                       上传文件初始化
+                    </Button>
+                    {selectedId != null && (
+                      <Button
+                        type="default"
+                        icon={<span style={{ marginRight: 4 }}>➕</span>}
+                        onClick={() => openUploadModal("append")}
+                      >
+                        追加文件
+                      </Button>
+                    )}
+                    <Button type="default" loading={pickLoading} onClick={() => void openProjectPicker()}>
+                      选择目录注册
                     </Button>
                     <Button
                       type="default"
@@ -4392,60 +4391,51 @@ export default function App() {
       </Modal>
       {/* 新对话：已改为直接进入空白会话页（startNewConversationPage），保留 state 兼容历史但不再使用弹窗 */}
 
+      {/* ── 上传文件 Modal（初始化 / 追加两用）── */}
       <Modal
-        title="加载项目目录"
-        open={manualPickOpen}
-        onCancel={() => setManualPickOpen(false)}
-        okText="加载"
-        onOk={() => void onLoadManualPath().then(() => setManualPickOpen(false))}
-        confirmLoading={manualLoadLoading}
-        width={620}
-      >
-        <Space direction="vertical" style={{ width: "100%" }} size={10}>
-          <Text type="secondary">请输入后端可见的项目根路径（容器内路径）。</Text>
-          <Input
-            value={manualRootInput}
-            onChange={(e) => setManualRootInput(e.target.value)}
-            onPressEnter={() => void onLoadManualPath().then(() => setManualPickOpen(false))}
-          />
-        </Space>
-      </Modal>
-
-      {/* ── Upload Init Modal ── */}
-      <Modal
-        title="📤 上传文件初始化项目"
-        open={uploadInitOpen}
-        onCancel={() => { setUploadInitOpen(false); if (uploadInitInputRef.current) uploadInitInputRef.current.value = ""; }}
-        okText="上传并初始化"
-        onOk={() => void onDoUploadInit()}
-        confirmLoading={uploadInitLoading}
-        width={640}
+        title={uploadModalMode === "init" ? "📤 上传文件初始化项目" : "➕ 向项目追加文件"}
+        open={uploadModalOpen}
+        onCancel={() => { setUploadModalOpen(false); if (uploadInputRef.current) uploadInputRef.current.value = ""; }}
+        okText={uploadModalMode === "init" ? "上传并初始化" : "上传并追加"}
+        onOk={() => void onDoUpload()}
+        confirmLoading={uploadLoading}
+        width={600}
       >
         <Space direction="vertical" style={{ width: "100%" }} size={14}>
-          <Text type="secondary">
-            选择本地文件或整个文件夹，系统将自动将 .docx/.pdf/.xlsx/.pptx/.html 等转换为 Markdown，
-            写入 Vault/Projects/&lt;项目名&gt;/ 并注册为项目。
-          </Text>
-          {selectedVaultId != null ? (
+          {uploadModalMode === "init" ? (
             <Text type="secondary">
-              目标 Vault：<Text code>{vaults.find((v) => v.id === selectedVaultId)?.name || `#${selectedVaultId}`}</Text>
+              选择本地文件或文件夹，.docx/.pdf/.xlsx/.pptx/.html 等自动转为 Markdown，
+              写入 Vault/Projects/&lt;项目名&gt;/ 并注册为新项目。
             </Text>
           ) : (
-            <Alert
-              type="warning"
-              showIcon
-              message="未选择 Vault，文件将写入后端临时目录。建议先在主界面选择一个 Obsidian Vault。"
-            />
+            <Text type="secondary">
+              向当前项目追加新文件，文件将转换后写入项目目录，无需重新注册。
+            </Text>
           )}
+
+          {uploadModalMode === "init" && (
+            selectedVaultId != null ? (
+              <Text type="secondary">
+                目标 Vault：<Text code>{vaults.find((v) => v.id === selectedVaultId)?.name || `#${selectedVaultId}`}</Text>
+              </Text>
+            ) : (
+              <Alert
+                type="warning"
+                showIcon
+                message="未选择 Vault，文件将写入后端临时目录。建议先注册一个 Obsidian Vault。"
+              />
+            )
+          )}
+
           <div>
-            <Text strong style={{ display: "block", marginBottom: 6 }}>选择文件夹（推荐）或多个文件</Text>
-            <Space direction="vertical" style={{ width: "100%" }} size={6}>
+            <Text strong style={{ display: "block", marginBottom: 6 }}>选择文件</Text>
+            <Space size={8}>
               <Button
                 onClick={() => {
-                  if (uploadInitInputRef.current) {
-                    (uploadInitInputRef.current as any).webkitdirectory = true;
-                    (uploadInitInputRef.current as any).multiple = true;
-                    uploadInitInputRef.current.click();
+                  if (uploadInputRef.current) {
+                    (uploadInputRef.current as any).webkitdirectory = true;
+                    uploadInputRef.current.removeAttribute("multiple");
+                    uploadInputRef.current.click();
                   }
                 }}
               >
@@ -4453,34 +4443,39 @@ export default function App() {
               </Button>
               <Button
                 onClick={() => {
-                  if (uploadInitInputRef.current) {
-                    (uploadInitInputRef.current as any).webkitdirectory = false;
-                    (uploadInitInputRef.current as any).multiple = true;
-                    uploadInitInputRef.current.click();
+                  if (uploadInputRef.current) {
+                    (uploadInputRef.current as any).webkitdirectory = false;
+                    uploadInputRef.current.setAttribute("multiple", "");
+                    uploadInputRef.current.click();
                   }
                 }}
               >
-                选择多个文件
+                选择文件
               </Button>
-              <input
-                ref={uploadInitInputRef}
-                type="file"
-                style={{ display: "none" }}
-                onChange={onUploadInitFileChange}
-              />
-              {uploadInitFiles.length > 0 && (
-                <Text type="secondary">已选择 {uploadInitFiles.length} 个文件</Text>
-              )}
             </Space>
-          </div>
-          <div>
-            <Text strong style={{ display: "block", marginBottom: 6 }}>项目名称</Text>
-            <Input
-              value={uploadInitName}
-              onChange={(e) => setUploadInitName(e.target.value)}
-              placeholder="从文件夹名自动识别，也可手动修改"
+            <input
+              ref={uploadInputRef}
+              type="file"
+              style={{ display: "none" }}
+              onChange={onUploadFileChange}
             />
+            {uploadFiles.length > 0 && (
+              <Text type="secondary" style={{ display: "block", marginTop: 6 }}>
+                已选 {uploadFiles.length} 个文件
+              </Text>
+            )}
           </div>
+
+          {uploadModalMode === "init" && (
+            <div>
+              <Text strong style={{ display: "block", marginBottom: 6 }}>项目名称</Text>
+              <Input
+                value={uploadProjectName}
+                onChange={(e) => setUploadProjectName(e.target.value)}
+                placeholder="从文件夹名自动识别，也可手动修改"
+              />
+            </div>
+          )}
         </Space>
       </Modal>
 

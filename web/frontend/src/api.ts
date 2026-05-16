@@ -632,18 +632,22 @@ export interface InitUploadResult {
   errors: string[];
 }
 
-export async function initProjectFromUpload(
-  files: File[],
-  relPaths: string[],
-  projectName: string,
-  vaultId?: number | null,
-): Promise<InitUploadResult> {
+export async function initProjectFromUpload(opts: {
+  files: File[];
+  relPaths: string[];
+  mode: "init" | "append";
+  projectName?: string;
+  vaultId?: number | null;
+  projectId?: number | null;
+}): Promise<InitUploadResult> {
   const fd = new FormData();
-  for (const f of files) fd.append("files", f);
-  fd.append("paths", JSON.stringify(relPaths));
-  fd.append("project_name", projectName);
-  if (vaultId != null) fd.append("vault_id", String(vaultId));
-  // Use fetch directly — don't set Content-Type, browser sets multipart boundary automatically
+  for (const f of opts.files) fd.append("files", f);
+  fd.append("paths", JSON.stringify(opts.relPaths));
+  fd.append("mode", opts.mode);
+  if (opts.projectName) fd.append("project_name", opts.projectName);
+  if (opts.vaultId != null) fd.append("vault_id", String(opts.vaultId));
+  if (opts.projectId != null) fd.append("project_id", String(opts.projectId));
+  // Use fetch directly — don't set Content-Type; browser sets multipart boundary
   const r = await fetch(`${BASE}/api/v1/projects/init-from-upload`, {
     method: "POST",
     credentials: "include",
