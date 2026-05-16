@@ -80,11 +80,7 @@ function ChatArea({
   };
 
   return (
-    <div style={{
-      border: "1px solid var(--color-border, #e0e0d8)", borderRadius: 8,
-      background: "var(--color-bg-card, #fff)",
-      flex: 1, overflow: "hidden", display: "flex", flexDirection: "column",
-    }}>
+    <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
       <ChatWindow<ChatMsg>
         messages={messages}
         isStreaming={streaming}
@@ -145,7 +141,7 @@ function ChatArea({
           }
           return null;
         }}
-        style={{ flex: 1, overflowY: "auto", padding: "12px 14px", maxWidth: "none", margin: 0 }}
+        style={{ flex: 1, overflowY: "auto" }}
       />
     </div>
   );
@@ -376,16 +372,16 @@ function ExpertQATab({
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", padding: "12px 16px" }}>
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
       {materialId && docName && (
         <Tag closable onClose={() => { setMaterialId(null); setDocName(""); }}
-          icon={<PaperClipOutlined />} style={{ marginBottom: 8, flexShrink: 0 }}>
+          icon={<PaperClipOutlined />} style={{ margin: "8px 12px 0", flexShrink: 0 }}>
           {docName}
         </Tag>
       )}
 
       {/* Chat area fills available height */}
-      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", marginBottom: 10 }}>
+      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
         <ChatArea
           messages={messages}
           streaming={streaming}
@@ -395,7 +391,7 @@ function ExpertQATab({
       </div>
 
       {/* Input box pinned at bottom */}
-      <div style={{ flexShrink: 0 }}>
+      <div style={{ flexShrink: 0, padding: "0 12px 12px" }}>
         <div style={{
           border: "1px solid var(--color-border, #e0e0d8)", borderRadius: 10,
           background: "#fff", overflow: "hidden",
