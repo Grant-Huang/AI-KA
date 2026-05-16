@@ -2418,10 +2418,11 @@ export default function App() {
   const composerTextPlaceholder = useMemo(() => {
     if (projectViewOnlyReason.trim()) return projectViewOnlyReason.trim();
     if (corpusStaleReason.trim()) return corpusStaleReason.trim();
+    if (!showMainOutput && !selectedConversationId) return "你可以粘贴项目文件内容，上传项目文档，或者选择项目空间，然后提出你的问题";
     if (composerHintDismissed) return DEFAULT_COMPOSER_PLACEHOLDER;
     const h = (settingsDraft.composer_hint ?? "").trim();
     return h || DEFAULT_COMPOSER_PLACEHOLDER;
-  }, [projectViewOnlyReason, corpusStaleReason, composerHintDismissed, settingsDraft.composer_hint]);
+  }, [projectViewOnlyReason, corpusStaleReason, showMainOutput, selectedConversationId, composerHintDismissed, settingsDraft.composer_hint]);
 
   const canStartAgentMessage = useMemo(() => {
     if (pipelineRunning) return false;
@@ -3583,6 +3584,14 @@ export default function App() {
             </div>
           ) : appMode === "review" && mainPanel === "review_domain" ? (
             reviewDomainPageNode
+          ) : appMode === "review" && !showMainOutput ? (
+            <div style={{ padding: "8px 0 0" }}>
+              <div className="chat-bubble-row chat-bubble-row--assistant">
+                <div className="chat-bubble chat-bubble--assistant">
+                  你好！今天想做哪些方面的项目审查？
+                </div>
+              </div>
+            </div>
           ) : appMode === "review" && showMainOutput ? (
             <>
               <div className="page-header">
@@ -4478,21 +4487,8 @@ export default function App() {
               </div>
             </div>
           ) : (
-        <div
-          className={`composer-overlay ${
-            // 打开会话时输入框固定底部；空白页可居中
-            selectedConversationId != null || showMainOutput ? "composer-overlay-bottom" : "composer-overlay-center"
-          }`}
-        >
+        <div className="composer-overlay composer-overlay-bottom">
           <div className="composer-overlay-inner">
-            {!showMainOutput ? (
-              <div className="welcome">
-                <div className="welcome-title">Welcome</div>
-                <div className="welcome-subtitle">
-                  {selectedId != null ? `，${DEFAULT_USERNAME}` : "，请选择已初始化项目（左侧可进入项目初始化）"}
-                </div>
-              </div>
-            ) : null}
             <div className="composer-footer-stack">
               <div className="composer">
                 <Input.TextArea
@@ -4501,7 +4497,7 @@ export default function App() {
                   placeholder={composerTextPlaceholder}
                   value={draftText}
                   onChange={(e) => setDraftText(e.target.value)}
-                  style={{ resize: "none" }}
+                  style={{ resize: "none", background: "#fff" }}
                 />
                 <div className="composer-toolbar">
                   <div className="composer-left">
