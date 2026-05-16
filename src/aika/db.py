@@ -707,8 +707,7 @@ def update_project_rules(conn: sqlite3.Connection, project_id: int, rules_json: 
 
 
 def clear_project_index_state(conn: sqlite3.Connection, project_id: int) -> None:
-    """Remove annotations, documents and chunks for a project (e.g. after root_path change)."""
-    conn.execute("DELETE FROM annotations WHERE project_id=?", (project_id,))
+    """Remove documents (and chunks via CASCADE) for a project (e.g. after root_path change)."""
     conn.execute("DELETE FROM documents WHERE project_id=?", (project_id,))
     conn.commit()
 
