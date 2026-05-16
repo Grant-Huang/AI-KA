@@ -3249,7 +3249,7 @@ export default function App() {
             {/* ─ 待批准规则 ─ */}
             <Tooltip title={sidebarCollapsed ? "待批准规则" : undefined} placement="right">
               <button
-                className={`app-sidebar__section-header${appMode === "review" && reviewMainTab === "result_review" ? " app-sidebar__section-header--active" : ""}`}
+                className={`app-sidebar__section-header${appMode === "review" && mainPanel === "analyze" && reviewMainTab === "result_review" ? " app-sidebar__section-header--active" : ""}`}
                 onClick={() => { navPush({ appMode: "review", mainPanel: "analyze", reviewMainTab: "result_review", selectedId, selectedConversationId: null }); setAppMode("review"); setMainPanel("analyze"); setReviewMainTab("result_review"); }}
               >
                 <PushpinOutlined />
@@ -3262,7 +3262,7 @@ export default function App() {
             {/* ─ 工具入口 ─ */}
             <Tooltip title={sidebarCollapsed ? "项目初始化" : undefined} placement="right">
               <button className={`app-sidebar__section-header${appMode === "review" && mainPanel === "ingest" ? " app-sidebar__section-header--active" : ""}`}
-                onClick={() => { navPush({ appMode: "review", mainPanel: "ingest", reviewMainTab: "analyze", selectedId, selectedConversationId: null }); setAppMode("review"); setMainPanel("ingest"); }}
+                onClick={() => { navPush({ appMode: "review", mainPanel: "ingest", reviewMainTab: "analyze", selectedId, selectedConversationId: null }); setAppMode("review"); setMainPanel("ingest"); setReviewMainTab("analyze"); }}
               >
                 <FolderOpenOutlined />
                 <span className="app-sidebar__label">项目初始化</span>
@@ -3270,7 +3270,7 @@ export default function App() {
             </Tooltip>
             <Tooltip title={sidebarCollapsed ? "审查域设定" : undefined} placement="right">
               <button className={`app-sidebar__section-header${appMode === "review" && mainPanel === "review_domain" ? " app-sidebar__section-header--active" : ""}`}
-                onClick={() => { navPush({ appMode: "review", mainPanel: "review_domain", reviewMainTab: "analyze", selectedId: null, selectedConversationId: null }); setAppMode("review"); setMainPanel("review_domain"); void loadSettings({ snapshot_chunk_strategy: true }); }}
+                onClick={() => { navPush({ appMode: "review", mainPanel: "review_domain", reviewMainTab: "analyze", selectedId: null, selectedConversationId: null }); setAppMode("review"); setMainPanel("review_domain"); setReviewMainTab("analyze"); void loadSettings({ snapshot_chunk_strategy: true }); }}
               >
                 <FileSearchOutlined />
                 <span className="app-sidebar__label">审查域设定</span>
