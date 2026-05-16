@@ -1394,18 +1394,26 @@ def _try_backfill_vault_link(conn, project: dbm.ProjectRow) -> None:
 
 
 @app.get("/api/v1/projects")
-def list_projects() -> JSONResponse:
+def list_projects(with_status: bool = False, include_archived: bool = False) -> JSONResponse:
     conn = _conn()
-    items = dbm.list_projects(conn)
-    return JSONResponse(
-        ok(
-            {
-                "projects": [
-                    {"id": p.id, "name": p.name, "root_path": p.root_path} for p in items
-                ]
+    items = dbm.list_projects(conn, include_archived=include_archived)
+
+    def _project_dict(p: Any) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "id": p.id, "name": p.name, "root_path": p.root_path,
+            "vault_id": p.vault_id, "archived": bool(p.archived),
+        }
+        if with_status:
+            chunk_count = int(dbm.count_project_chunks(conn, project_id=p.id))
+            review_runs = int(dbm.count_project_completed_outputs(conn, project_id=p.id))
+            d["status"] = {
+                "initialized": chunk_count > 0,
+                "chunk_count": chunk_count,
+                "has_review_records": review_runs > 0,
             }
-        )
-    )
+        return d
+
+    return JSONResponse(ok({"projects": [_project_dict(p) for p in items]}))
 
 
 @app.patch("/api/v1/projects/{project_id}")
@@ -1431,10 +1439,14 @@ def patch_project(project_id: int, payload: dict[str, Any]) -> JSONResponse:
         if existing and existing.id != project_id:
             return JSONResponse(err("project name already exists"), status_code=409)
         dbm.update_project_name(conn, project_id, name)
+    if "vault_id" in payload:
+        raw_vid = payload.get("vault_id")
+        vault_id_val = int(raw_vid) if raw_vid is not None else None
+        dbm.update_project_vault(conn, project_id, vault_id=vault_id_val, vault_subfolder=None)
     prj2 = dbm.get_project_by_id(conn, project_id)
     if prj2 is None:
         return JSONResponse(err("project not found"), status_code=404)
-    return JSONResponse(ok({"id": prj2.id, "name": prj2.name, "root_path": prj2.root_path}))
+    return JSONResponse(ok({"id": prj2.id, "name": prj2.name, "root_path": prj2.root_path, "vault_id": prj2.vault_id, "archived": bool(prj2.archived)}))
 
 
 @app.get("/api/v1/projects/{project_id}")
@@ -1512,6 +1524,26 @@ def delete_project(project_id: int) -> JSONResponse:
         pass
     ok_del = dbm.delete_project(conn, project_id=project_id)
     return JSONResponse(ok({"deleted": bool(ok_del)}))
+
+
+@app.post("/api/v1/projects/{project_id}/archive")
+def archive_project(project_id: int) -> JSONResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    dbm.set_project_archived(conn, project_id, True)
+    return JSONResponse(ok({"archived": True}))
+
+
+@app.post("/api/v1/projects/{project_id}/unarchive")
+def unarchive_project(project_id: int) -> JSONResponse:
+    conn = _conn()
+    prj = dbm.get_project_by_id(conn, project_id)
+    if prj is None:
+        return JSONResponse(err("project not found"), status_code=404)
+    dbm.set_project_archived(conn, project_id, False)
+    return JSONResponse(ok({"archived": False}))
 
 
 class CreateConversationBody(BaseModel):

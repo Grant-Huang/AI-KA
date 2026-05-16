@@ -132,7 +132,7 @@ function closeStandaloneView() {
   window.location.href = u.toString();
 }
 
-type Project = { id: number; name: string; root_path: string };
+type Project = { id: number; name: string; root_path: string; vault_id?: number | null; archived?: boolean };
 type Conversation = {
   id: number;
   project_id?: number;
@@ -1000,32 +1000,19 @@ export default function App() {
   };
 
   const loadProjects = useCallback(async () => {
-    const data = await apiJson<{ projects: Project[] }>("/api/v1/projects");
+    const data = await apiJson<{
+      projects: Array<Project & { status?: { initialized: boolean; chunk_count: number; has_review_records: boolean } }>
+    }>("/api/v1/projects?with_status=true");
     const items = data.projects || [];
-    setProjects(items);
-    // 仅用于 UI 过滤与提示：按项目获取初始化状态（md_out/chunks 是否就绪）
-    const pairs = await Promise.all(
-      items.map(async (p) => {
-        try {
-          const st = await getProjectIngestStatus(p.id);
-          return [
-            p.id,
-            {
-              initialized: !!st.initialized,
-              chunk_count: Number(st.chunk_count) || 0,
-              has_review_records: !!(st as any)?.has_review_records,
-            },
-          ] as const;
-        } catch {
-          return [p.id, { initialized: false, chunk_count: 0 }] as const;
-        }
-      }),
-    );
-    const next: Record<
-      number,
-      { initialized: boolean; chunk_count: number; has_review_records?: boolean }
-    > = {};
-    for (const [pid, st] of pairs) next[pid] = st;
+    setProjects(items.map((p) => ({ id: p.id, name: p.name, root_path: p.root_path, vault_id: p.vault_id, archived: p.archived })));
+    const next: Record<number, { initialized: boolean; chunk_count: number; has_review_records?: boolean }> = {};
+    for (const p of items) {
+      if (p.status) {
+        next[p.id] = { initialized: p.status.initialized, chunk_count: p.status.chunk_count, has_review_records: p.status.has_review_records };
+      } else {
+        next[p.id] = { initialized: false, chunk_count: 0 };
+      }
+    }
     setProjectIngest(next);
   }, []);
 
@@ -1174,6 +1161,13 @@ export default function App() {
   }
 
   const selected = useMemo(() => projects.find((p) => p.id === selectedId) || null, [projects, selectedId]);
+
+  // 切换项目时，自动恢复该项目持久化的 vault 关联
+  useEffect(() => {
+    if (selected?.vault_id != null) {
+      setSelectedVaultId(selected.vault_id);
+    }
+  }, [selected?.id, selected?.vault_id]);
 
   const createConversation = useCallback(
     async (analysisType: string, title?: string, presetId?: string | null) => {
@@ -2490,6 +2484,16 @@ export default function App() {
     });
   }, [projects, projectIngest]);
 
+  // 所有项目（已初始化 + 未初始化），供「+」下拉展示
+  const allProjectsSorted = useMemo(() => {
+    return [...projects].sort((a, b) => {
+      const ai = projectIngest[a.id]?.initialized ? 1 : 0;
+      const bi = projectIngest[b.id]?.initialized ? 1 : 0;
+      if (bi !== ai) return bi - ai; // 已初始化的排前面
+      return String(a.name || "").localeCompare(String(b.name || ""), "zh-Hans-CN");
+    });
+  }, [projects, projectIngest]);
+
   const settingsTabsNode = (
         <Tabs
           activeKey={settingsTabKey}
@@ -3246,14 +3250,14 @@ export default function App() {
               </button>
             </Tooltip>
 
-            {/* ─ 待批准规则 ─ */}
-            <Tooltip title={sidebarCollapsed ? "待批准规则" : undefined} placement="right">
+            {/* ─ 知识线索 ─ */}
+            <Tooltip title={sidebarCollapsed ? "知识线索" : undefined} placement="right">
               <button
                 className={`app-sidebar__section-header${appMode === "review" && mainPanel === "analyze" && reviewMainTab === "result_review" ? " app-sidebar__section-header--active" : ""}`}
                 onClick={() => { navPush({ appMode: "review", mainPanel: "analyze", reviewMainTab: "result_review", selectedId, selectedConversationId: null }); setAppMode("review"); setMainPanel("analyze"); setReviewMainTab("result_review"); }}
               >
                 <PushpinOutlined />
-                <span className="app-sidebar__label">待批准规则</span>
+                <span className="app-sidebar__label">知识线索</span>
               </button>
             </Tooltip>
 
@@ -3557,7 +3561,31 @@ export default function App() {
                         删除项目
                       </Button>
                     ) : selectedId != null && projectIngest[selectedId]?.initialized && projectIngest[selectedId]?.has_review_records ? (
-                      <Text type="secondary">（该项目已有审查记录，不能删除）</Text>
+                      <Button
+                        type="default"
+                        onClick={() => {
+                          const pid = selectedId;
+                          const p = projects.find((x) => x.id === pid);
+                          const name = p?.name || `项目 #${pid}`;
+                          Modal.confirm({
+                            title: "归档项目",
+                            content: `将归档项目「${name}」。归档后该项目不再出现在选择列表，历史审查记录保留。可在设置中恢复。`,
+                            okText: "归档",
+                            cancelText: "取消",
+                            onOk: async () => {
+                              await apiJson(`/api/v1/projects/${pid}/archive`, { method: "POST" });
+                              message.success("项目已归档");
+                              setSelectedId(null);
+                              setSelectedConversationId(null);
+                              setProjectViewOnlyReason("");
+                              setCorpusStaleReason("");
+                              await loadProjects();
+                            },
+                          });
+                        }}
+                      >
+                        归档项目
+                      </Button>
                     ) : null}
                   </Space>
                 </div>
@@ -3616,6 +3644,13 @@ export default function App() {
                         if (!st.initialized) {
                           await runIndexPhase();
                         }
+                        // 持久化 vault 关联到项目
+                        if (selectedVaultId != null) {
+                          await apiJson(`/api/v1/projects/${selectedId}`, {
+                            method: "PATCH",
+                            body: JSON.stringify({ vault_id: selectedVaultId }),
+                          }).catch(() => {});
+                        }
                         message.success("初始化完成：索引已就绪");
                         await loadProjects();
                       })
@@ -3648,6 +3683,19 @@ export default function App() {
                         </div>
                       ))}
                     </div>
+                    {/* P1b: CTA after initialization */}
+                    {!pipelineRunning && milestones.every((m) => m.status === "done") &&
+                      selectedId != null && projectIngest[selectedId]?.initialized ? (
+                      <div style={{ marginTop: 16 }}>
+                        <Button
+                          type="primary"
+                          icon={<span style={{ marginRight: 4 }}>→</span>}
+                          onClick={() => setMainPanel("analyze")}
+                        >
+                          开始审查
+                        </Button>
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
               </Space>
@@ -4556,10 +4604,15 @@ export default function App() {
               <div className="page-header">
                 <Button type="text" size="small" icon={<ArrowLeftOutlined />}
                   onClick={() => { navPush({ appMode: "review", mainPanel: "analyze", reviewMainTab: "analyze", selectedId, selectedConversationId }); setReviewMainTab("analyze"); }} title="返回" style={{ marginRight: 4 }} />
-                <span className="page-header__title">待批准规则</span>
+                <span className="page-header__title">知识线索</span>
               </div>
               <div style={{ padding: "0 24px" }}>
-                <PendingRulesTab />
+                <ReviewQueueTab
+                  projectId={selectedId}
+                  onStartExtraction={(item) => {
+                    void handleStartFromReviewQueue(item);
+                  }}
+                />
               </div>
             </div>
           ) : (
@@ -4585,33 +4638,61 @@ export default function App() {
                       dropdownRender={() => (
                         <div style={{
                           background: "#fff", border: "1px solid #e0e0d8", borderRadius: 10,
-                          padding: "10px 12px", minWidth: 240,
+                          padding: "10px 12px", minWidth: 260,
                           boxShadow: "0 4px 16px rgba(0,0,0,0.10)",
                         }}>
                           <div style={{ fontSize: 11, color: "#999", marginBottom: 6 }}>选择项目</div>
-                          <Select
-                            size="small"
-                            placeholder="选择已初始化项目"
-                            showSearch
-                            value={selectedId != null ? String(selectedId) : undefined}
-                            options={[
-                              ...initializedProjects.map((p) => ({ value: String(p.id), label: p.name })),
-                            ]}
-                            filterOption={(input, opt) => String(opt?.label || "").toLowerCase().includes(String(input || "").toLowerCase())}
-                            onChange={(v) => {
-                              const pid = Number(v);
-                              if (!Number.isFinite(pid)) return;
-                              setSelectedId(pid);
-                              setProjectViewOnlyReason("");
-                              setCorpusStaleReason("");
-                            }}
-                            style={{ width: "100%" }}
-                          />
-                          <div style={{ marginTop: 8, borderTop: "1px solid #f0f0f0", paddingTop: 8 }}>
+                          {/* P2b: 所有项目，未初始化带标签 */}
+                          <div style={{ maxHeight: 200, overflowY: "auto", display: "flex", flexDirection: "column", gap: 2 }}>
+                            {allProjectsSorted.map((p) => {
+                              const isInited = !!projectIngest[p.id]?.initialized;
+                              const isSelected = p.id === selectedId;
+                              return (
+                                <div
+                                  key={p.id}
+                                  onClick={() => {
+                                    if (!isInited) {
+                                      setSelectedId(p.id);
+                                      setMainPanel("ingest");
+                                    } else {
+                                      setSelectedId(p.id);
+                                      setProjectViewOnlyReason("");
+                                      setCorpusStaleReason("");
+                                    }
+                                  }}
+                                  style={{
+                                    display: "flex", alignItems: "center", gap: 6,
+                                    padding: "5px 8px", borderRadius: 6, cursor: "pointer",
+                                    background: isSelected ? "#f0f9f4" : "transparent",
+                                    fontSize: 13,
+                                  }}
+                                  onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLElement).style.background = "#f5f5f5"; }}
+                                  onMouseLeave={(e) => { if (!isSelected) (e.currentTarget as HTMLElement).style.background = "transparent"; }}
+                                >
+                                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+                                  {!isInited && <Tag color="warning" style={{ fontSize: 10, padding: "0 4px", margin: 0 }}>未就绪</Tag>}
+                                </div>
+                              );
+                            })}
+                            {allProjectsSorted.length === 0 && (
+                              <div style={{ fontSize: 12, color: "#aaa", padding: "4px 8px" }}>暂无项目</div>
+                            )}
+                          </div>
+                          <div style={{ marginTop: 8, borderTop: "1px solid #f0f0f0", paddingTop: 8, display: "flex", flexDirection: "column", gap: 2 }}>
                             <Button type="text" size="small" icon={<FolderOpenOutlined />} block
                               style={{ textAlign: "left", justifyContent: "flex-start" }}
                               onClick={() => { setMainPanel("ingest"); }}>
-                              初始化新项目
+                              注册新项目目录
+                            </Button>
+                            {/* P2a: Obsidian 快速入口 */}
+                            <Button type="text" size="small" icon={<span style={{ marginRight: 4 }}>📒</span>} block
+                              style={{ textAlign: "left", justifyContent: "flex-start" }}
+                              onClick={() => {
+                                setMainPanel("ingest");
+                                setVaultPickerOpen(true);
+                                setDiscoveredVaults([]);
+                              }}>
+                              从 Obsidian Vault 加载
                             </Button>
                           </div>
                         </div>
@@ -4621,9 +4702,9 @@ export default function App() {
                         style={{ borderRadius: 6, fontWeight: 600, fontSize: 15 }} title="选择项目 / 更多" />
                     </Dropdown>
                     {/* Show selected project name as compact indicator */}
-                    {selectedId != null && initializedProjects.find((p) => p.id === selectedId) && (
+                    {selectedId != null && projects.find((p) => p.id === selectedId) && (
                       <span style={{ fontSize: 12, color: "#527c5e", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {initializedProjects.find((p) => p.id === selectedId)?.name}
+                        {projects.find((p) => p.id === selectedId)?.name}
                       </span>
                     )}
                     {/* 模式 C：不展示预设；由后端 Agent 自动路由关注点组合 */}
