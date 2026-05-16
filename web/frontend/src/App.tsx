@@ -4493,11 +4493,11 @@ export default function App() {
               <div className="composer">
                 <Input.TextArea
                   className="composer-textarea"
-                  rows={4}
+                  autoSize={{ minRows: 2, maxRows: 6 }}
                   placeholder={composerTextPlaceholder}
                   value={draftText}
                   onChange={(e) => setDraftText(e.target.value)}
-                  style={{ resize: "none", background: "#fff", border: "none", boxShadow: "none" }}
+                  style={{ background: "#fff" }}
                 />
                 <div className="composer-toolbar">
                   <div className="composer-left">
