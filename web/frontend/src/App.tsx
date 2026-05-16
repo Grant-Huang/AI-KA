@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { parseUrl, buildUrl } from "./navigation";
 import {
   Alert,
   Badge,
@@ -545,10 +546,10 @@ export default function App() {
   }, []);
 
   const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [appMode, setAppMode] = useState<"review" | "extraction">("review");
-  const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain" | "all_conversations">("analyze");
-  const [reviewMainTab, setReviewMainTab] = useState<"analyze" | "result_review">("analyze");
+  const [selectedId, setSelectedId] = useState<number | null>(() => parseUrl(window.location.pathname).selectedId);
+  const [appMode, setAppMode] = useState<"review" | "extraction">(() => parseUrl(window.location.pathname).appMode);
+  const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain" | "all_conversations">(() => parseUrl(window.location.pathname).mainPanel);
+  const [reviewMainTab, setReviewMainTab] = useState<"analyze" | "result_review">(() => parseUrl(window.location.pathname).reviewMainTab);
   const [projectIngest, setProjectIngest] = useState<
     Record<number, { initialized: boolean; chunk_count: number; has_review_records?: boolean }>
   >(
@@ -556,7 +557,7 @@ export default function App() {
   );
   const [corpusStaleReason, setCorpusStaleReason] = useState<string>("");
   const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [selectedConversationId, setSelectedConversationId] = useState<number | null>(null);
+  const [selectedConversationId, setSelectedConversationId] = useState<number | null>(() => parseUrl(window.location.pathname).selectedConversationId);
   const [projectViewOnlyReason, setProjectViewOnlyReason] = useState<string>("");
   const [renameConvId, setRenameConvId] = useState<number | null>(null);
   const [renameConvValue, setRenameConvValue] = useState("");
@@ -606,6 +607,28 @@ export default function App() {
     if (selectedConversationId == null) return outputEntries;
     return outputEntries.filter((e) => e.convId === selectedConversationId);
   }, [outputEntries, selectedConversationId]);
+
+  // ── URL ↔ state sync ─────────────────────────────────────
+  // Skip first render: state is already initialised from URL via lazy initialisers.
+  const _isFirstNavRender = useRef(true);
+  useEffect(() => {
+    if (_isFirstNavRender.current) { _isFirstNavRender.current = false; return; }
+    window.history.replaceState({}, "", buildUrl({ appMode, mainPanel, reviewMainTab, selectedId, selectedConversationId }));
+  }, [appMode, mainPanel, reviewMainTab, selectedId, selectedConversationId]);
+
+  // Browser back / forward
+  useEffect(() => {
+    const onPop = () => {
+      const s = parseUrl(window.location.pathname);
+      setAppMode(s.appMode);
+      setMainPanel(s.mainPanel);
+      setReviewMainTab(s.reviewMainTab);
+      setSelectedId(s.selectedId);
+      setSelectedConversationId(s.selectedConversationId);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Auth check on mount ───────────────────────────────────
   useEffect(() => {
@@ -965,6 +988,12 @@ export default function App() {
     }
   };
 
+  const navPush = useCallback((partial: Partial<Parameters<typeof buildUrl>[0]>) => {
+    window.history.pushState({}, "", buildUrl({
+      appMode, mainPanel, reviewMainTab, selectedId, selectedConversationId, ...partial,
+    }));
+  }, [appMode, mainPanel, reviewMainTab, selectedId, selectedConversationId]);
+
   const handleStartFromReviewQueue = (item: ReviewQueueItem) => {
     window.sessionStorage.setItem("aika_initial_rq_item", JSON.stringify(item));
     setAppMode("extraction");
@@ -1221,7 +1250,7 @@ export default function App() {
                 <Text type="secondary">
                   当前项目在该审查组合下已有历史会话。此提示仅用于提醒你可在会话历史中回看；本次不会自动切换会话。
                 </Text>
-                <Button type="link" onClick={() => { setAppMode("review"); setMainPanel("analyze"); }}>
+                <Button type="link" onClick={() => { navPush({ appMode: "review", mainPanel: "analyze", reviewMainTab: "analyze", selectedId, selectedConversationId }); setAppMode("review"); setMainPanel("analyze"); }}>
                   打开项目审查
                 </Button>
               </Space>
@@ -3198,7 +3227,7 @@ export default function App() {
               <Tooltip title={sidebarCollapsed ? "项目审查" : undefined} placement="right">
                 <button
                   className={`app-sidebar__section-header${appMode === "review" && mainPanel === "analyze" && reviewMainTab === "analyze" ? " app-sidebar__section-header--active" : ""}`}
-                  onClick={() => { setAppMode("review"); setMainPanel("analyze"); setReviewMainTab("analyze"); }}
+                  onClick={() => { navPush({ appMode: "review", mainPanel: "analyze", reviewMainTab: "analyze", selectedId, selectedConversationId }); setAppMode("review"); setMainPanel("analyze"); setReviewMainTab("analyze"); }}
                 >
                   <AuditOutlined />
                   <span className="app-sidebar__label">项目审查</span>
@@ -3210,7 +3239,7 @@ export default function App() {
             <Tooltip title={sidebarCollapsed ? "知识归纳" : undefined} placement="right">
               <button
                 className={`app-sidebar__section-header${appMode === "extraction" ? " app-sidebar__section-header--active" : ""}`}
-                onClick={() => { setAppMode("extraction"); setReviewMainTab("analyze"); }}
+                onClick={() => { navPush({ appMode: "extraction", mainPanel: "analyze", reviewMainTab: "analyze", selectedId: null, selectedConversationId: null }); setAppMode("extraction"); setReviewMainTab("analyze"); }}
               >
                 <BulbOutlined />
                 <span className="app-sidebar__label">知识归纳</span>
@@ -3221,7 +3250,7 @@ export default function App() {
             <Tooltip title={sidebarCollapsed ? "待批准规则" : undefined} placement="right">
               <button
                 className={`app-sidebar__section-header${appMode === "review" && reviewMainTab === "result_review" ? " app-sidebar__section-header--active" : ""}`}
-                onClick={() => { setAppMode("review"); setMainPanel("analyze"); setReviewMainTab("result_review"); }}
+                onClick={() => { navPush({ appMode: "review", mainPanel: "analyze", reviewMainTab: "result_review", selectedId, selectedConversationId: null }); setAppMode("review"); setMainPanel("analyze"); setReviewMainTab("result_review"); }}
               >
                 <PushpinOutlined />
                 <span className="app-sidebar__label">待批准规则</span>
@@ -3233,7 +3262,7 @@ export default function App() {
             {/* ─ 工具入口 ─ */}
             <Tooltip title={sidebarCollapsed ? "项目初始化" : undefined} placement="right">
               <button className={`app-sidebar__section-header${appMode === "review" && mainPanel === "ingest" ? " app-sidebar__section-header--active" : ""}`}
-                onClick={() => { setAppMode("review"); setMainPanel("ingest"); }}
+                onClick={() => { navPush({ appMode: "review", mainPanel: "ingest", reviewMainTab: "analyze", selectedId, selectedConversationId: null }); setAppMode("review"); setMainPanel("ingest"); }}
               >
                 <FolderOpenOutlined />
                 <span className="app-sidebar__label">项目初始化</span>
@@ -3241,7 +3270,7 @@ export default function App() {
             </Tooltip>
             <Tooltip title={sidebarCollapsed ? "审查域设定" : undefined} placement="right">
               <button className={`app-sidebar__section-header${appMode === "review" && mainPanel === "review_domain" ? " app-sidebar__section-header--active" : ""}`}
-                onClick={() => { setAppMode("review"); setMainPanel("review_domain"); void loadSettings({ snapshot_chunk_strategy: true }); }}
+                onClick={() => { navPush({ appMode: "review", mainPanel: "review_domain", reviewMainTab: "analyze", selectedId: null, selectedConversationId: null }); setAppMode("review"); setMainPanel("review_domain"); void loadSettings({ snapshot_chunk_strategy: true }); }}
               >
                 <FileSearchOutlined />
                 <span className="app-sidebar__label">审查域设定</span>
@@ -3328,6 +3357,7 @@ export default function App() {
                         className={`session-item${active ? " session-item--active" : ""}${c.starred ? " session-item--starred" : ""}`}
                         onClick={() => {
                           const pid = c.project_id;
+                          navPush({ appMode: "review", mainPanel: "analyze", reviewMainTab: "analyze", selectedId: typeof pid === "number" ? pid : null, selectedConversationId: c.id });
                           if (typeof pid === "number") setSelectedId(pid);
                           setProjectViewOnlyReason(c.project_available === false ? "项目不可用或已删除：仅可查看历史会话，无法继续审查/追问。" : "");
                           setMainPanel("analyze");
@@ -3417,7 +3447,7 @@ export default function App() {
                     </>
                   );
                 })()}
-                <div className="session-col__all-btn" onClick={() => setMainPanel("all_conversations")}>
+                <div className="session-col__all-btn" onClick={() => { navPush({ appMode: "review", mainPanel: "all_conversations", reviewMainTab: "analyze", selectedId: null, selectedConversationId: null }); setMainPanel("all_conversations"); }}>
                   <UnorderedListOutlined style={{ fontSize: 12 }} />
                   <span>所有会话</span>
                 </div>
@@ -3626,7 +3656,9 @@ export default function App() {
             <AllSessionsPanel
               fetchSessions={fetchAllConversations}
               onSelect={(item) => {
-                if (item.project_id != null) setSelectedId(item.project_id);
+                const pid = item.project_id ?? null;
+                navPush({ appMode: "review", mainPanel: "analyze", reviewMainTab: "analyze", selectedId: pid, selectedConversationId: item.id });
+                if (pid != null) setSelectedId(pid);
                 setSelectedConversationId(item.id);
                 setMainPanel("analyze");
                 setReviewMainTab("analyze");
@@ -4523,7 +4555,7 @@ export default function App() {
             <div style={{ maxWidth: 980, margin: "0 auto", width: "100%" }}>
               <div className="page-header">
                 <Button type="text" size="small" icon={<ArrowLeftOutlined />}
-                  onClick={() => setReviewMainTab("analyze")} title="返回" style={{ marginRight: 4 }} />
+                  onClick={() => { navPush({ appMode: "review", mainPanel: "analyze", reviewMainTab: "analyze", selectedId, selectedConversationId }); setReviewMainTab("analyze"); }} title="返回" style={{ marginRight: 4 }} />
                 <span className="page-header__title">待批准规则</span>
               </div>
               <div style={{ padding: "0 24px" }}>
