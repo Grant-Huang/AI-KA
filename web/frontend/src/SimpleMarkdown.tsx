@@ -2,6 +2,17 @@ import React, { useEffect, useRef, useState, useMemo } from "react";
 
 type Props = { markdown: string };
 
+// ---------------------------------------------------------------------------
+// Animated thinking dots
+// ---------------------------------------------------------------------------
+export function ThinkingDots() {
+  return (
+    <span className="think-dots" aria-label="思考中">
+      <span /><span /><span />
+    </span>
+  );
+}
+
 function renderInline(text: string): React.ReactNode {
   const parts = text.split(/(`[^`]+`)/g).filter(Boolean);
   return (
@@ -13,6 +24,33 @@ function renderInline(text: string): React.ReactNode {
         return <React.Fragment key={i}>{p}</React.Fragment>;
       })}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Fenced code block with copy button
+// ---------------------------------------------------------------------------
+function CodeBlock({ lang, code }: { lang: string; code: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* ignore */ }
+  };
+
+  return (
+    <div className="code-block-wrapper">
+      <div className="code-block-header">
+        {lang && <span className="code-block-lang">{lang}</span>}
+        <button className="code-block-copy" onClick={handleCopy}>
+          {copied ? "✓ 已复制" : "复制"}
+        </button>
+      </div>
+      <pre><code>{code}</code></pre>
+    </div>
   );
 }
 
@@ -49,10 +87,11 @@ function splitThinkBlock(md: string): {
 
 /**
  * Renders markdown that may contain a <think> block.
- * - While thinkComplete=false (streaming): think section is expanded.
- * - When thinkComplete=true (body started): auto-collapses; user can re-open.
+ * - While thinkComplete=false (streaming): think section is expanded with animated dots.
+ * - When thinkComplete=true: auto-collapses; user can re-open.
+ * - showCursor: appends a blinking typing cursor at the end (used during streaming).
  */
-export function ThinkableMarkdown({ markdown }: { markdown: string }) {
+export function ThinkableMarkdown({ markdown, showCursor }: { markdown: string; showCursor?: boolean }) {
   const { before, think, after, thinkComplete } = useMemo(
     () => splitThinkBlock(markdown),
     [markdown],
@@ -69,7 +108,12 @@ export function ThinkableMarkdown({ markdown }: { markdown: string }) {
   }, [thinkComplete]);
 
   if (!think) {
-    return <SimpleMarkdown markdown={markdown} />;
+    return (
+      <div className="simple-markdown">
+        <SimpleMarkdown markdown={markdown} />
+        {showCursor && <span className="typing-cursor" />}
+      </div>
+    );
   }
 
   return (
@@ -79,36 +123,23 @@ export function ThinkableMarkdown({ markdown }: { markdown: string }) {
         open={isOpen}
         onToggle={(e) => setIsOpen(e.currentTarget.open)}
         className="think-block"
-        style={{ margin: "6px 0", borderRadius: 6, border: "1px solid #e5e7eb", background: "#fafaf8" }}
       >
-        <summary
-          style={{
-            cursor: "pointer",
-            padding: "4px 10px",
-            fontSize: 12,
-            color: "#6b7280",
-            userSelect: "none",
-            listStyle: "none",
-          }}
-        >
-          💭 思考过程{!thinkComplete ? "（进行中…）" : "（已完成，点击展开）"}
+        <summary className="think-block__summary">
+          {!thinkComplete ? (
+            <>
+              <ThinkingDots />
+              <span>思考中…</span>
+            </>
+          ) : (
+            <span>{isOpen ? "思考过程（点击收起）" : "思考完毕（点击展开）"}</span>
+          )}
         </summary>
-        <div
-          style={{
-            padding: "8px 12px",
-            fontSize: 12,
-            color: "#6b7280",
-            whiteSpace: "pre-wrap",
-            lineHeight: 1.6,
-            maxHeight: 400,
-            overflowY: "auto",
-            borderTop: "1px solid #e5e7eb",
-          }}
-        >
+        <div className="think-block__body">
           {think}
         </div>
       </details>
       {after.trim() ? <SimpleMarkdown markdown={after} /> : null}
+      {showCursor && <span className="typing-cursor" />}
     </div>
   );
 }
@@ -122,6 +153,19 @@ export default function SimpleMarkdown({ markdown }: Props) {
     const line = raw.trimEnd();
     if (!line.trim()) {
       i += 1;
+      continue;
+    }
+    // Fenced code block
+    if (line.startsWith("```")) {
+      const lang = line.slice(3).trim();
+      const codeLines: string[] = [];
+      i += 1;
+      while (i < lines.length && !lines[i].startsWith("```")) {
+        codeLines.push(lines[i]);
+        i += 1;
+      }
+      if (i < lines.length) i += 1; // skip closing ```
+      nodes.push(<CodeBlock key={`code-${i}`} lang={lang} code={codeLines.join("\n")} />);
       continue;
     }
     if (line.startsWith("### ")) {
@@ -217,4 +261,3 @@ export default function SimpleMarkdown({ markdown }: Props) {
   }
   return <div className="simple-markdown">{nodes}</div>;
 }
-

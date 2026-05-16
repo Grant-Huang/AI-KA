@@ -1,7 +1,7 @@
 import React, { ReactNode, useEffect, useRef, useState } from "react";
-import { Spin, message as antdMsg } from "antd";
+import { message as antdMsg } from "antd";
 import { CopyOutlined, LikeOutlined, DislikeOutlined, ReloadOutlined } from "@ant-design/icons";
-import { ThinkableMarkdown } from "./SimpleMarkdown";
+import { ThinkableMarkdown, ThinkingDots } from "./SimpleMarkdown";
 
 export interface ChatWindowMsg {
   role: string;
@@ -80,9 +80,25 @@ export function ChatWindow<T extends ChatWindowMsg>({
   "aria-label": ariaLabel,
 }: ChatWindowProps<T>) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef(true);
+
+  // Use IntersectionObserver to detect if the bottom sentinel is visible.
+  // This works regardless of which ancestor provides the scroll container.
+  useEffect(() => {
+    const el = bottomRef.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(
+      ([entry]) => { isNearBottomRef.current = entry.isIntersecting; },
+      { threshold: 0 },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (isNearBottomRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [messages]);
 
   const lastAssistantIdx = messages.reduce(
@@ -113,6 +129,7 @@ export function ChatWindow<T extends ChatWindowMsg>({
         const isUser = msg.role === "user";
         const isAssistant = msg.role === "assistant";
         const isLast = i === messages.length - 1;
+        const showCursor = isStreaming && isLast && isAssistant;
 
         return (
           <div key={msg.id ?? i} className={`chat-bubble-row${isUser ? " chat-bubble-row--user" : " chat-bubble-row--assistant"}`}>
@@ -128,8 +145,7 @@ export function ChatWindow<T extends ChatWindowMsg>({
                 {msg.created_at && (
                   <div className="chat-bubble__meta">{formatMsgTime(msg.created_at)}</div>
                 )}
-                <ThinkableMarkdown markdown={String(msg.content ?? "")} />
-                {/* Show actions when not streaming, or streaming on non-last assistant */}
+                <ThinkableMarkdown markdown={String(msg.content ?? "")} showCursor={showCursor} />
                 {(!isStreaming || !isLast) && (
                   <AssistantActions
                     content={String(msg.content ?? "")}
@@ -145,8 +161,8 @@ export function ChatWindow<T extends ChatWindowMsg>({
       {isStreaming && lastAssistantIdx < 0 && (
         <div className="chat-bubble-row chat-bubble-row--assistant">
           <div className="chat-thinking">
-            <Spin size="small" />
-            <span>Agent思考中...</span>
+            <ThinkingDots />
+            <span>思考中…</span>
           </div>
         </div>
       )}

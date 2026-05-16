@@ -1514,6 +1514,136 @@ body {
 
 /* ── Chat Bubble Design ─────────────────────────────────────────────────── */
 
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+@keyframes thinkDot {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.3; }
+  40%           { transform: scale(1);   opacity: 1; }
+}
+
+.typing-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 0.9em;
+  background: currentColor;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  animation: blink 1s step-end infinite;
+}
+
+.think-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 4px;
+}
+
+.think-dots span {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: thinkDot 1.2s ease-in-out infinite;
+}
+
+.think-dots span:nth-child(2) { animation-delay: 0.2s; }
+.think-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+.think-block {
+  margin: 6px 0;
+  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+  background: #fafaf8;
+}
+
+.think-block__summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: #6b7280;
+  user-select: none;
+  list-style: none;
+}
+
+.think-block__summary::-webkit-details-marker { display: none; }
+
+.think-block__body {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #6b7280;
+  white-space: pre-wrap;
+  line-height: 1.6;
+  max-height: 400px;
+  overflow-y: auto;
+  border-top: 1px solid #e5e7eb;
+}
+
+.code-block-wrapper {
+  position: relative;
+  margin: 8px 0;
+  border-radius: 8px;
+  border: 1px solid #dde0db;
+  background: #f6f8f5;
+  overflow: hidden;
+}
+
+.code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  background: #eef0ec;
+  border-bottom: 1px solid #dde0db;
+  min-height: 28px;
+}
+
+.code-block-lang {
+  font-size: 11px;
+  color: rgba(47, 58, 50, 0.5);
+  font-family: monospace;
+  text-transform: lowercase;
+}
+
+.code-block-copy {
+  font-size: 11px;
+  color: rgba(47, 58, 50, 0.5);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background 0.1s, color 0.1s;
+  margin-left: auto;
+}
+
+.code-block-copy:hover {
+  background: rgba(47, 58, 50, 0.08);
+  color: #2f3a32;
+}
+
+.code-block-wrapper pre {
+  margin: 0;
+  padding: 10px 14px;
+  overflow-x: auto;
+  font-size: 13px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+}
+
 .chat-thread {
   display: flex;
   flex-direction: column;
@@ -1524,6 +1654,7 @@ body {
 .chat-bubble-row {
   display: flex;
   margin-bottom: 12px;
+  animation: fadeSlideIn 0.15s ease-out;
 }
 
 .chat-bubble-row--user {
@@ -1610,9 +1741,8 @@ body {
   text-align: center;
 }
 
-/* Assistant code/table blocks keep card treatment */
-.chat-bubble--assistant pre,
-.chat-bubble--assistant .simple-markdown pre {
+/* Fallback for plain <pre> not inside .code-block-wrapper */
+.chat-bubble--assistant .simple-markdown > pre {
   background: #f6f8f5;
   border: 1px solid #dde0db;
   border-radius: 8px;
