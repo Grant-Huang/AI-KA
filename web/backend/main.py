@@ -1375,7 +1375,6 @@ def _has_vault_review_records(conn, prj: dbm.ProjectRow) -> bool:
     except Exception:
         return False
 
-
 def _infer_vault_link(conn, path: Path) -> tuple[int | None, str | None]:
     """If path lives inside a registered Obsidian vault, return (vault_id, subfolder)."""
     from backend.obsidian_service import find_vault_for_path
