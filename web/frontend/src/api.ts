@@ -256,6 +256,16 @@ export async function deleteConversation(
   });
 }
 
+export async function patchConversation(
+  conversationId: number,
+  data: { title?: string; starred?: boolean },
+): Promise<void> {
+  await apiJson(`/api/v1/conversations/${conversationId}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
 export async function deleteProject(projectId: number): Promise<{ deleted: boolean }> {
   return apiJson(`/api/v1/projects/${projectId}`, {
     method: "DELETE",
@@ -281,6 +291,7 @@ export type GlobalConversationItem = {
   preset_id?: string | null;
   project_exists: boolean;
   project_available: boolean;
+  starred?: boolean;
 };
 
 export async function getConversationsGlobal(opts?: {

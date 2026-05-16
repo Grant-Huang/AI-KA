@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from aika import db as dbm
 from backend.path_validate import PathValidationError, validate_project_root
@@ -71,4 +72,18 @@ def list_conversations_by_pair(
         for r in rows
     ]
     return JSONResponse(ok({"count": len(items), "conversations": items}))
+
+
+class _PatchConversationBody(BaseModel):
+    title: str | None = None
+    starred: bool | None = None
+
+
+@router.patch("/api/v1/conversations/{cid}")
+def patch_conversation_api(cid: int, body: _PatchConversationBody) -> JSONResponse:
+    conn = get_conn()
+    updated = dbm.update_conversation(conn, cid, title=body.title, starred=body.starred)
+    if not updated:
+        return JSONResponse(err("conversation not found or no changes"), status_code=404)
+    return JSONResponse(ok({"ok": True}))
 

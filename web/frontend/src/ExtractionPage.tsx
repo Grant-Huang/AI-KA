@@ -9,7 +9,7 @@ import { ChatWindow } from "./ChatWindow";
 import {
   ArrowUpOutlined, CheckOutlined, ClockCircleOutlined, CloseOutlined,
   DeleteOutlined, EditOutlined, EllipsisOutlined, InboxOutlined, PaperClipOutlined,
-  PlusOutlined, ReloadOutlined, RetweetOutlined, StarFilled, StarOutlined, WarningOutlined,
+  PlusOutlined, ReloadOutlined, RetweetOutlined, StarFilled, StarOutlined, StopOutlined, WarningOutlined,
 } from "@ant-design/icons";
 import type {
   ExtractionSession, PendingRuleItem, ReviewQueueItem,
@@ -451,7 +451,7 @@ function ExpertQATab({
             </div>
             <div style={{ display: "flex", gap: 6 }}>
               {streaming ? (
-                <Button danger size="small" onClick={handleStop}>停止</Button>
+                <Button danger size="small" shape="circle" icon={<StopOutlined />} onClick={handleStop} title="停止" />
               ) : isPostReview && messages.filter((m) => m.role !== "status" && m.role !== "assistant").length === 0 ? (
                 <Button type="primary" size="small" onClick={() => void handlePostReviewStart()}>开始提取</Button>
               ) : (
