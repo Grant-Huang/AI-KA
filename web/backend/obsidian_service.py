@@ -369,3 +369,44 @@ def ensure_vault_structure(vault_path: Path) -> None:
     """Create the standard _aika/ subdirectory structure inside a vault."""
     for subdir in ("reviews", "knowledge", "meta"):
         (vault_path / AIKA_SUBDIR / subdir).mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Analysis run markers in Vault (Phase 3 of SQLite slim-down)
+# ---------------------------------------------------------------------------
+
+def _run_markers_dir(vault_path: Path, project_name: str) -> Path:
+    safe = re.sub(r"[^\w一-鿿\-]", "_", project_name).strip("_") or "project"
+    return vault_path / AIKA_SUBDIR / "reviews" / safe / ".runs"
+
+
+def write_run_marker(
+    vault_path: Path,
+    *,
+    project_name: str,
+    project_id: int,
+    conversation_id: int,
+    focus_points: list[str],
+) -> None:
+    """Write a lightweight JSON marker to vault so deletion protection survives DB loss."""
+    markers_dir = _run_markers_dir(vault_path, project_name)
+    markers_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    marker = markers_dir / f"run-{conversation_id}-{ts}.json"
+    marker.write_text(
+        json.dumps({
+            "project_id": project_id,
+            "conversation_id": conversation_id,
+            "focus_points": focus_points,
+            "created_at": datetime.now().isoformat(),
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def has_review_records_in_vault(vault_path: Path, project_name: str) -> bool:
+    """Return True if any analysis run markers exist for this project in the vault."""
+    markers_dir = _run_markers_dir(vault_path, project_name)
+    if not markers_dir.is_dir():
+        return False
+    return any(markers_dir.glob("run-*.json"))

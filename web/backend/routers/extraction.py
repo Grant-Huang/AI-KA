@@ -51,6 +51,56 @@ from backend.response import err, ok
 router = APIRouter()
 
 # ---------------------------------------------------------------------------
+# Quality report file helpers (Phase 4: meta → Vault file)
+# ---------------------------------------------------------------------------
+
+def _quality_reports_path() -> Path:
+    meta_dir = repository_root() / ".aika" / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    return meta_dir / "quality.jsonl"
+
+
+def _append_quality_report_to_file(report_id: str, session_ref: str, report: dict) -> None:
+    try:
+        record = {
+            "id": report_id,
+            "session_ref": session_ref,
+            "created_at": datetime.now().isoformat(),
+            **report,
+        }
+        with _quality_reports_path().open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # best-effort; DB write already succeeded
+
+
+def _read_quality_reports_from_file(
+    *, session_ref: str | None = None, limit: int = 10
+) -> list[dict]:
+    path = _quality_reports_path()
+    if not path.exists():
+        return []
+    records: list[dict] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if session_ref and obj.get("session_ref") != session_ref:
+                continue
+            records.append(obj)
+    except Exception:
+        return []
+    # most recent first
+    records.reverse()
+    return records[:limit]
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -1052,6 +1102,7 @@ def run_meta_reflect(body: MetaReflectBody) -> JSONResponse:
         knowledge_gaps=report.get("knowledge_gaps"),
         full_report=report,
     )
+    _append_quality_report_to_file(report_id, body.session_ref, report)
 
     # 更新策略库效果分（基于本次会话 ki 产出）
     if body.ki_list:
@@ -1076,9 +1127,12 @@ def run_meta_reflect(body: MetaReflectBody) -> JSONResponse:
 
 @router.get("/api/v1/extraction/meta-reflect")
 def list_meta_reflect_reports(session_ref: str | None = None, limit: int = 10) -> JSONResponse:
-    conn = get_conn()
-    reports = dbm.list_session_quality_reports(conn, session_ref=session_ref, limit=limit)
-    return ok({"reports": reports, "total": len(reports)})
+    reports = _read_quality_reports_from_file(session_ref=session_ref, limit=limit)
+    if not reports:
+        # Fallback to DB for backward compat with pre-Phase4 data
+        conn = get_conn()
+        reports = dbm.list_session_quality_reports(conn, session_ref=session_ref, limit=limit)
+    return JSONResponse(ok({"reports": reports, "total": len(reports)}))
 
 
 # ---------------------------------------------------------------------------
