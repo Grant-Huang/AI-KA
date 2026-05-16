@@ -260,3 +260,112 @@ def write_review_note(
     note_path = out_dir / filename
     note_path.write_text(note, encoding="utf-8")
     return note_path
+
+
+# ---------------------------------------------------------------------------
+# Vault project directory convention
+# ---------------------------------------------------------------------------
+
+PROJECTS_SUBDIR = "Projects"
+AIKA_SUBDIR = "_aika"
+
+# Regex patterns for auto-detecting project number and name from folder names
+# Matches: PRJ-2024-001_名称, P2024001-名称, P001_名称, etc.
+_PROJECT_ID_RE = re.compile(
+    r"^([A-Za-z]{1,6}[-_]?[\d]{2,8}(?:[-_][\d]{2,6})?)"  # project number prefix
+    r"[_\-\s]+"                                              # separator
+    r"(.+)$"                                                 # project name
+)
+# Matches: 20240115_名称 (date prefix)
+_DATE_PREFIX_RE = re.compile(r"^(\d{6,8})[_\-](.+)$")
+
+
+def parse_project_name_from_folder(folder_name: str) -> dict[str, str]:
+    """
+    Extract project_number and project_name from a folder name.
+    Returns dict with keys: folder_name, project_number (may be ""), project_name.
+    """
+    name = folder_name.strip()
+
+    m = _PROJECT_ID_RE.match(name)
+    if m:
+        return {
+            "folder_name": folder_name,
+            "project_number": m.group(1),
+            "project_name": m.group(2).strip(),
+        }
+
+    m = _DATE_PREFIX_RE.match(name)
+    if m:
+        return {
+            "folder_name": folder_name,
+            "project_number": "",
+            "project_name": m.group(2).strip(),
+        }
+
+    return {
+        "folder_name": folder_name,
+        "project_number": "",
+        "project_name": name,
+    }
+
+
+def list_vault_projects(vault_path: Path, *, registered_roots: set[str] | None = None) -> list[dict]:
+    """
+    Scan vault_path/Projects/ for first-level subdirectories.
+    Each entry represents a potential AI-KA project.
+
+    Returns list of dicts:
+      folder_name, project_number, project_name,
+      abs_path, vault_subfolder,
+      already_registered (bool), has_aika_marker (bool)
+    """
+    projects_dir = vault_path / PROJECTS_SUBDIR
+    if not projects_dir.is_dir():
+        return []
+
+    reg = registered_roots or set()
+    results: list[dict] = []
+
+    for child in sorted(projects_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        if child.name.startswith("."):
+            continue
+
+        parsed = parse_project_name_from_folder(child.name)
+        abs_path = str(child.resolve())
+        vault_subfolder = f"{PROJECTS_SUBDIR}/{child.name}"
+
+        results.append({
+            **parsed,
+            "abs_path": abs_path,
+            "vault_subfolder": vault_subfolder,
+            "already_registered": abs_path in reg,
+            "has_aika_marker": (child / ".aika-project").exists(),
+        })
+
+    return results
+
+
+def find_vault_for_path(path: Path, vaults: list) -> tuple | None:
+    """
+    Given a filesystem path, find the first vault whose path is a parent of it.
+    vaults is a list of ObsidianVaultRow (or any object with .path attribute).
+    Returns (vault, vault_subfolder_str) or None.
+    """
+    resolved = path.resolve()
+    for vault in vaults:
+        vault_root = Path(vault.path).resolve()
+        try:
+            rel = resolved.relative_to(vault_root)
+            return (vault, rel.as_posix())
+        except ValueError:
+            continue
+    return None
+
+
+def ensure_vault_structure(vault_path: Path) -> None:
+    """Create the standard _aika/ subdirectory structure inside a vault."""
+    for subdir in ("reviews", "knowledge", "meta"):
+        (vault_path / AIKA_SUBDIR / subdir).mkdir(parents=True, exist_ok=True)

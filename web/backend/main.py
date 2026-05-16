@@ -1343,7 +1343,15 @@ def ensure_project(payload: dict[str, Any]) -> JSONResponse:
     conn = _conn()
     existed = dbm.get_project_by_root_path(conn, validated.as_posix())
     if existed is not None:
-        return JSONResponse(ok({"id": existed.id, "name": existed.name, "root_path": existed.root_path, "created": False}))
+        # Back-fill vault linkage if it was missing
+        if existed.vault_id is None:
+            _try_backfill_vault_link(conn, existed)
+            existed = dbm.get_project_by_id(conn, existed.id) or existed
+        return JSONResponse(ok({
+            "id": existed.id, "name": existed.name, "root_path": existed.root_path,
+            "vault_id": existed.vault_id, "vault_subfolder": existed.vault_subfolder,
+            "created": False,
+        }))
 
     base = req_name or Path(validated).name or "project"
     name = base
@@ -1351,8 +1359,32 @@ def ensure_project(payload: dict[str, Any]) -> JSONResponse:
     while dbm.get_project_by_name(conn, name) is not None:
         name = f"{base}-{suffix}"
         suffix += 1
-    prj = dbm.create_project(conn, name, validated.as_posix())
-    return JSONResponse(ok({"id": prj.id, "name": prj.name, "root_path": prj.root_path, "created": True}))
+
+    vault_id, vault_subfolder = _infer_vault_link(conn, validated)
+    prj = dbm.create_project(conn, name, validated.as_posix(),
+                             vault_id=vault_id, vault_subfolder=vault_subfolder)
+    return JSONResponse(ok({
+        "id": prj.id, "name": prj.name, "root_path": prj.root_path,
+        "vault_id": prj.vault_id, "vault_subfolder": prj.vault_subfolder,
+        "created": True,
+    }))
+
+
+def _infer_vault_link(conn, path: Path) -> tuple[int | None, str | None]:
+    """If path lives inside a registered Obsidian vault, return (vault_id, subfolder)."""
+    from backend.obsidian_service import find_vault_for_path
+    vaults = dbm.list_obsidian_vaults(conn)
+    result = find_vault_for_path(path, vaults)
+    if result is None:
+        return None, None
+    vault, subfolder = result
+    return vault.id, subfolder
+
+
+def _try_backfill_vault_link(conn, project: dbm.ProjectRow) -> None:
+    vault_id, vault_subfolder = _infer_vault_link(conn, Path(project.root_path))
+    if vault_id is not None:
+        dbm.update_project_vault(conn, project.id, vault_id=vault_id, vault_subfolder=vault_subfolder)
 
 
 @app.get("/api/v1/projects")
@@ -1419,6 +1451,8 @@ def get_project(project_id: int) -> JSONResponse:
                 "root_path": prj.root_path,
                 "rules": rules,
                 "md_out": str(project_md_out_dir(prj.id)),
+                "vault_id": prj.vault_id,
+                "vault_subfolder": prj.vault_subfolder,
             }
         )
     )
