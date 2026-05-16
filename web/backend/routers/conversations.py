@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from aika import db as dbm
 from backend.path_validate import PathValidationError, validate_project_root
 from backend.response import err, ok
-from backend.deps import get_conn
+from backend.deps import get_conn, get_project_or_404
 
 
 router = APIRouter()
@@ -55,9 +55,7 @@ def list_conversations_by_pair(
     preset_id: str = Query(..., min_length=1),
 ) -> JSONResponse:
     conn = get_conn()
-    prj = dbm.get_project_by_id(conn, project_id)
-    if prj is None:
-        return JSONResponse(err("project not found"), status_code=404)
+    get_project_or_404(conn, project_id)
     rows = dbm.list_conversations_by_pair(conn, project_id=int(project_id), preset_id=str(preset_id))
     items = [
         {
