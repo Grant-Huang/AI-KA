@@ -1343,7 +1343,15 @@ def ensure_project(payload: dict[str, Any]) -> JSONResponse:
     conn = _conn()
     existed = dbm.get_project_by_root_path(conn, validated.as_posix())
     if existed is not None:
-        return JSONResponse(ok({"id": existed.id, "name": existed.name, "root_path": existed.root_path, "created": False}))
+        # Back-fill vault linkage if it was missing
+        if existed.vault_id is None:
+            _try_backfill_vault_link(conn, existed)
+            existed = dbm.get_project_by_id(conn, existed.id) or existed
+        return JSONResponse(ok({
+            "id": existed.id, "name": existed.name, "root_path": existed.root_path,
+            "vault_id": existed.vault_id, "vault_subfolder": existed.vault_subfolder,
+            "created": False,
+        }))
 
     base = req_name or Path(validated).name or "project"
     name = base
@@ -1351,8 +1359,66 @@ def ensure_project(payload: dict[str, Any]) -> JSONResponse:
     while dbm.get_project_by_name(conn, name) is not None:
         name = f"{base}-{suffix}"
         suffix += 1
-    prj = dbm.create_project(conn, name, validated.as_posix())
-    return JSONResponse(ok({"id": prj.id, "name": prj.name, "root_path": prj.root_path, "created": True}))
+
+    vault_id, vault_subfolder = _infer_vault_link(conn, validated)
+    prj = dbm.create_project(conn, name, validated.as_posix(),
+                             vault_id=vault_id, vault_subfolder=vault_subfolder)
+    return JSONResponse(ok({
+        "id": prj.id, "name": prj.name, "root_path": prj.root_path,
+        "vault_id": prj.vault_id, "vault_subfolder": prj.vault_subfolder,
+        "created": True,
+    }))
+
+
+def _write_vault_run_marker(conn, prj: dbm.ProjectRow, conversation_id: int, focus_points: list) -> None:
+    """If this project is linked to a vault, write a run marker for deletion protection."""
+    if prj.vault_id is None:
+        return
+    try:
+        vault_row = dbm.get_obsidian_vault_by_id(conn, prj.vault_id)
+        if vault_row is None:
+            return
+        from backend.obsidian_service import write_run_marker
+        write_run_marker(
+            Path(vault_row.path),
+            project_name=prj.name,
+            project_id=prj.id,
+            conversation_id=conversation_id,
+            focus_points=[str(f) for f in focus_points],
+        )
+    except Exception:
+        pass  # vault marker is best-effort; never block analysis flow
+
+
+def _has_vault_review_records(conn, prj: dbm.ProjectRow) -> bool:
+    """Check if the vault contains any run markers for this project."""
+    if prj.vault_id is None:
+        return False
+    try:
+        vault_row = dbm.get_obsidian_vault_by_id(conn, prj.vault_id)
+        if vault_row is None:
+            return False
+        from backend.obsidian_service import has_review_records_in_vault
+        return has_review_records_in_vault(Path(vault_row.path), prj.name)
+    except Exception:
+        return False
+
+
+def _infer_vault_link(conn, path: Path) -> tuple[int | None, str | None]:
+    """If path lives inside a registered Obsidian vault, return (vault_id, subfolder)."""
+    from backend.obsidian_service import find_vault_for_path
+    vaults = dbm.list_obsidian_vaults(conn)
+    result = find_vault_for_path(path, vaults)
+    if result is None:
+        return None, None
+    vault, subfolder = result
+    return vault.id, subfolder
+
+
+def _try_backfill_vault_link(conn, project: dbm.ProjectRow) -> None:
+    vault_id, vault_subfolder = _infer_vault_link(conn, Path(project.root_path))
+    if vault_id is not None:
+        dbm.update_project_vault(conn, project.id, vault_id=vault_id, vault_subfolder=vault_subfolder)
 
 
 @app.get("/api/v1/projects")
@@ -1419,6 +1485,8 @@ def get_project(project_id: int) -> JSONResponse:
                 "root_path": prj.root_path,
                 "rules": rules,
                 "md_out": str(project_md_out_dir(prj.id)),
+                "vault_id": prj.vault_id,
+                "vault_subfolder": prj.vault_subfolder,
             }
         )
     )
@@ -1432,13 +1500,14 @@ def get_project_ingest_status(project_id: int) -> JSONResponse:
         return JSONResponse(err("project not found"), status_code=404)
     chunk_count = int(dbm.count_project_chunks(conn, project_id=prj.id))
     review_runs_count = int(dbm.count_project_completed_outputs(conn, project_id=prj.id))
+    has_records = bool(review_runs_count > 0) or _has_vault_review_records(conn, prj)
     return JSONResponse(
         ok(
             {
                 "project_id": prj.id,
                 "chunk_count": int(chunk_count),
                 "initialized": bool(chunk_count > 0),
-                "has_review_records": bool(review_runs_count > 0),
+                "has_review_records": has_records,
             }
         )
     )
@@ -1450,9 +1519,12 @@ def delete_project(project_id: int) -> JSONResponse:
     prj = dbm.get_project_by_id(conn, project_id)
     if prj is None:
         return JSONResponse(err("project not found"), status_code=404)
-    # 只允许删除没有任何审查记录的项目（包括未完成的 analysis_runs）
-    if int(dbm.count_project_analysis_runs(conn, project_id=prj.id)) > 0 or \
-            int(dbm.count_project_completed_outputs(conn, project_id=prj.id)) > 0:
+    # 只允许删除没有任何审查记录的项目（DB + vault 双重检查）
+    db_has_records = (
+        int(dbm.count_project_analysis_runs(conn, project_id=prj.id)) > 0
+        or int(dbm.count_project_completed_outputs(conn, project_id=prj.id)) > 0
+    )
+    if db_has_records or _has_vault_review_records(conn, prj):
         return JSONResponse(
             err("项目已有审查记录，为保护历史不可删除"),
             status_code=409,
@@ -2262,6 +2334,7 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
                     milestones_filename=files.milestones_filename,
                     fragments_index_filename=files.fragments_index_filename,
                 )
+                _write_vault_run_marker(conn, prj, conversation_id, list(payload.focus_points))
                 append_milestone_event(
                     milestones_path,
                     {"type": "final", "output_markdown_path": str(out_path)},

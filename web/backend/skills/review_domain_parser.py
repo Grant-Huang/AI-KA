@@ -150,6 +150,62 @@ def _parse_preset_table(text: str) -> list[dict]:
     return presets
 
 
+def parse_review_domain_structs(package_dir: Path, package_id: str = "") -> dict:
+    """
+    Parse review_domain.md and return all structured data as plain dicts —
+    no DB required. Returns:
+      { phases, focus_points, categories, presets, package_id, error? }
+    """
+    review_domain = package_dir / "review_domain.md"
+    if not review_domain.is_file():
+        return {"error": f"{review_domain} not found", "phases": [], "focus_points": [], "categories": [], "presets": []}
+
+    text = review_domain.read_text(encoding="utf-8", errors="replace")
+
+    # Phases (from _PHASE_MAP + detected from focus IDs)
+    phases_seen: dict[str, dict] = {}
+    for _, (pid, pname, pdesc, porder) in _PHASE_MAP.items():
+        phases_seen[pid] = {"id": pid, "name": pname, "description": pdesc, "order_index": porder}
+
+    blocks = _parse_focus_blocks(text)
+    focus_points = []
+    categories = []
+    for i, block in enumerate(blocks):
+        phase_id = _detect_phase(block["id"])
+        if phase_id not in phases_seen:
+            phases_seen[phase_id] = {"id": phase_id, "name": phase_id, "description": "", "order_index": 99}
+        focus_points.append({
+            "id": block["id"],
+            "phase_id": phase_id,
+            "name": block["name"],
+            "description": block["content"].strip()[:200],
+            "order_index": i,
+            "package_id": package_id,
+        })
+        for cat in _parse_categories(block["id"], block["content"]):
+            categories.append(cat)
+
+    presets_raw = _parse_preset_table(text)
+    presets = []
+    for p in presets_raw:
+        focus_ids = p.pop("focus_ids", [])
+        prerequisite_ids = p.pop("prerequisite_ids", set())
+        p["package_id"] = package_id
+        p["focus_members"] = [
+            {"focus_id": fid, "order_index": j, "is_prerequisite": fid in prerequisite_ids}
+            for j, fid in enumerate(focus_ids)
+        ]
+        presets.append(p)
+
+    return {
+        "phases": sorted(phases_seen.values(), key=lambda x: x["order_index"]),
+        "focus_points": focus_points,
+        "categories": categories,
+        "presets": presets,
+        "package_id": package_id,
+    }
+
+
 def import_review_domain_to_db(
     conn: sqlite3.Connection,
     package_dir: Path,

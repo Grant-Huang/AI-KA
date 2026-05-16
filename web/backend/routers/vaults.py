@@ -10,7 +10,10 @@ from fastapi.responses import JSONResponse
 from aika import db as dbm
 from backend.deps import get_conn
 from backend.response import err, ok
-from backend.obsidian_service import find_vaults, is_obsidian_vault, read_vault_name
+from backend.obsidian_service import (
+    find_vaults, is_obsidian_vault, read_vault_name,
+    list_vault_projects, ensure_vault_structure,
+)
 
 router = APIRouter()
 
@@ -126,6 +129,36 @@ def update_vault(vault_id: int, payload: dict[str, Any]) -> JSONResponse:
     )
     updated = dbm.get_obsidian_vault_by_id(conn, vault_id)
     return JSONResponse(ok(_vault_to_dict(updated)))  # type: ignore[arg-type]
+
+
+@router.get("/api/v1/vaults/{vault_id}/projects")
+def list_vault_project_dirs(vault_id: int) -> JSONResponse:
+    """
+    Scan vault_path/Projects/ and return first-level subdirectories as potential
+    AI-KA projects, with auto-detected project number/name and registration status.
+    """
+    conn = get_conn()
+    vault = dbm.get_obsidian_vault_by_id(conn, vault_id)
+    if vault is None:
+        return JSONResponse(err("vault not found"), status_code=404)
+
+    registered = {p.root_path for p in dbm.get_projects_by_vault_id(conn, vault_id)}
+    projects = list_vault_projects(Path(vault.path), registered_roots=registered)
+    return JSONResponse(ok({"vault_id": vault_id, "projects": projects}))
+
+
+@router.post("/api/v1/vaults/{vault_id}/init-structure")
+def init_vault_structure(vault_id: int) -> JSONResponse:
+    """Create the standard _aika/ subdirectory structure inside the vault."""
+    conn = get_conn()
+    vault = dbm.get_obsidian_vault_by_id(conn, vault_id)
+    if vault is None:
+        return JSONResponse(err("vault not found"), status_code=404)
+    try:
+        ensure_vault_structure(Path(vault.path))
+    except OSError as e:
+        return JSONResponse(err(f"failed to create vault structure: {e}"), status_code=500)
+    return JSONResponse(ok({"initialized": True, "vault_path": vault.path}))
 
 
 @router.delete("/api/v1/vaults/{vault_id}")
