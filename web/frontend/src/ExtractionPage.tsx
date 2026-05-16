@@ -7,9 +7,9 @@ import {
 import { ChatWindow } from "./ChatWindow";
 
 import {
-  CheckOutlined, ClockCircleOutlined, CloseOutlined, DeleteOutlined, EditOutlined,
-  EllipsisOutlined, InboxOutlined, PaperClipOutlined, PlusOutlined,
-  ReloadOutlined, RetweetOutlined, StarFilled, StarOutlined, WarningOutlined,
+  ArrowUpOutlined, CheckOutlined, ClockCircleOutlined, CloseOutlined,
+  DeleteOutlined, EditOutlined, EllipsisOutlined, InboxOutlined, PaperClipOutlined,
+  PlusOutlined, ReloadOutlined, RetweetOutlined, StarFilled, StarOutlined, WarningOutlined,
 } from "@ant-design/icons";
 import type {
   ExtractionSession, PendingRuleItem, ReviewQueueItem,
@@ -361,15 +361,6 @@ function ExpertQATab({
   };
 
   const handleStop = () => { abortRef.current?.abort(); setStreaming(false); };
-  const handleReset = () => {
-    handleStop();
-    setPhase("choosing");
-    setMessages(makeInitialMessages(isPostReview));
-    setRoundNumber(1);
-    setNewKiIds([]);
-    setMaterialId(null);
-    setDocName("");
-  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
@@ -409,7 +400,7 @@ function ExpertQATab({
             }
             autoSize={{ minRows: 2, maxRows: 6 }}
             disabled={streaming}
-            style={{ border: "none", boxShadow: "none", resize: "none", padding: "10px 12px" }}
+            style={{ border: "none", boxShadow: "none", resize: "none", padding: "10px 12px", background: "#fff" }}
           />
           {/* Input toolbar */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 8px 6px" }}>
@@ -459,15 +450,14 @@ function ExpertQATab({
               )}
             </div>
             <div style={{ display: "flex", gap: 6 }}>
-              {isPostReview && !streaming && messages.filter((m) => m.role !== "status" && m.role !== "assistant").length === 0 ? (
+              {streaming ? (
+                <Button danger size="small" onClick={handleStop}>停止</Button>
+              ) : isPostReview && messages.filter((m) => m.role !== "status" && m.role !== "assistant").length === 0 ? (
                 <Button type="primary" size="small" onClick={() => void handlePostReviewStart()}>开始提取</Button>
               ) : (
-                <Button type="primary" size="small" onClick={() => void handleSend()} disabled={!input.trim() || streaming}>发送</Button>
+                <Button type="primary" size="small" shape="circle" icon={<ArrowUpOutlined />}
+                  onClick={() => void handleSend()} disabled={!input.trim() || streaming} />
               )}
-              {streaming
-                ? <Button danger size="small" onClick={handleStop}>停止</Button>
-                : <Button size="small" onClick={handleReset} disabled={streaming}>清空</Button>
-              }
             </div>
           </div>
         </div>
@@ -748,9 +738,9 @@ export default function ExtractionPage() {
     setRenameTargetId(null);
   };
 
-  const handleFirstMessage = async (title: string, strat: string): Promise<number> => {
+  const handleFirstMessage = async (_title: string, strat: string): Promise<number> => {
     accumulatedMsgsRef.current = [];
-    const s = await createExtractionSession(title, strat);
+    const s = await createExtractionSession("新会话", strat);
     setCurrentSessionId(s.id);
     void loadSessions();
     return s.id;
