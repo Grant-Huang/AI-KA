@@ -9,8 +9,10 @@ import { ChatWindow } from "./ChatWindow";
 import {
   ArrowUpOutlined, CheckOutlined, ClockCircleOutlined, CloseOutlined,
   DeleteOutlined, EditOutlined, EllipsisOutlined, InboxOutlined, PaperClipOutlined,
-  PlusOutlined, ReloadOutlined, RetweetOutlined, StarFilled, StarOutlined, StopOutlined, WarningOutlined,
+  PlusOutlined, ReloadOutlined, RetweetOutlined, StarFilled, StarOutlined, StopOutlined,
+  UnorderedListOutlined, WarningOutlined,
 } from "@ant-design/icons";
+import { AllSessionsPanel, AllSessionItem } from "./AllSessionsPanel";
 import type {
   ExtractionSession, PendingRuleItem, ReviewQueueItem,
 } from "./api";
@@ -647,6 +649,66 @@ function PendingRulesTab() {
   );
 }
 
+// ── ExtractionSessionItem (sidebar row) ──────────────────────────────────────
+
+function ExtractionSessionItem({ s, active, onSelect, onStar, onRename, onDelete }: {
+  s: ExtractionSession;
+  active: boolean;
+  onSelect: () => void;
+  onStar: () => void;
+  onRename: () => void;
+  onDelete: (ev: React.MouseEvent) => void;
+}) {
+  return (
+    <div
+      className={`session-item${active ? " session-item--active" : ""}`}
+      onClick={onSelect}
+    >
+      {s.starred && <span className="session-item__star"><StarFilled /></span>}
+      <div className="session-item__body">
+        <Tooltip title={s.title} placement="right" mouseEnterDelay={0.5}>
+          <div className="session-item__title">{s.title}</div>
+        </Tooltip>
+        <div className="session-item__time">
+          <ClockCircleOutlined style={{ marginRight: 3 }} />
+          {s.updated_at.slice(0, 16).replace("T", " ")}
+        </div>
+      </div>
+      <Dropdown
+        trigger={["click"]}
+        placement="bottomRight"
+        menu={{
+          items: [
+            {
+              key: "star",
+              label: s.starred ? "取消收藏" : "收藏",
+              icon: s.starred ? <StarFilled style={{ color: "#f59e0b" }} /> : <StarOutlined />,
+              onClick: ({ domEvent }) => { domEvent.stopPropagation(); onStar(); },
+            },
+            {
+              key: "rename",
+              label: "重命名",
+              icon: <EditOutlined />,
+              onClick: ({ domEvent }) => { domEvent.stopPropagation(); onRename(); },
+            },
+            { type: "divider" as const },
+            {
+              key: "delete",
+              label: "删除",
+              icon: <DeleteOutlined />,
+              danger: true,
+              onClick: ({ domEvent }) => { domEvent.stopPropagation(); onDelete(domEvent as unknown as React.MouseEvent); },
+            },
+          ],
+        }}
+      >
+        <Button type="text" size="small" className="session-item__menu"
+          icon={<EllipsisOutlined />} onClick={(e) => e.stopPropagation()} />
+      </Dropdown>
+    </div>
+  );
+}
+
 // ── ExtractionPage (main) ─────────────────────────────────────────────────────
 
 export default function ExtractionPage() {
@@ -661,6 +723,7 @@ export default function ExtractionPage() {
   // Rename state
   const [renameTargetId, setRenameTargetId] = useState<number | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [showAllSessions, setShowAllSessions] = useState(false);
 
   // Accumulated messages for title generation
   const accumulatedMsgsRef = useRef<Array<{ role: string; content: string }>>([]);
@@ -756,6 +819,22 @@ export default function ExtractionPage() {
     }
   };
 
+  const SIDEBAR_LIMIT = 25;
+  const starredSessions = sessions.filter(s => s.starred);
+  const recentSessions = sessions.filter(s => !s.starred);
+  const displayStarred = starredSessions.slice(0, SIDEBAR_LIMIT);
+  const displayRecent = recentSessions.slice(0, Math.max(0, SIDEBAR_LIMIT - displayStarred.length));
+
+  const fetchExtractionSessions = useCallback(async (opts: { limit: number; offset: number; q: string }): Promise<{ items: AllSessionItem[]; hasMore: boolean }> => {
+    const { sessions: all } = await listExtractionSessions();
+    const filtered = opts.q ? all.filter(s => s.title.toLowerCase().includes(opts.q.toLowerCase())) : all;
+    const page = filtered.slice(opts.offset, opts.offset + opts.limit);
+    return {
+      items: page.map(s => ({ id: s.id, title: s.title, updated_at: s.updated_at, starred: s.starred })),
+      hasMore: opts.offset + page.length < filtered.length,
+    };
+  }, []);
+
   return (
     <div className="extraction-page" style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       {/* ── Two-column content ── */}
@@ -769,83 +848,61 @@ export default function ExtractionPage() {
           <div className="session-col__list">
             {sessions.length === 0 ? (
               <Text type="secondary" style={{ fontSize: 12, padding: "8px 4px", display: "block" }}>暂无历史会话</Text>
-            ) : sessions.map((s) => (
-              <div
-                key={s.id}
-                className={`session-item${s.id === currentSessionId ? " session-item--active" : ""}`}
-                onClick={() => void handleSelectSession(s.id)}
-              >
-                {s.starred && <span className="session-item__star"><StarFilled /></span>}
-                <div className="session-item__body">
-                  <Tooltip title={s.title} placement="right" mouseEnterDelay={0.5}>
-                    <div className="session-item__title">{s.title}</div>
-                  </Tooltip>
-                  <div className="session-item__time">
-                    <ClockCircleOutlined style={{ marginRight: 3 }} />
-                    {s.updated_at.slice(0, 16).replace("T", " ")}
-                  </div>
-                </div>
-                <Dropdown
-                  trigger={["click"]}
-                  placement="bottomRight"
-                  menu={{
-                    items: [
-                      {
-                        key: "star",
-                        label: s.starred ? "取消收藏" : "收藏",
-                        icon: s.starred ? <StarFilled style={{ color: "#f59e0b" }} /> : <StarOutlined />,
-                        onClick: ({ domEvent }) => {
-                          domEvent.stopPropagation();
-                          void handleStarSession(s.id, !s.starred);
-                        },
-                      },
-                      {
-                        key: "rename",
-                        label: "重命名",
-                        icon: <EditOutlined />,
-                        onClick: ({ domEvent }) => {
-                          domEvent.stopPropagation();
-                          setRenameTargetId(s.id);
-                          setRenameValue(s.title);
-                        },
-                      },
-                      { type: "divider" as const },
-                      {
-                        key: "delete",
-                        label: "删除",
-                        icon: <DeleteOutlined />,
-                        danger: true,
-                        onClick: ({ domEvent }) => {
-                          domEvent.stopPropagation();
-                          handleDeleteSession(s.id, domEvent as unknown as React.MouseEvent);
-                        },
-                      },
-                    ],
-                  }}
-                >
-                  <Button
-                    type="text"
-                    size="small"
-                    className="session-item__menu"
-                    icon={<EllipsisOutlined />}
-                    onClick={(e) => e.stopPropagation()}
-                  />
-                </Dropdown>
-              </div>
-            ))}
+            ) : (
+              <>
+                {displayStarred.length > 0 && (
+                  <>
+                    <div className="session-group-label">置顶</div>
+                    {displayStarred.map((s) => (
+                      <ExtractionSessionItem key={s.id} s={s} active={s.id === currentSessionId}
+                        onSelect={() => { setShowAllSessions(false); void handleSelectSession(s.id); }}
+                        onStar={() => void handleStarSession(s.id, !s.starred)}
+                        onRename={() => { setRenameTargetId(s.id); setRenameValue(s.title); }}
+                        onDelete={(ev) => handleDeleteSession(s.id, ev)} />
+                    ))}
+                  </>
+                )}
+                {displayRecent.length > 0 && (
+                  <>
+                    <div className="session-group-label">近期会话</div>
+                    {displayRecent.map((s) => (
+                      <ExtractionSessionItem key={s.id} s={s} active={s.id === currentSessionId}
+                        onSelect={() => { setShowAllSessions(false); void handleSelectSession(s.id); }}
+                        onStar={() => void handleStarSession(s.id, !s.starred)}
+                        onRename={() => { setRenameTargetId(s.id); setRenameValue(s.title); }}
+                        onDelete={(ev) => handleDeleteSession(s.id, ev)} />
+                    ))}
+                  </>
+                )}
+              </>
+            )}
+            <div className="session-col__all-btn" onClick={() => setShowAllSessions(true)}>
+              <UnorderedListOutlined style={{ fontSize: 12 }} />
+              <span>所有会话</span>
+            </div>
           </div>
         </div>
 
         {/* Main content */}
         <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-          <ExpertQATab
-            key={sessionKey}
-            postReviewCtx={postReviewCtx}
-            preloadMessages={preloadMessages}
-            sessionId={currentSessionId}
-            onFirstMessage={handleFirstMessage}
-            onRoundComplete={handleRoundComplete}
-          />
+          {showAllSessions ? (
+            <AllSessionsPanel
+              fetchSessions={fetchExtractionSessions}
+              onSelect={(item) => {
+                setShowAllSessions(false);
+                void handleSelectSession(item.id);
+              }}
+            />
+          ) : (
+            <ExpertQATab
+              key={sessionKey}
+              postReviewCtx={postReviewCtx}
+              preloadMessages={preloadMessages}
+              sessionId={currentSessionId}
+              onFirstMessage={handleFirstMessage}
+              onRoundComplete={handleRoundComplete}
+            />
+          )}
         </div>
       </div>
 

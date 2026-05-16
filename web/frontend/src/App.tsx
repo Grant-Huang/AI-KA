@@ -59,7 +59,9 @@ import {
   ArrowLeftOutlined,
   StarFilled,
   StarOutlined,
+  UnorderedListOutlined,
 } from "@ant-design/icons";
+import { AllSessionsPanel, AllSessionItem } from "./AllSessionsPanel";
 import {
   apiJson,
   deleteConversation,
@@ -545,7 +547,7 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [appMode, setAppMode] = useState<"review" | "extraction">("review");
-  const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain">("analyze");
+  const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain" | "all_conversations">("analyze");
   const [reviewMainTab, setReviewMainTab] = useState<"analyze" | "result_review">("analyze");
   const [projectIngest, setProjectIngest] = useState<
     Record<number, { initialized: boolean; chunk_count: number; has_review_records?: boolean }>
@@ -1089,6 +1091,21 @@ export default function App() {
     if (appMode !== "review") return;
     loadConversations({ q: chatSearchQuery }).catch((e) => message.error(String((e as Error).message)));
   }, [appMode, chatSearchQuery, loadConversations]);
+
+  const fetchAllConversations = useCallback(async (opts: { limit: number; offset: number; q: string }): Promise<{ items: AllSessionItem[]; hasMore: boolean }> => {
+    const { conversations } = await getConversationsGlobal({ limit: opts.limit + 1, offset: opts.offset, q: opts.q });
+    const hasMore = conversations.length > opts.limit;
+    return {
+      items: conversations.slice(0, opts.limit).map(c => ({
+        id: c.id,
+        title: c.title || "(无标题)",
+        updated_at: c.updated_at ?? "",
+        starred: c.starred,
+        project_id: c.project_id,
+      })),
+      hasMore,
+    };
+  }, []);
 
   /** 项目列表变化后，若当前选中 id 已不存在则清空（不自动改选其它项目） */
   useEffect(() => {
@@ -3151,6 +3168,12 @@ export default function App() {
     });
   };
 
+  const CONV_SIDEBAR_LIMIT = 25;
+  const starredConvs = conversations.filter(c => c.starred);
+  const recentConvs = conversations.filter(c => !c.starred);
+  const displayStarredConvs = starredConvs.slice(0, CONV_SIDEBAR_LIMIT);
+  const displayRecentConvs = recentConvs.slice(0, Math.max(0, CONV_SIDEBAR_LIMIT - displayStarredConvs.length));
+
   return (
     <div className={`app-layout${isStandalone ? " app-layout--standalone" : ""}`}>
 
@@ -3295,92 +3318,109 @@ export default function App() {
               <div className="session-col__list">
                 {conversations.length === 0 ? (
                   <Text type="secondary" style={{ fontSize: 12, padding: "8px 4px", display: "block" }}>暂无历史会话</Text>
-                ) : conversations.map((c) => {
-                  const { headline, subline } = conversationListDisplay(c);
-                  const active = c.id === selectedConversationId;
-                  return (
-                    <div
-                      key={c.id}
-                      className={`session-item${active ? " session-item--active" : ""}${c.starred ? " session-item--starred" : ""}`}
-                      onClick={() => {
-                        const pid = c.project_id;
-                        if (typeof pid === "number") setSelectedId(pid);
-                        setProjectViewOnlyReason(c.project_available === false ? "项目不可用或已删除：仅可查看历史会话，无法继续审查/追问。" : "");
-                        setMainPanel("analyze");
-                        setSelectedConversationId(c.id);
-                        setReviewMainTab("analyze");
-                      }}
-                    >
-                      {c.starred && <StarFilled style={{ fontSize: 10, color: "#f5a623", flexShrink: 0, marginTop: 3 }} />}
-                      <div className="session-item__body">
-                        <Tooltip title={headline} placement="right" mouseEnterDelay={0.5}>
-                          <div className="session-item__title">{headline}</div>
-                        </Tooltip>
-                        {subline && <div className="session-item__time">{subline}</div>}
-                        {c.project_name && <div className="session-item__time">项目：{String(c.project_name)}</div>}
-                        {c.project_available === false && <div className="session-item__time">（仅可回看）</div>}
-                      </div>
-                      <Dropdown
-                        trigger={["click"]}
-                        placement="bottomRight"
-                        menu={{
-                          items: [
-                            {
-                              key: "star",
-                              label: c.starred ? "取消置顶" : "置顶",
-                              icon: c.starred ? <StarFilled style={{ color: "#f5a623" }} /> : <StarOutlined />,
-                              onClick: ({ domEvent }) => {
-                                domEvent.stopPropagation();
-                                void patchConversation(c.id, { starred: !c.starred })
-                                  .then(() => loadConversations({ q: chatSearchQuery }));
-                              },
-                            },
-                            {
-                              key: "rename",
-                              label: "重命名",
-                              icon: <EditOutlined />,
-                              onClick: ({ domEvent }) => {
-                                domEvent.stopPropagation();
-                                setRenameConvId(c.id);
-                                setRenameConvValue(c.title);
-                              },
-                            },
-                            { type: "divider" },
-                            {
-                              key: "delete",
-                              label: "删除",
-                              icon: <DeleteOutlined />,
-                              danger: true,
-                              onClick: ({ domEvent }) => {
-                                domEvent.stopPropagation();
-                                const pid = c.project_id;
-                                if (typeof pid !== "number") return;
-                                Modal.confirm({
-                                  title: "确认删除会话",
-                                  content: `将删除会话「${headline}」。此操作不可撤销。`,
-                                  okText: "删除", okButtonProps: { danger: true }, cancelText: "取消",
-                                  onOk: async () => {
-                                    await deleteConversation(pid, c.id);
-                                    setSelectedConversationId((prev) => (prev === c.id ? null : prev));
-                                    await loadConversations({ q: chatSearchQuery });
-                                  },
-                                });
-                              },
-                            },
-                          ],
+                ) : (() => {
+                  const renderConvItem = (c: Conversation) => {
+                    const { headline, subline } = conversationListDisplay(c);
+                    const active = c.id === selectedConversationId;
+                    return (
+                      <div
+                        key={c.id}
+                        className={`session-item${active ? " session-item--active" : ""}${c.starred ? " session-item--starred" : ""}`}
+                        onClick={() => {
+                          const pid = c.project_id;
+                          if (typeof pid === "number") setSelectedId(pid);
+                          setProjectViewOnlyReason(c.project_available === false ? "项目不可用或已删除：仅可查看历史会话，无法继续审查/追问。" : "");
+                          setMainPanel("analyze");
+                          setSelectedConversationId(c.id);
+                          setReviewMainTab("analyze");
                         }}
                       >
-                        <Button
-                          type="text"
-                          size="small"
-                          className="session-item__menu"
-                          icon={<EllipsisOutlined />}
-                          onClick={(e) => e.stopPropagation()}
-                        />
-                      </Dropdown>
-                    </div>
+                        {c.starred && <StarFilled style={{ fontSize: 10, color: "#f5a623", flexShrink: 0, marginTop: 3 }} />}
+                        <div className="session-item__body">
+                          <Tooltip title={headline} placement="right" mouseEnterDelay={0.5}>
+                            <div className="session-item__title">{headline}</div>
+                          </Tooltip>
+                          {subline && <div className="session-item__time">{subline}</div>}
+                          {c.project_name && <div className="session-item__time">项目：{String(c.project_name)}</div>}
+                          {c.project_available === false && <div className="session-item__time">（仅可回看）</div>}
+                        </div>
+                        <Dropdown
+                          trigger={["click"]}
+                          placement="bottomRight"
+                          menu={{
+                            items: [
+                              {
+                                key: "star",
+                                label: c.starred ? "取消置顶" : "置顶",
+                                icon: c.starred ? <StarFilled style={{ color: "#f5a623" }} /> : <StarOutlined />,
+                                onClick: ({ domEvent }) => {
+                                  domEvent.stopPropagation();
+                                  void patchConversation(c.id, { starred: !c.starred })
+                                    .then(() => loadConversations({ q: chatSearchQuery }));
+                                },
+                              },
+                              {
+                                key: "rename",
+                                label: "重命名",
+                                icon: <EditOutlined />,
+                                onClick: ({ domEvent }) => {
+                                  domEvent.stopPropagation();
+                                  setRenameConvId(c.id);
+                                  setRenameConvValue(c.title);
+                                },
+                              },
+                              { type: "divider" as const },
+                              {
+                                key: "delete",
+                                label: "删除",
+                                icon: <DeleteOutlined />,
+                                danger: true,
+                                onClick: ({ domEvent }) => {
+                                  domEvent.stopPropagation();
+                                  const pid = c.project_id;
+                                  if (typeof pid !== "number") return;
+                                  Modal.confirm({
+                                    title: "确认删除会话",
+                                    content: `将删除会话「${headline}」。此操作不可撤销。`,
+                                    okText: "删除", okButtonProps: { danger: true }, cancelText: "取消",
+                                    onOk: async () => {
+                                      await deleteConversation(pid, c.id);
+                                      setSelectedConversationId((prev) => (prev === c.id ? null : prev));
+                                      await loadConversations({ q: chatSearchQuery });
+                                    },
+                                  });
+                                },
+                              },
+                            ],
+                          }}
+                        >
+                          <Button type="text" size="small" className="session-item__menu"
+                            icon={<EllipsisOutlined />} onClick={(e) => e.stopPropagation()} />
+                        </Dropdown>
+                      </div>
+                    );
+                  };
+                  return (
+                    <>
+                      {displayStarredConvs.length > 0 && (
+                        <>
+                          <div className="session-group-label">置顶</div>
+                          {displayStarredConvs.map(renderConvItem)}
+                        </>
+                      )}
+                      {displayRecentConvs.length > 0 && (
+                        <>
+                          <div className="session-group-label">近期会话</div>
+                          {displayRecentConvs.map(renderConvItem)}
+                        </>
+                      )}
+                    </>
                   );
-                })}
+                })()}
+                <div className="session-col__all-btn" onClick={() => setMainPanel("all_conversations")}>
+                  <UnorderedListOutlined style={{ fontSize: 12 }} />
+                  <span>所有会话</span>
+                </div>
               </div>
             </div>
           )}
@@ -3582,6 +3622,16 @@ export default function App() {
                 ) : null}
               </Space>
             </div>
+          ) : appMode === "review" && mainPanel === "all_conversations" ? (
+            <AllSessionsPanel
+              fetchSessions={fetchAllConversations}
+              onSelect={(item) => {
+                if (item.project_id != null) setSelectedId(item.project_id);
+                setSelectedConversationId(item.id);
+                setMainPanel("analyze");
+                setReviewMainTab("analyze");
+              }}
+            />
           ) : appMode === "review" && mainPanel === "review_domain" ? (
             reviewDomainPageNode
           ) : appMode === "review" && !showMainOutput ? (
