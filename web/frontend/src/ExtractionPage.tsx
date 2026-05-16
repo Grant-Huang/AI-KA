@@ -263,9 +263,7 @@ function ExpertQATab({
 
       await streamFn(
         (ev) => {
-          if (ev.type === "status") {
-            setMessages((prev) => [...prev, { role: "status", content: String(ev.msg ?? "") }]);
-          } else if (ev.type === "text") {
+          if (ev.type === "text") {
             const chunk = String(ev.text ?? "");
             acc.push(chunk);
             setMessages((prev) => {
