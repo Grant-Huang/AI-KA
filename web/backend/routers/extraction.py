@@ -26,7 +26,6 @@ Expert Onboarding Interview:
 """
 from __future__ import annotations
 
-import dataclasses as _dc
 import json
 
 import uuid
@@ -578,8 +577,6 @@ def _build_active_extraction_system_prompt(
 2. 确保每条规则都有明确的适用范围
 3. 追问例外条件，避免规则过于绝对
 
-**每轮只问 1 个问题**。如果识别到多个待追问主题，先列出清单，只追问第一个，等专家回答形成结论后再继续下一个。
-
 {_EXPERT_MODELING_PROTOCOL}
 
 {KI_INSTRUCTION}
@@ -765,7 +762,7 @@ async def upload_extraction_material(
     Returns a material_id that can be used with /api/v1/extraction/doc-stream.
     The file is stored in a temp staging area; text extraction is done on-demand.
     """
-    allowed_exts = {".pdf", ".docx", ".doc", ".md", ".txt", ".html", ".htm", ".xlsx", ".csv", ".pptx"}
+    allowed_exts = {".pdf", ".docx", ".doc", ".md", ".txt"}
     original_name = file.filename or "upload"
     suffix = Path(original_name).suffix.lower()
     if suffix not in allowed_exts:
@@ -839,7 +836,7 @@ def doc_extraction_stream(body: DocExtractionBody) -> StreamingResponse:
             profile_str = f"专家领域：{', '.join(expert_profile.domains)}\n"
         domain_str = f"【当前审查域背景】\n{domain_intro}\n\n" if domain_intro else ""
 
-        system_prompt = f"""你是知识工程师，负责从规则文档中**全面**提取隐性知识，并逐条澄清。
+        system_prompt = f"""你是知识工程师，负责从规则文档中提取隐性知识并对照现有规则进行澄清。
 
 {profile_str}
 {domain_str}【现有相关规则摘要】
@@ -847,25 +844,18 @@ def doc_extraction_stream(body: DocExtractionBody) -> StreamingResponse:
 
 {strategy_hint}
 
-## 工作方式（重要）
-
-**第一轮**（文档首次上传时）：
-1. 通读全文，**完整列举**所有识别到的规则或判断原则（编号列表，不要遗漏）
-2. 每条标注置信度：明确说明 / 隐含推断 / 待验证
-3. 列完后，**只针对第一条**（或最不清晰的一条）提出 1 个澄清问题
-4. 在列表末说明：「共识别到 N 条，将逐条澄清」
-
-**后续轮次**（专家回答后）：
-- 每轮只问 **1个问题**，等待专家回答后再继续
-- 在每轮开头简短提示进度：「第 X / N 条 · 还有 Y 条待处理」
-- 当某条规则的答案充分时，提炼知识卡片，然后自动移至下一条
+你的任务：
+1. 读取下方文档内容
+2. 识别文档中明确或隐含的规则/判断原则
+3. 对照现有规则，找出：(a) 新增内容；(b) 与现有规则的差异；(c) 文档中未说明适用条件的规则
+4. 对每条提取到的规则，追问适用范围
 
 {KI_INSTRUCTION}
 
 已提取条目数：{len(existing_items)}（不重复已有规则）
 """.strip()
 
-        doc_section = f"\n\n【文档内容】\n{doc_text[:20000]}"
+        doc_section = f"\n\n【文档内容】\n{doc_text[:6000]}"
         user_msg = (body.user_input or "请分析此文档中的规则和判断原则，提取可复用的知识条目。") + doc_section
 
         yield _sse_line({"type": "status", "msg": "分析文档中…"})
@@ -924,19 +914,10 @@ def doc_extraction_stream(body: DocExtractionBody) -> StreamingResponse:
 
 
 def _extract_doc_text(path: Path) -> str:
-    """Extract plain text from a document file using markitdown (preferred) or fallback."""
-    try:
-        from markitdown import MarkItDown
-        md = MarkItDown()
-        result = md.convert(str(path))
-        return result.text_content or ""
-    except Exception:
-        pass
-
-    # Fallback for plain text formats
+    """Extract plain text from a document file."""
     suffix = path.suffix.lower()
     try:
-        if suffix in (".md", ".txt", ".html", ".htm"):
+        if suffix in (".md", ".txt"):
             return path.read_text(encoding="utf-8", errors="replace")
         if suffix in (".docx", ".doc"):
             try:
@@ -944,16 +925,17 @@ def _extract_doc_text(path: Path) -> str:
                 doc = docx.Document(str(path))
                 return "\n".join(p.text for p in doc.paragraphs)
             except ImportError:
-                pass
+                return path.read_text(encoding="utf-8", errors="replace")
         if suffix == ".pdf":
             try:
                 import pypdf
                 reader = pypdf.PdfReader(str(path))
-                return "\n".join(page.extract_text() or "" for page in reader.pages)
+                parts = [page.extract_text() or "" for page in reader.pages]
+                return "\n".join(parts)
             except ImportError:
-                pass
+                return ""
     except Exception:
-        pass
+        return ""
     return ""
 
 
@@ -1109,104 +1091,6 @@ class StrategyPatternCreate(BaseModel):
     applicable_when: dict[str, Any] | None = None
     effectiveness_score: float = 0.5
     sample_triggers: list[str] | None = None
-
-
-class _CreateSessionBody(BaseModel):
-    title: str = "新会话"
-    strategy: str | None = None
-
-
-class _AppendMessagesBody(BaseModel):
-    messages: list[dict[str, str]]
-
-
-class _PatchSessionBody(BaseModel):
-    title: str | None = None
-    starred: bool | None = None
-
-
-class _GenerateTitleBody(BaseModel):
-    messages: list[dict[str, str]]
-
-
-@router.get("/api/v1/extraction/sessions")
-def list_extraction_sessions_api():
-    conn = get_conn()
-    sessions = dbm.list_extraction_sessions(conn)
-    return {"sessions": [_dc.asdict(s) for s in sessions]}
-
-
-@router.post("/api/v1/extraction/sessions")
-def create_extraction_session_api(body: _CreateSessionBody):
-    conn = get_conn()
-    s = dbm.create_extraction_session(conn, title=body.title, strategy=body.strategy)
-    return _dc.asdict(s)
-
-
-@router.get("/api/v1/extraction/sessions/{sid}/messages")
-def get_extraction_session_messages_api(sid: int):
-    conn = get_conn()
-    msgs = dbm.list_extraction_messages(conn, sid)
-    return {"messages": msgs}
-
-
-@router.delete("/api/v1/extraction/sessions/{sid}")
-def delete_extraction_session_api(sid: int):
-    conn = get_conn()
-    dbm.delete_extraction_session(conn, sid)
-    return {"ok": True}
-
-
-@router.post("/api/v1/extraction/sessions/{sid}/messages")
-def append_extraction_messages_api(sid: int, body: _AppendMessagesBody):
-    conn = get_conn()
-    dbm.append_extraction_messages(conn, sid, body.messages)
-    return {"ok": True}
-
-
-@router.patch("/api/v1/extraction/sessions/{sid}")
-def patch_extraction_session_api(sid: int, body: _PatchSessionBody):
-    conn = get_conn()
-    dbm.update_extraction_session(conn, sid, title=body.title, starred=body.starred)
-    return {"ok": True}
-
-
-@router.post("/api/v1/extraction/sessions/{sid}/generate-title")
-async def generate_extraction_session_title_api(sid: int, body: _GenerateTitleBody) -> JSONResponse:
-    """Call LLM to generate a short session title from conversation messages."""
-    if not body.messages:
-        return err("No messages provided")
-    try:
-        provider, cfg = _get_llm_provider()
-    except Exception as e:
-        return err(f"LLM provider unavailable: {e}")
-
-    lines = []
-    for m in body.messages[:10]:
-        role = "用户" if m.get("role") == "user" else "助手"
-        content = str(m.get("content", ""))[:300]
-        lines.append(f"[{role}]: {content}")
-
-    prompt = (
-        "以下是一段工作经验总结对话。请生成一个10-15字的中文标题，"
-        "直接输出标题文字，不要任何额外说明：\n\n" + "\n".join(lines)
-    )
-    acc: list[str] = []
-    try:
-        for chunk in provider.chat_stream(
-            system="你是专业的对话标题生成助手，只输出标题，不超过20字。",
-            user=prompt,
-            config=cfg,
-        ):
-            text = chunk.get("content") or chunk.get("text") or "" if isinstance(chunk, dict) else str(chunk)
-            acc.append(text)
-    except Exception as e:
-        return err(f"LLM error: {e}")
-
-    title = "".join(acc).strip().strip('"').strip("'")[:40]
-    conn = get_conn()
-    dbm.update_extraction_session(conn, sid, title=title)
-    return ok({"title": title})
 
 
 @router.get("/api/v1/extraction/strategies")

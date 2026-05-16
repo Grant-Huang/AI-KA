@@ -304,24 +304,6 @@ CREATE TABLE IF NOT EXISTS obsidian_vaults (
 );
 
 CREATE INDEX IF NOT EXISTS idx_obsidian_vaults_role ON obsidian_vaults(role);
-
-CREATE TABLE IF NOT EXISTS extraction_sessions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  title TEXT NOT NULL DEFAULT '新会话',
-  strategy TEXT,
-  starred INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS extraction_messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id INTEGER NOT NULL,
-  role TEXT NOT NULL,
-  content TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY(session_id) REFERENCES extraction_sessions(id) ON DELETE CASCADE
-);
 """
 
 
@@ -392,6 +374,7 @@ class ConversationGlobalRow:
     created_at: str
     updated_at: str
     preset_id: str | None = None
+    starred: bool = False
 
 
 @dataclass(frozen=True)
@@ -486,6 +469,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _migrate_knowledge_cards_table(conn)
     _migrate_obsidian_vaults_table(conn)
     _migrate_extraction_sessions_table(conn)
+    _migrate_conversations_starred(conn)
 
 
 def _table_column_names(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -1132,6 +1116,7 @@ def list_conversations_global(
     query = (q or "").strip().lower()
     sql = """
     SELECT c.id, c.project_id, c.analysis_type, c.title, c.created_at, c.updated_at, c.preset_id,
+           COALESCE(c.starred, 0) AS starred,
            p.name AS project_name
     FROM conversations c
     JOIN projects p ON p.id = c.project_id
@@ -1141,7 +1126,7 @@ def list_conversations_global(
         sql += " WHERE lower(c.title) LIKE ? OR lower(p.name) LIKE ? "
         like = f"%{query}%"
         params.extend([like, like])
-    sql += " ORDER BY c.updated_at DESC, c.id DESC LIMIT ? OFFSET ? "
+    sql += " ORDER BY COALESCE(c.starred, 0) DESC, c.updated_at DESC, c.id DESC LIMIT ? OFFSET ? "
     params.extend([lim, off])
     rows = conn.execute(sql, params).fetchall()
     out: list[ConversationGlobalRow] = []
@@ -1160,6 +1145,7 @@ def list_conversations_global(
                 created_at=str(r["created_at"]),
                 updated_at=str(r["updated_at"]),
                 preset_id=preset_out,
+                starred=bool(r["starred"]),
             )
         )
     return out
@@ -1181,6 +1167,29 @@ def list_conversations_by_pair(
         (int(project_id), pid),
     ).fetchall()
     return [_row_to_conversation(r) for r in rows]
+
+
+def update_conversation(
+    conn: sqlite3.Connection,
+    conversation_id: int,
+    *,
+    title: str | None = None,
+    starred: bool | None = None,
+) -> bool:
+    updates: list[str] = ["updated_at=datetime('now')"]
+    params: list[Any] = []
+    if title is not None:
+        updates.append("title=?")
+        params.append(str(title)[:80])
+    if starred is not None:
+        updates.append("starred=?")
+        params.append(1 if starred else 0)
+    if len(updates) == 1:
+        return False
+    params.append(conversation_id)
+    cur = conn.execute(f"UPDATE conversations SET {', '.join(updates)} WHERE id=?", params)
+    conn.commit()
+    return bool(cur.rowcount)
 
 
 def get_conversation(conn: sqlite3.Connection, conversation_id: int) -> ConversationRow | None:
@@ -2532,17 +2541,6 @@ class ObsidianVaultRow:
     updated_at: str
 
 
-@dataclass
-class ExtractionSessionRow:
-    id: int
-    title: str
-    strategy: str | None
-    created_at: str
-    updated_at: str
-    message_count: int = 0
-    starred: bool = False
-
-
 def _migrate_obsidian_vaults_table(conn: sqlite3.Connection) -> None:
     """obsidian_vaults is created by SCHEMA_SQL; this is a no-op stub for existing DBs."""
     pass
@@ -2643,6 +2641,16 @@ def delete_obsidian_vault(conn: sqlite3.Connection, vault_id: int) -> bool:
     cur = conn.execute("DELETE FROM obsidian_vaults WHERE id=?", (vault_id,))
     conn.commit()
     return bool(cur.rowcount and cur.rowcount > 0)
+
+
+def _migrate_conversations_starred(conn: sqlite3.Connection) -> None:
+    cols = _table_column_names(conn, "conversations")
+    if "starred" not in cols:
+        try:
+            conn.execute("ALTER TABLE conversations ADD COLUMN starred INTEGER NOT NULL DEFAULT 0")
+            conn.commit()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

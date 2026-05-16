@@ -57,10 +57,13 @@ import {
   MenuUnfoldOutlined,
   PushpinOutlined,
   ArrowLeftOutlined,
+  StarFilled,
+  StarOutlined,
 } from "@ant-design/icons";
 import {
   apiJson,
   deleteConversation,
+  patchConversation,
   deleteProject,
   fetchTextFile,
   getConversationsGlobal,
@@ -138,6 +141,7 @@ type Conversation = {
   created_at?: string;
   updated_at?: string;
   preset_id?: string | null;
+  starred?: boolean;
 };
 
 type PipelineGateResult = { kind: "cancel" } | { kind: "ok"; convId: number };
@@ -552,6 +556,8 @@ export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<number | null>(null);
   const [projectViewOnlyReason, setProjectViewOnlyReason] = useState<string>("");
+  const [renameConvId, setRenameConvId] = useState<number | null>(null);
+  const [renameConvValue, setRenameConvValue] = useState("");
   // 2026-04：新对话直接进入空白会话页，不再弹窗
   const [newConversationOpen, setNewConversationOpen] = useState(false);
   const [chatSearchQuery, setChatSearchQuery] = useState("");
@@ -1002,6 +1008,7 @@ export default function App() {
         created_at: c.created_at,
         updated_at: c.updated_at,
         preset_id: c.preset_id ?? null,
+        starred: c.starred ?? false,
         // 全局会话列表额外字段：保留在运行时对象上，便于渲染/只读判定
         project_id: c.project_id,
         project_name: c.project_name,
@@ -3293,7 +3300,7 @@ export default function App() {
                   return (
                     <div
                       key={c.id}
-                      className={`session-item${active ? " session-item--active" : ""}`}
+                      className={`session-item${active ? " session-item--active" : ""}${c.starred ? " session-item--starred" : ""}`}
                       onClick={() => {
                         const pid = c.project_id;
                         if (typeof pid === "number") setSelectedId(pid);
@@ -3303,6 +3310,7 @@ export default function App() {
                         setReviewMainTab("analyze");
                       }}
                     >
+                      {c.starred && <StarFilled style={{ fontSize: 10, color: "#f5a623", flexShrink: 0, marginTop: 3 }} />}
                       <div className="session-item__body">
                         <Tooltip title={headline} placement="right" mouseEnterDelay={0.5}>
                           <div className="session-item__title">{headline}</div>
@@ -3316,6 +3324,27 @@ export default function App() {
                         placement="bottomRight"
                         menu={{
                           items: [
+                            {
+                              key: "star",
+                              label: c.starred ? "取消置顶" : "置顶",
+                              icon: c.starred ? <StarFilled style={{ color: "#f5a623" }} /> : <StarOutlined />,
+                              onClick: ({ domEvent }) => {
+                                domEvent.stopPropagation();
+                                void patchConversation(c.id, { starred: !c.starred })
+                                  .then(() => loadConversations({ q: chatSearchQuery }));
+                              },
+                            },
+                            {
+                              key: "rename",
+                              label: "重命名",
+                              icon: <EditOutlined />,
+                              onClick: ({ domEvent }) => {
+                                domEvent.stopPropagation();
+                                setRenameConvId(c.id);
+                                setRenameConvValue(c.title);
+                              },
+                            },
+                            { type: "divider" },
                             {
                               key: "delete",
                               label: "删除",
@@ -3568,11 +3597,12 @@ export default function App() {
               <div className="pipeline-output-panel pipeline-output-panel--footer-clear">
                 {pipelineRunning && lastSubmittedUserMessage?.text ? (
                   <div className="pipeline-output-intro">
-                    <div className="conv-msg">
-                      <div className="conv-msg-role">用户</div>
-                      <div className="conv-msg-body conv-msg-body--user">
-                        <div className="conv-msg-meta">{formatConversationTime(lastSubmittedUserMessage.created_at)}</div>
-                        <div className="conv-msg-plain">{lastSubmittedUserMessage.text}</div>
+                    <div className="chat-bubble-row chat-bubble-row--user">
+                      <div className="chat-bubble chat-bubble--user">
+                        {lastSubmittedUserMessage.created_at && (
+                          <div className="chat-bubble__meta">{formatConversationTime(lastSubmittedUserMessage.created_at)}</div>
+                        )}
+                        <div className="chat-bubble__text">{lastSubmittedUserMessage.text}</div>
                       </div>
                     </div>
                   </div>
@@ -3675,8 +3705,10 @@ export default function App() {
                               })()}
 
                               {reportMd ? (
-                                <div className="pipeline-final-report pipeline-final-report--history-run">
-                                  <SimpleMarkdown markdown={reportMd} />
+                                <div className="chat-bubble-row chat-bubble-row--assistant">
+                                  <div className="chat-bubble chat-bubble--assistant">
+                                    <SimpleMarkdown markdown={reportMd} />
+                                  </div>
                                 </div>
                               ) : null}
 
@@ -4338,6 +4370,38 @@ export default function App() {
         </>
         )}
       </div>{/* end app-main */}
+
+      {/* ── Rename Conversation Modal ── */}
+      <Modal
+        open={renameConvId != null}
+        title="重命名会话"
+        onOk={async () => {
+          if (renameConvId == null) return;
+          const t = renameConvValue.trim();
+          if (!t) return;
+          await patchConversation(renameConvId, { title: t });
+          setRenameConvId(null);
+          await loadConversations({ q: chatSearchQuery });
+        }}
+        onCancel={() => setRenameConvId(null)}
+        okText="保存"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <Input
+          value={renameConvValue}
+          onChange={(e) => setRenameConvValue(e.target.value)}
+          onPressEnter={async () => {
+            if (renameConvId == null) return;
+            const t = renameConvValue.trim();
+            if (!t) return;
+            await patchConversation(renameConvId, { title: t });
+            setRenameConvId(null);
+            await loadConversations({ q: chatSearchQuery });
+          }}
+          maxLength={80}
+        />
+      </Modal>
 
       {/* ── Expert Profile Modal ── */}
       <Modal
