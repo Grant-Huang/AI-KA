@@ -3218,18 +3218,53 @@ export default function App() {
             </Tooltip>
           </div>
 
-          {/* Footer */}
+          {/* Footer — single user button with popup menu */}
           <div className="app-sidebar__footer">
-            <div className="app-sidebar__user">
-              <UserOutlined />
-              <span className="app-sidebar__label">{currentUser?.display_name ?? "未登录"}</span>
-            </div>
-            <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
-              <Button type="text" size="small" icon={<SettingOutlined />} title="设置" onClick={() => openStandaloneWindow("settings")} />
-              <Button type="text" size="small" icon={currentUser ? <LogoutOutlined /> : <UserOutlined />}
-                title={currentUser ? "退出登录" : "登录"}
-                onClick={currentUser ? handleLogout : () => setLoginOpen(true)} />
-            </div>
+            <Dropdown
+              trigger={["click"]}
+              placement="topLeft"
+              dropdownRender={() => (
+                <div className="user-menu">
+                  {currentUser && (
+                    <div className="user-menu__header">
+                      <div className="user-menu__avatar">{(currentUser.display_name ?? "?")[0]?.toUpperCase()}</div>
+                      <div>
+                        <div className="user-menu__name">{currentUser.display_name}</div>
+                      </div>
+                    </div>
+                  )}
+                  <div className="user-menu__section">
+                    <button className="user-menu__item" onClick={() => openStandaloneWindow("settings")}>
+                      <SettingOutlined />
+                      <span>设置</span>
+                    </button>
+                    <button className="user-menu__item" onClick={() => openStandaloneWindow("help")}>
+                      <QuestionCircleOutlined />
+                      <span>帮助与支持</span>
+                    </button>
+                  </div>
+                  <div className="user-menu__divider" />
+                  <div className="user-menu__section">
+                    {currentUser ? (
+                      <button className="user-menu__item user-menu__item--danger" onClick={handleLogout}>
+                        <LogoutOutlined />
+                        <span>退出登录</span>
+                      </button>
+                    ) : (
+                      <button className="user-menu__item" onClick={() => setLoginOpen(true)}>
+                        <UserOutlined />
+                        <span>登录</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            >
+              <div className="app-sidebar__user-btn">
+                <UserOutlined />
+                <span className="app-sidebar__label">{currentUser?.display_name ?? "未登录"}</span>
+              </div>
+            </Dropdown>
           </div>
         </div>
       )}

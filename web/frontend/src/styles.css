@@ -424,12 +424,9 @@ body {
   flex-shrink: 0;
   padding: 8px 10px 12px;
   border-top: 1px solid rgba(47, 58, 50, 0.1);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
 }
 
-.app-sidebar__user {
+.app-sidebar__user-btn {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -437,13 +434,97 @@ body {
   color: #444;
   white-space: nowrap;
   overflow: hidden;
+  padding: 6px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+  width: 100%;
+}
+
+.app-sidebar__user-btn:hover {
+  background: rgba(47, 58, 50, 0.06);
+}
+
+/* ── User popup menu ─────────────────────────────────────────────────────── */
+.user-menu {
+  background: #fff;
+  border: 1px solid #e8e8e3;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  min-width: 200px;
+  overflow: hidden;
+  padding: 6px 0;
+}
+
+.user-menu__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid #f0f0eb;
+  margin-bottom: 4px;
+}
+
+.user-menu__avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #527c5e;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.user-menu__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #222;
+}
+
+.user-menu__section {
+  padding: 2px 6px;
+}
+
+.user-menu__divider {
+  height: 1px;
+  background: #f0f0eb;
+  margin: 4px 0;
+}
+
+.user-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #333;
+  cursor: pointer;
+  text-align: left;
+}
+
+.user-menu__item:hover {
+  background: rgba(47, 58, 50, 0.06);
+}
+
+.user-menu__item--danger {
+  color: #c0392b;
+}
+
+.user-menu__item--danger:hover {
+  background: rgba(192, 57, 43, 0.06);
 }
 
 /* Collapsed state: hide text, center icons */
 .app-sidebar--collapsed .app-sidebar__logo,
 .app-sidebar--collapsed .app-sidebar__label,
-.app-sidebar--collapsed .app-sidebar__session-list,
-.app-sidebar--collapsed .app-sidebar__footer .ant-btn:last-child {
+.app-sidebar--collapsed .app-sidebar__session-list {
   display: none;
 }
 
@@ -466,6 +547,11 @@ body {
 
 .app-sidebar--collapsed .app-sidebar__footer {
   justify-content: center;
+}
+
+.app-sidebar--collapsed .app-sidebar__user-btn {
+  justify-content: center;
+  padding: 6px 0;
 }
 
 /* ── Page header bar ─────────────────────────────────────────────────────── */
