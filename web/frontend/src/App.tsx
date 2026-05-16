@@ -3585,11 +3585,9 @@ export default function App() {
           ) : appMode === "review" && mainPanel === "review_domain" ? (
             reviewDomainPageNode
           ) : appMode === "review" && !showMainOutput ? (
-            <div style={{ padding: "8px 0 0" }}>
-              <div className="chat-bubble-row chat-bubble-row--assistant">
-                <div className="chat-bubble chat-bubble--assistant">
-                  <ThinkableMarkdown markdown="你好！今天想做哪些方面的项目审查？" />
-                </div>
+            <div className="chat-bubble-row chat-bubble-row--assistant">
+              <div className="chat-bubble chat-bubble--assistant">
+                <ThinkableMarkdown markdown="你好！今天想做哪些方面的项目审查？" />
               </div>
             </div>
           ) : appMode === "review" && showMainOutput ? (
@@ -4490,6 +4488,7 @@ export default function App() {
         <div className="composer-overlay composer-overlay-bottom">
           <div className="composer-overlay-inner">
             <div className="composer-footer-stack">
+              <div style={{ padding: "0 12px 12px" }}>
               <div className="composer">
                 <Input.TextArea
                   className="composer-textarea"
@@ -4497,7 +4496,7 @@ export default function App() {
                   placeholder={composerTextPlaceholder}
                   value={draftText}
                   onChange={(e) => setDraftText(e.target.value)}
-                  style={{ background: "#fff" }}
+                  style={{ background: "#fff", border: "none", boxShadow: "none" }}
                 />
                 <div className="composer-toolbar">
                   <div className="composer-left">
@@ -4608,6 +4607,7 @@ export default function App() {
                     )}
                   </div>
                 </div>
+              </div>
               </div>
               {showMainOutput ? <div className="composer-disclaimer">{COMPOSER_DISCLAIMER}</div> : null}
             </div>
