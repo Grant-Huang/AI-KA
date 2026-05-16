@@ -1361,7 +1361,8 @@ export default function App() {
       await onPickDirectory();
       return;
     }
-    setManualPickOpen(true);
+    // Native picker unavailable (e.g. Docker) — fall back to upload modal
+    openUploadModal("init");
   };
 
   const onPickDirectory = async () => {
