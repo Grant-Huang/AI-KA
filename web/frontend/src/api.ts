@@ -351,8 +351,11 @@ export async function getExpertProfile(): Promise<ExpertProfileData> {
 export async function putExpertProfile(data: Partial<ExpertProfileData>): Promise<ExpertProfileData> {
   return apiJson("/api/v1/expert-profile", { method: "PUT", body: JSON.stringify(data) });
 }
-export async function getReviewQueue(): Promise<{ items: ReviewQueueItem[]; total: number }> {
-  return apiJson("/api/v1/review-queue");
+export async function getReviewQueue(opts?: { projectId?: number | null }): Promise<{ items: ReviewQueueItem[]; total: number }> {
+  const qs = new URLSearchParams();
+  if (opts?.projectId != null) qs.set("project_id", String(opts.projectId));
+  const q = qs.toString();
+  return apiJson(`/api/v1/review-queue${q ? `?${q}` : ""}`);
 }
 export async function patchReviewQueueItem(id: string, data: { status: string }): Promise<ReviewQueueItem> {
   return apiJson(`/api/v1/review-queue/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(data) });

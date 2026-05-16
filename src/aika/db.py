@@ -315,6 +315,7 @@ class ProjectRow:
     rules_json: str | None = None
     vault_id: int | None = None
     vault_subfolder: str | None = None
+    archived: bool = False
 
 
 @dataclass(frozen=True)
@@ -492,6 +493,12 @@ def _migrate_projects_web_columns(conn: sqlite3.Connection) -> None:
     if "rules_json" not in cols:
         conn.execute("ALTER TABLE projects ADD COLUMN rules_json TEXT")
         conn.commit()
+    if "vault_id" not in cols:
+        conn.execute("ALTER TABLE projects ADD COLUMN vault_id INTEGER REFERENCES obsidian_vaults(id) ON DELETE SET NULL")
+        conn.commit()
+    if "archived" not in cols:
+        conn.execute("ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
 
 
 def _migrate_projects_vault_columns(conn: sqlite3.Connection) -> None:
@@ -647,7 +654,7 @@ def update_project_vault(
 
 def get_projects_by_vault_id(conn: sqlite3.Connection, vault_id: int) -> list[ProjectRow]:
     rows = conn.execute(
-        "SELECT id, name, root_path, rules_json, vault_id, vault_subfolder FROM projects WHERE vault_id=? ORDER BY id",
+        "SELECT id, name, root_path, rules_json, vault_id, vault_subfolder, archived FROM projects WHERE vault_id=? ORDER BY id",
         (vault_id,),
     ).fetchall()
     return [_row_to_project(r) for r in rows]
@@ -655,7 +662,7 @@ def get_projects_by_vault_id(conn: sqlite3.Connection, vault_id: int) -> list[Pr
 
 def get_project_by_name(conn: sqlite3.Connection, name: str) -> ProjectRow | None:
     row = conn.execute(
-        "SELECT id, name, root_path, rules_json, vault_id, vault_subfolder FROM projects WHERE name=?",
+        "SELECT id, name, root_path, rules_json, vault_id, vault_subfolder, archived FROM projects WHERE name=?",
         (name,),
     ).fetchone()
     if row is None:
@@ -665,7 +672,7 @@ def get_project_by_name(conn: sqlite3.Connection, name: str) -> ProjectRow | Non
 
 def get_project_by_id(conn: sqlite3.Connection, project_id: int) -> ProjectRow | None:
     row = conn.execute(
-        "SELECT id, name, root_path, rules_json, vault_id, vault_subfolder FROM projects WHERE id=?",
+        "SELECT id, name, root_path, rules_json, vault_id, vault_subfolder, archived FROM projects WHERE id=?",
         (project_id,),
     ).fetchone()
     if row is None:
@@ -675,7 +682,7 @@ def get_project_by_id(conn: sqlite3.Connection, project_id: int) -> ProjectRow |
 
 def get_project_by_root_path(conn: sqlite3.Connection, root_path: str) -> ProjectRow | None:
     row = conn.execute(
-        "SELECT id, name, root_path, rules_json, vault_id, vault_subfolder FROM projects WHERE root_path=? ORDER BY id LIMIT 1",
+        "SELECT id, name, root_path, rules_json, vault_id, vault_subfolder, archived FROM projects WHERE root_path=? ORDER BY id LIMIT 1",
         (root_path,),
     ).fetchone()
     if row is None:
@@ -688,6 +695,7 @@ def _row_to_project(row: sqlite3.Row) -> ProjectRow:
     rj = row["rules_json"] if "rules_json" in keys else None
     vid = row["vault_id"] if "vault_id" in keys else None
     vsf = row["vault_subfolder"] if "vault_subfolder" in keys else None
+    arch = bool(row["archived"]) if "archived" in keys else False
     return ProjectRow(
         id=int(row["id"]),
         name=str(row["name"]),
@@ -695,6 +703,7 @@ def _row_to_project(row: sqlite3.Row) -> ProjectRow:
         rules_json=(str(rj) if rj is not None else None),
         vault_id=(int(vid) if vid is not None else None),
         vault_subfolder=(str(vsf) if vsf is not None else None),
+        archived=arch,
     )
 
 
@@ -728,6 +737,15 @@ def update_project_name(conn: sqlite3.Connection, project_id: int, name: str) ->
     conn.commit()
 
 
+
+def set_project_archived(conn: sqlite3.Connection, project_id: int, archived: bool) -> None:
+    conn.execute(
+        "UPDATE projects SET archived=?, updated_at=datetime('now') WHERE id=?",
+        (1 if archived else 0, project_id),
+    )
+    conn.commit()
+
+
 def delete_project_documents(conn: sqlite3.Connection, project_id: int) -> None:
     conn.execute("DELETE FROM documents WHERE project_id=?", (project_id,))
     conn.commit()
@@ -745,10 +763,11 @@ def delete_project(conn: sqlite3.Connection, *, project_id: int) -> bool:
     return bool(cur.rowcount and cur.rowcount > 0)
 
 
-def list_projects(conn: sqlite3.Connection) -> list[ProjectRow]:
-    rows = conn.execute(
-        "SELECT id, name, root_path, rules_json, vault_id, vault_subfolder FROM projects ORDER BY id"
-    ).fetchall()
+def list_projects(conn: sqlite3.Connection, include_archived: bool = False) -> list[ProjectRow]:
+    if include_archived:
+        rows = conn.execute("SELECT id, name, root_path, rules_json, vault_id, vault_subfolder, archived FROM projects ORDER BY id").fetchall()
+    else:
+        rows = conn.execute("SELECT id, name, root_path, rules_json, vault_id, vault_subfolder, archived FROM projects WHERE archived=0 ORDER BY id").fetchall()
     return [_row_to_project(r) for r in rows]
 
 
@@ -2037,14 +2056,20 @@ def list_review_queue(
     conn: sqlite3.Connection,
     *,
     status: str | None = None,
+    project_id: str | int | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     """Return review queue items sorted by priority (occurrences DESC, created_at DESC)."""
     params: list[object] = []
-    where = ""
+    conditions: list[str] = []
     if status is not None:
-        where = "WHERE status=?"
+        conditions.append("status=?")
         params.append(status)
+    if project_id is not None:
+        # project_ids_json is a JSON array string like '["42"]'; filter with LIKE
+        conditions.append("project_ids_json LIKE ?")
+        params.append(f'%"{project_id}"%')
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     params.append(int(limit))
     rows = conn.execute(
         f"""

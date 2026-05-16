@@ -43,10 +43,11 @@ _VALID_STATUSES = {"pending_review", "in_review", "approved", "rejected", "archi
 @router.get("/api/v1/review-queue")
 def list_review_queue(
     status: str | None = Query(None),
+    project_id: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
 ) -> JSONResponse:
     conn = get_conn()
-    items = dbm.list_review_queue(conn, status=status, limit=limit)
+    items = dbm.list_review_queue(conn, status=status, project_id=project_id, limit=limit)
     return ok({"items": items, "total": len(items)})
 
 

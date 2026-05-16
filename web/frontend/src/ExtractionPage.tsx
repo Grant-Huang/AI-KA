@@ -157,12 +157,14 @@ function ExpertQATab({
   sessionId,
   onFirstMessage,
   onRoundComplete,
+  initialRqItem,
 }: {
   postReviewCtx: { projectId: number; conversationId: number } | null;
   preloadMessages: ChatMsg[];
   sessionId: number | null;
   onFirstMessage: (title: string, strategy: string) => Promise<number>;
   onRoundComplete: (sid: number, messages: Array<{ role: string; content: string }>, roundNum: number) => void;
+  initialRqItem?: ReviewQueueItem | null;
 }) {
   const [phase, setPhase] = useState<"choosing" | "chatting">("choosing");
   const [strategy, setStrategy] = useState("gap_based");
@@ -195,6 +197,17 @@ function ExpertQATab({
     if (preloadMessages.length > 0) {
       setMessages(preloadMessages);
       setPhase("chatting");
+    } else if (initialRqItem) {
+      // 从「知识线索」深入提取：预填线索内容，直接进入对话
+      setRqItemId(initialRqItem.id);
+      setStrategy("gap_based");
+      setPhase("chatting");
+      setMessages([
+        {
+          role: "assistant",
+          content: `已加载知识线索：**[${initialRqItem.focus_id}]** ${initialRqItem.suggestion}\n\n请告诉我你对这条线索的理解，或直接点击「开始提取」让我帮你深入分析。`,
+        },
+      ]);
     } else {
       setPhase("choosing");
       setMessages(makeInitialMessages(isPostReview));
@@ -204,7 +217,7 @@ function ExpertQATab({
     setMaterialId(null);
     setDocName("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPostReview, postReviewCtx?.projectId, postReviewCtx?.conversationId]);
+  }, [isPostReview, postReviewCtx?.projectId, postReviewCtx?.conversationId, initialRqItem?.id]);
 
   useEffect(() => {
     getReviewQueue().then(({ items }) => setRqItems(items)).catch(() => {});
@@ -711,6 +724,7 @@ function ExtractionSessionItem({ s, active, onSelect, onStar, onRename, onDelete
 
 export default function ExtractionPage() {
   const [postReviewCtx, setPostReviewCtx] = useState<{ projectId: number; conversationId: number } | null>(null);
+  const [initialRqItem, setInitialRqItem] = useState<ReviewQueueItem | null>(null);
 
   // Session history state
   const [sessions, setSessions] = useState<ExtractionSession[]>([]);
@@ -735,6 +749,14 @@ export default function ExtractionPage() {
         setPostReviewCtx(ctx);
       } catch { /* ignore */ }
     }
+    const rawRq = window.sessionStorage.getItem("aika_initial_rq_item");
+    if (rawRq) {
+      try {
+        const item = JSON.parse(rawRq) as ReviewQueueItem;
+        window.sessionStorage.removeItem("aika_initial_rq_item");
+        setInitialRqItem(item);
+      } catch { /* ignore */ }
+    }
   }, []);
 
   const loadSessions = useCallback(async () => {
@@ -749,6 +771,7 @@ export default function ExtractionPage() {
   const handleNewSession = () => {
     setCurrentSessionId(null);
     setPreloadMessages([]);
+    setInitialRqItem(null);
     setSessionKey((k) => k + 1);
     accumulatedMsgsRef.current = [];
   };
@@ -899,6 +922,7 @@ export default function ExtractionPage() {
               sessionId={currentSessionId}
               onFirstMessage={handleFirstMessage}
               onRoundComplete={handleRoundComplete}
+              initialRqItem={initialRqItem}
             />
           )}
         </div>
@@ -926,29 +950,33 @@ export default function ExtractionPage() {
 }
 
 
-// ── ReviewQueueTab (used as 结果评审 tab in project review) ───────────────────
+// ── ReviewQueueTab (知识线索 tab) ─────────────────────────────────────────────
 
 export function ReviewQueueTab({
   onStartExtraction,
+  projectId,
 }: {
   onStartExtraction?: (item: ReviewQueueItem) => void;
+  projectId?: number | null;
 }) {
   const [items, setItems] = useState<ReviewQueueItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const { items: data } = await getReviewQueue();
+      const filterPid = (!showAll && projectId != null) ? projectId : undefined;
+      const { items: data } = await getReviewQueue({ projectId: filterPid ?? null });
       setItems(data);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [projectId, showAll]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -1023,8 +1051,17 @@ export function ReviewQueueTab({
   return (
     <div style={{ padding: "16px 0" }}>
       <div style={{ display: "flex", alignItems: "center", marginBottom: 12, gap: 8 }}>
-        <Title level={5} style={{ margin: 0 }}>结果评审</Title>
+        <Title level={5} style={{ margin: 0 }}>知识线索</Title>
         <Button icon={<ReloadOutlined />} size="small" onClick={load} loading={loading}>刷新</Button>
+        {projectId != null && (
+          <Button
+            size="small" type={showAll ? "default" : "primary"} ghost={showAll}
+            onClick={() => setShowAll((v) => !v)}
+            style={{ fontSize: 12 }}
+          >
+            {showAll ? "全部" : "仅本项目"}
+          </Button>
+        )}
         <Text type="secondary" style={{ marginLeft: "auto", fontSize: 12 }}>
           项目审查后 LLM 自动识别的可泛化知识线索，按出现次数降序
         </Text>
@@ -1032,7 +1069,7 @@ export function ReviewQueueTab({
       {error && <Alert type="error" message={error} style={{ marginBottom: 12 }} />}
       {!loading && items.length === 0 ? (
         <Empty
-          description="暂无队列条目。完成一次项目审查后，LLM 会自动提取泛化知识线索到此处。"
+          description="暂无知识线索。完成一次项目审查后，LLM 会自动提取泛化知识线索到此处。"
           style={{ padding: "40px 0" }}
         />
       ) : (
