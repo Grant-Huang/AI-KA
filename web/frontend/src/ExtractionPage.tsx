@@ -770,21 +770,8 @@ export default function ExtractionPage() {
     }
   };
 
-  const currentSession = sessions.find((s) => s.id === currentSessionId) ?? null;
-
   return (
     <div className="extraction-page" style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-      {/* ── Page header ── */}
-      <div className="page-header">
-        <span className="page-header__title">知识归纳</span>
-        {currentSession && (
-          <>
-            <span className="page-header__sep">·</span>
-            <span className="page-header__sub">{currentSession.title}</span>
-          </>
-        )}
-      </div>
-
       {/* ── Two-column content ── */}
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
         {/* Left session sidebar */}
