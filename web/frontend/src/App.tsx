@@ -3209,7 +3209,7 @@ export default function App() {
             {/* ─ 知识归纳 ─ */}
             <Tooltip title={sidebarCollapsed ? "知识归纳" : undefined} placement="right">
               <button
-                className={`app-sidebar__section-header${appMode === "extraction" && reviewMainTab !== "result_review" ? " app-sidebar__section-header--active" : ""}`}
+                className={`app-sidebar__section-header${appMode === "extraction" ? " app-sidebar__section-header--active" : ""}`}
                 onClick={() => { setAppMode("extraction"); setReviewMainTab("analyze"); }}
               >
                 <BulbOutlined />
@@ -3220,7 +3220,7 @@ export default function App() {
             {/* ─ 待批准规则 ─ */}
             <Tooltip title={sidebarCollapsed ? "待批准规则" : undefined} placement="right">
               <button
-                className={`app-sidebar__section-header${reviewMainTab === "result_review" ? " app-sidebar__section-header--active" : ""}`}
+                className={`app-sidebar__section-header${appMode === "review" && reviewMainTab === "result_review" ? " app-sidebar__section-header--active" : ""}`}
                 onClick={() => { setAppMode("review"); setMainPanel("analyze"); setReviewMainTab("result_review"); }}
               >
                 <PushpinOutlined />
