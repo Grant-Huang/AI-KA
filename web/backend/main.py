@@ -3063,4 +3063,18 @@ def export_conversation_to_obsidian(
 # 开发/本机部署：优先使用仓库内 `web/frontend/dist`（npm run build），避免 editable 安装仍沿用 wheel 里旧的 frontend_dist。
 _dist = dev_dist_dir(_repo_root) or packaged_dist_dir()
 if _dist is not None:
+    _index_html = _dist / "index.html"
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def _spa_fallback(full_path: str) -> FileResponse:
+        # Serve actual dist files (JS, CSS, assets) if they exist on disk.
+        candidate = _dist / full_path
+        if candidate.is_file():
+            return FileResponse(str(candidate))
+        # All other paths are SPA client-side routes → serve index.html.
+        return FileResponse(
+            str(_index_html),
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+        )
+
     app.mount("/", StaticFiles(directory=str(_dist), html=True), name="frontend")
