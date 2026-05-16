@@ -621,6 +621,48 @@ export async function exportConversationToObsidian(
   );
 }
 
+export interface InitUploadResult {
+  id: number;
+  name: string;
+  root_path: string;
+  vault_id: number | null;
+  created: boolean;
+  files_written: number;
+  files: Array<{ source: string; written: string }>;
+  errors: string[];
+}
+
+export async function initProjectFromUpload(
+  files: File[],
+  relPaths: string[],
+  projectName: string,
+  vaultId?: number | null,
+): Promise<InitUploadResult> {
+  const fd = new FormData();
+  for (const f of files) fd.append("files", f);
+  fd.append("paths", JSON.stringify(relPaths));
+  fd.append("project_name", projectName);
+  if (vaultId != null) fd.append("vault_id", String(vaultId));
+  // Use fetch directly — don't set Content-Type, browser sets multipart boundary automatically
+  const r = await fetch(`${BASE}/api/v1/projects/init-from-upload`, {
+    method: "POST",
+    credentials: "include",
+    body: fd,
+  });
+  const text = await r.text();
+  let j: unknown;
+  try { j = text ? JSON.parse(text) : null; } catch { throw new Error(`非 JSON 响应 HTTP ${r.status}`); }
+  if (!j || typeof j !== "object") throw new Error(`空响应 HTTP ${r.status}`);
+  const body = j as Record<string, unknown>;
+  if (body.status === "error") throw new Error(String(body.message || "upload failed"));
+  if (!r.ok) {
+    const detail = body.detail;
+    throw new Error(typeof detail === "string" ? detail : `HTTP ${r.status}`);
+  }
+  if (body.status === "success" && "data" in body) return body.data as InitUploadResult;
+  return body as unknown as InitUploadResult;
+}
+
 // ── Extraction Sessions ──────────────────────────────────────────────────────
 
 export interface ExtractionSession {
