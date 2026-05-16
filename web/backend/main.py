@@ -253,7 +253,6 @@ def upsert_project_memory_file(project_id: int, payload: dict[str, Any]) -> JSON
     embed_status = "skipped"
     if embeddings_configured():
         try:
-            from backend.embedding_service import bytes_to_vec  # noqa: F401 (verify import)
             h = emb_content_hash(content)
             existing = dbm.get_memory_embedding(conn, path=rel, content_hash=h)
             if existing is None:
