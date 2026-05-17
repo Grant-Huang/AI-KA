@@ -54,7 +54,7 @@ from backend.conversation_models import (
 from backend.intent_classifier import classify_intent
 from backend.finding_parser import (
     FINDING_INSTRUCTION, extract_findings_from_markdown, extract_evolve_hints,
-    deduplicate_findings,
+    deduplicate_findings, _is_duplicate,
 )
 from backend.context_builder import (
     build_rolling_context, format_open_findings_for_prompt,
@@ -2208,12 +2208,12 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
             evolve_hints = extract_evolve_hints(body)
             if evolve_hints:
                 from backend.evolution_queue import _current_user_role
-                import uuid as _uuid
+                import hashlib as _hashlib
                 from aika import db as _dbm_eq
                 _user_role = _current_user_role()
                 for hint in evolve_hints:
                     try:
-                        rq_id = f"rq-{_uuid.uuid4().hex[:12]}"
+                        rq_id = "rq-" + _hashlib.sha1(f"{hint['focus_id']}|{hint['suggestion']}".encode()).hexdigest()[:12]
                         _dbm_eq.upsert_review_queue_item(
                             conn,
                             id=rq_id,
@@ -2246,6 +2246,15 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
                         critique_parts.append(piece)
                     critique_summary = "".join(critique_parts).strip()
                     yield _sse_line({"type": "critique", "summary": critique_summary})
+                    critique_body = critique_summary
+                    try:
+                        critique_findings = extract_findings_from_markdown(critique_body, new_findings, list(focus_ids_used))
+                        for cf in critique_findings:
+                            if not _is_duplicate(cf, new_findings):
+                                new_findings.append(cf)
+                                yield _sse_line({"type": "finding", "finding": cf.to_dict()})
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 

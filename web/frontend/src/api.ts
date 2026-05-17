@@ -676,3 +676,13 @@ export const appendExtractionMessages = (
     method: "POST",
     body: JSON.stringify({ messages }),
   });
+
+export async function addToReviewQueue(params: {
+  focus_id: string;
+  suggestion: string;
+  source_type?: string;
+  project_id?: number | null;
+  conversation_id?: number | null;
+}): Promise<void> {
+  await apiJson("/api/v1/review-queue", { method: "POST", body: JSON.stringify(params) });
+}
