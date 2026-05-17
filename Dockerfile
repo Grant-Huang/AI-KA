@@ -33,7 +33,7 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md helpme.md ./
 COPY src ./src
 COPY web ./web
 
