@@ -407,6 +407,18 @@ def patch_knowledge_item(kid: str, body: KnowledgeItemPatch) -> JSONResponse:
         return err(f"Invalid status: {body.status}")
     if body.status:
         dbm.update_knowledge_item_status(conn, kid, status=body.status)
+    if any(v is not None for v in [
+        body.title, body.content, body.scope_note,
+        body.applicable_when, body.not_applicable_when,
+    ]):
+        dbm.update_knowledge_item_fields(
+            conn, kid,
+            title=body.title,
+            content=body.content,
+            scope_note=body.scope_note,
+            applicable_when=body.applicable_when,
+            not_applicable_when=body.not_applicable_when,
+        )
     return ok(dbm.get_knowledge_item(conn, kid))
 
 

@@ -2303,6 +2303,41 @@ def update_knowledge_item_status(
     return bool(cur.rowcount and cur.rowcount > 0)
 
 
+def update_knowledge_item_fields(
+    conn: sqlite3.Connection,
+    item_id: str,
+    *,
+    title: str | None = None,
+    content: str | None = None,
+    scope_note: str | None = None,
+    applicable_when: dict[str, Any] | None = None,
+    not_applicable_when: dict[str, Any] | None = None,
+) -> bool:
+    sets = ["updated_at=datetime('now')"]
+    params: list[object] = []
+    if title is not None:
+        sets.append("title=?")
+        params.append(title)
+    if content is not None:
+        sets.append("content=?")
+        params.append(content)
+    if scope_note is not None:
+        sets.append("scope_note=?")
+        params.append(scope_note)
+    if applicable_when is not None:
+        sets.append("applicable_when_json=?")
+        params.append(json.dumps(applicable_when, ensure_ascii=False))
+    if not_applicable_when is not None:
+        sets.append("not_applicable_when_json=?")
+        params.append(json.dumps(not_applicable_when, ensure_ascii=False))
+    if len(sets) == 1:
+        return False
+    params.append(item_id)
+    cur = conn.execute(f"UPDATE knowledge_items SET {', '.join(sets)} WHERE id=?", params)
+    conn.commit()
+    return bool(cur.rowcount and cur.rowcount > 0)
+
+
 def _row_to_ki(r: sqlite3.Row) -> dict[str, Any]:
     def _j(v: Any) -> Any:
         if v is None:

@@ -57,6 +57,7 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   PushpinOutlined,
+  AimOutlined,
   ArrowLeftOutlined,
   StarFilled,
   StarOutlined,
@@ -551,7 +552,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<number | null>(() => parseUrl(window.location.pathname).selectedId);
   const [appMode, setAppMode] = useState<"review" | "extraction">(() => parseUrl(window.location.pathname).appMode);
   const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain" | "all_conversations">(() => parseUrl(window.location.pathname).mainPanel);
-  const [reviewMainTab, setReviewMainTab] = useState<"analyze" | "result_review">(() => parseUrl(window.location.pathname).reviewMainTab);
+  const [reviewMainTab, setReviewMainTab] = useState<"analyze" | "result_review" | "review_queue">(() => parseUrl(window.location.pathname).reviewMainTab);
   const [projectIngest, setProjectIngest] = useState<
     Record<number, { initialized: boolean; chunk_count: number; has_review_records?: boolean }>
   >(
@@ -1019,6 +1020,7 @@ export default function App() {
   const handleStartFromReviewQueue = (item: ReviewQueueItem) => {
     window.sessionStorage.setItem("aika_initial_rq_item", JSON.stringify(item));
     setAppMode("extraction");
+    setReviewMainTab("analyze");
   };
 
   const loadProjects = useCallback(async () => {
@@ -3316,11 +3318,22 @@ export default function App() {
             {/* ─ 知识线索 ─ */}
             <Tooltip title={sidebarCollapsed ? "知识线索" : undefined} placement="right">
               <button
+                className={`app-sidebar__section-header${reviewMainTab === "review_queue" ? " app-sidebar__section-header--active" : ""}`}
+                onClick={() => { setAppMode("review"); setMainPanel("analyze"); setReviewMainTab("review_queue"); }}
+              >
+                <AimOutlined />
+                <span className="app-sidebar__label">知识线索</span>
+              </button>
+            </Tooltip>
+
+            {/* ─ 待批准规则 ─ */}
+            <Tooltip title={sidebarCollapsed ? "待批准规则" : undefined} placement="right">
+              <button
                 className={`app-sidebar__section-header${appMode === "review" && mainPanel === "analyze" && reviewMainTab === "result_review" ? " app-sidebar__section-header--active" : ""}`}
                 onClick={() => { navPush({ appMode: "review", mainPanel: "analyze", reviewMainTab: "result_review", selectedId, selectedConversationId: null }); setAppMode("review"); setMainPanel("analyze"); setReviewMainTab("result_review"); }}
               >
                 <PushpinOutlined />
-                <span className="app-sidebar__label">知识线索</span>
+                <span className="app-sidebar__label">待批准规则</span>
               </button>
             </Tooltip>
 
@@ -3518,6 +3531,17 @@ export default function App() {
                   <UnorderedListOutlined style={{ fontSize: 12 }} />
                   <span>所有会话</span>
                 </div>
+              </div>
+              {/* 知识线索快捷入口 */}
+              <div style={{ borderTop: "1px solid #f0f0f0", padding: "4px 0 2px", flexShrink: 0 }}>
+                <button
+                  className="app-sidebar__section-header"
+                  style={{ width: "100%", fontSize: 12 }}
+                  onClick={() => setReviewMainTab("review_queue")}
+                >
+                  <AimOutlined />
+                  <span className="app-sidebar__label">知识线索</span>
+                </button>
               </div>
             </div>
           )}
@@ -4871,7 +4895,18 @@ export default function App() {
 
       {appMode === "review" && mainPanel === "analyze" ? (
         <>
-          {reviewMainTab === "result_review" ? (
+          {reviewMainTab === "review_queue" ? (
+            <div style={{ maxWidth: 980, margin: "0 auto", width: "100%" }}>
+              <div className="page-header">
+                <Button type="text" size="small" icon={<ArrowLeftOutlined />}
+                  onClick={() => setReviewMainTab("analyze")} title="返回" style={{ marginRight: 4 }} />
+                <span className="page-header__title">知识线索</span>
+              </div>
+              <div style={{ padding: "0 24px" }}>
+                <ReviewQueueTab onStartExtraction={handleStartFromReviewQueue} />
+              </div>
+            </div>
+          ) : reviewMainTab === "result_review" ? (
             <div style={{ maxWidth: 980, margin: "0 auto", width: "100%" }}>
               <div className="page-header">
                 <Button type="text" size="small" icon={<ArrowLeftOutlined />}

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert, Badge, Button, Card, Dropdown, Empty, Input,
-  Modal, Space, Table, Tag,
+  Modal, Space, Table, Tabs, Tag,
   Tooltip, Typography, Upload, message,
 } from "antd";
 import { ChatWindow } from "./ChatWindow";
@@ -14,14 +14,14 @@ import {
 } from "@ant-design/icons";
 import { AllSessionsPanel, AllSessionItem } from "./AllSessionsPanel";
 import type {
-  ExtractionSession, PendingRuleItem, ReviewQueueItem,
+  ExtractionSession, KnowledgeItem, PendingRuleItem, ReviewQueueItem,
 } from "./api";
 import {
   appendExtractionMessages, approvePendingRule, createExtractionSession,
   deleteExtractionSession, deleteReviewQueueItem,
   generateExtractionSessionTitle,
-  getExtractionSessionMessages, getPendingRules, getReviewQueue,
-  listExtractionSessions, patchExtractionSession, patchReviewQueueItem,
+  getExtractionSessionMessages, getKnowledgeItems, getPendingRules, getReviewQueue,
+  listExtractionSessions, patchExtractionSession, patchKnowledgeItem, patchReviewQueueItem,
   postActiveExtractionStream, postDocExtractionStream, postReviewExtractionStream,
   rejectPendingRule, uploadExtractionMaterial,
 } from "./api";
@@ -48,6 +48,27 @@ const STRATEGY_OPTIONS = [
 const CONFIDENCE_COLOR: Record<string, string> = {
   high: "green", medium: "orange", low: "red",
 };
+
+const SOURCE_ROLE_LABEL: Record<string, string> = {
+  senior_expert: "资深专家",
+  consultant: "顾问",
+  ai_self: "AI 自生成",
+};
+
+const SOURCE_TYPE_LABEL: Record<string, string> = {
+  extraction: "知识归纳",
+  post_review: "事后复盘",
+  evolve_hint: "演化提示",
+};
+
+function formatConditionValue(val: Record<string, unknown>): string {
+  if (!val || Object.keys(val).length === 0) return "";
+  if ("text" in val && typeof val.text === "string") return val.text;
+  return Object.values(val)
+    .filter((v) => v !== null && v !== undefined && v !== "")
+    .map(String)
+    .join("；");
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -169,7 +190,7 @@ function ExpertQATab({
   const [phase, setPhase] = useState<"choosing" | "chatting">("choosing");
   const [strategy, setStrategy] = useState("gap_based");
   const [rqItems, setRqItems] = useState<ReviewQueueItem[]>([]);
-  const [rqItemId, setRqItemId] = useState<string | null>(null);
+  const [rqItemId, setRqItemId] = useState<string | null>(initialRqItem?.id ?? null);
   const [materialId, setMaterialId] = useState<string | null>(null);
   const [docName, setDocName] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -182,7 +203,13 @@ function ExpertQATab({
   const isPostReview = postReviewCtx != null;
   const isDocMode = materialId != null;
 
-  const makeInitialMessages = (postReview: boolean): ChatMsg[] => {
+  const makeInitialMessages = (postReview: boolean, rqItem?: ReviewQueueItem | null): ChatMsg[] => {
+    if (rqItem) {
+      return [{
+        role: "assistant",
+        content: `已关联知识线索：「${rqItem.suggestion}」（关注点：${rqItem.focus_id}）。\n\n请分享你在这个领域的相关经验，我会帮你把它提炼成可复用的规则。`,
+      }];
+    }
     const opening: ChatMsg = {
       role: "assistant",
       content: postReview
@@ -209,8 +236,8 @@ function ExpertQATab({
         },
       ]);
     } else {
-      setPhase("choosing");
-      setMessages(makeInitialMessages(isPostReview));
+      setPhase(initialRqItem ? "chatting" : "choosing");
+      setMessages(makeInitialMessages(isPostReview, initialRqItem));
     }
     setRoundNumber(1);
     setNewKiIds([]);
@@ -481,13 +508,21 @@ function ExpertQATab({
 
 // ── PendingRulesTab ──────────────────────────────────────────────────────────
 
-export function PendingRulesTab() {
+export function PendingRulesTab({ reviewedBy }: { reviewedBy?: string }) {
+  const [activeTab, setActiveTab] = useState("pending");
   const [items, setItems] = useState<PendingRuleItem[]>([]);
+  const [historyItems, setHistoryItems] = useState<KnowledgeItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rejectTarget, setRejectTarget] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState("");
   const [actionId, setActionId] = useState<string | null>(null);
+  // B2: edit-then-approve state
+  const [editTarget, setEditTarget] = useState<PendingRuleItem | null>(null);
+  const [editContent, setEditContent] = useState("");
+  const [editScopeNote, setEditScopeNote] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -502,12 +537,25 @@ export function PendingRulesTab() {
     }
   }, []);
 
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const [activeRes, rejectedRes] = await Promise.all([
+        getKnowledgeItems({ status: "active", limit: 100 }),
+        getKnowledgeItems({ status: "rejected", limit: 100 }),
+      ]);
+      setHistoryItems([...activeRes.items, ...rejectedRes.items]);
+    } catch { /* ignore */ } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
   useEffect(() => { void load(); }, [load]);
 
   const handleApprove = async (id: string) => {
     setActionId(id);
     try {
-      await approvePendingRule(id, {});
+      await approvePendingRule(id, { reviewed_by: reviewedBy });
       message.success("已批准，规则已写入活动技能包");
       setItems((prev) => prev.filter((x) => x.id !== id));
     } catch (e) {
@@ -533,9 +581,29 @@ export function PendingRulesTab() {
     }
   };
 
+  // B2: PATCH content/scope_note first, then approve
+  const handleEditApprove = async () => {
+    if (!editTarget) return;
+    setEditSaving(true);
+    try {
+      await patchKnowledgeItem(editTarget.id, {
+        content: editContent.trim() || editTarget.content,
+        scope_note: editScopeNote,
+      });
+      await approvePendingRule(editTarget.id, { reviewed_by: reviewedBy });
+      message.success("已批准，规则已写入活动技能包");
+      setItems((prev) => prev.filter((x) => x.id !== editTarget.id));
+      setEditTarget(null);
+    } catch (e) {
+      message.error(`批准失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
   const CONF_LABEL: Record<string, string> = { high: "高", medium: "中", low: "低" };
 
-  const columns = [
+  const pendingColumns = [
     {
       title: "标题 / 关注点",
       key: "title",
@@ -579,15 +647,25 @@ export function PendingRulesTab() {
     },
     {
       title: "操作",
-      width: 150,
+      width: 210,
       render: (_: unknown, row: PendingRuleItem) => (
-        <Space>
+        <Space size={4}>
           <Button
             type="primary" size="small" icon={<CheckOutlined />}
             loading={actionId === row.id}
             onClick={() => void handleApprove(row.id)}
           >
             批准
+          </Button>
+          <Button
+            size="small" icon={<EditOutlined />}
+            onClick={() => {
+              setEditTarget(row);
+              setEditContent(row.content);
+              setEditScopeNote(row.scope_note ?? "");
+            }}
+          >
+            编辑
           </Button>
           <Button
             danger size="small" icon={<CloseOutlined />}
@@ -600,53 +678,181 @@ export function PendingRulesTab() {
     },
   ];
 
+  const historyColumns = [
+    {
+      title: "标题 / 关注点",
+      key: "title",
+      render: (_: unknown, row: KnowledgeItem) => (
+        <div>
+          <div style={{ fontWeight: 500 }}>{row.title}</div>
+          <Tag style={{ marginTop: 4 }}>{row.extraction_focus_id}</Tag>
+        </div>
+      ),
+    },
+    {
+      title: "内容摘要",
+      dataIndex: "content",
+      ellipsis: true,
+      render: (v: string) => (
+        <span style={{ color: "#666" }}>{v.slice(0, 80)}{v.length > 80 ? "…" : ""}</span>
+      ),
+    },
+    {
+      title: "置信度",
+      dataIndex: "confidence",
+      width: 70,
+      render: (v: string) => (
+        <Tag color={CONFIDENCE_COLOR[v] || "default"}>{CONF_LABEL[v] || v}</Tag>
+      ),
+    },
+    {
+      title: "状态",
+      dataIndex: "status",
+      width: 90,
+      render: (v: string) => (
+        <Tag color={v === "active" ? "success" : "error"}>
+          {v === "active" ? "已批准" : "已拒绝"}
+        </Tag>
+      ),
+    },
+    {
+      title: "创建时间",
+      dataIndex: "created_at",
+      width: 140,
+      render: (v: string) => v ? v.slice(0, 16).replace("T", " ") : "—",
+    },
+  ];
+
+  const tabItems = [
+    {
+      key: "pending",
+      label: items.length > 0 ? `待审批 (${items.length})` : "待审批",
+      children: (
+        <>
+          {error && <Alert type="error" message={error} style={{ marginBottom: 12 }} />}
+          {!loading && items.length === 0 ? (
+            <Empty
+              description="暂无待批准规则。通过专家答问生成知识条目后，它们会出现在此处。"
+              style={{ padding: "40px 0" }}
+            />
+          ) : (
+            <Table
+              dataSource={items}
+              columns={pendingColumns}
+              rowKey="id"
+              loading={loading}
+              size="small"
+              pagination={{ pageSize: 15, showSizeChanger: false }}
+              expandable={{
+                expandedRowRender: (row) => {
+                  const awText = formatConditionValue(row.applicable_when);
+                  const nawText = formatConditionValue(row.not_applicable_when);
+                  return (
+                    <div style={{ padding: "8px 16px", display: "flex", flexDirection: "column", gap: 8 }}>
+                      {/* A3: 来源信息 */}
+                      <div>
+                        <Text type="secondary" style={{ fontSize: 12, marginRight: 6 }}>来源：</Text>
+                        <Tag color="blue">{SOURCE_ROLE_LABEL[row.source_role] || row.source_role}</Tag>
+                        <Tag>{SOURCE_TYPE_LABEL[row.source_type] || row.source_type}</Tag>
+                      </div>
+                      {/* 完整内容 */}
+                      <div>
+                        <Text strong>完整内容：</Text>
+                        <pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit", margin: "4px 0", fontSize: 13 }}>
+                          {row.content}
+                        </pre>
+                      </div>
+                      {/* A2: 适用/排除条件 */}
+                      {awText && (
+                        <div>
+                          <Text type="secondary" style={{ fontSize: 12 }}>适用条件：</Text>
+                          <Text style={{ fontSize: 13 }}>{awText}</Text>
+                        </div>
+                      )}
+                      {nawText && (
+                        <div>
+                          <Text type="secondary" style={{ fontSize: 12 }}>排除条件：</Text>
+                          <Text style={{ fontSize: 13 }}>{nawText}</Text>
+                        </div>
+                      )}
+                      {/* 适用范围 */}
+                      {row.scope_note && (
+                        <div>
+                          <Text type="secondary" style={{ fontSize: 12 }}>适用范围：</Text>
+                          <Text style={{ fontSize: 13 }}>{row.scope_note}</Text>
+                        </div>
+                      )}
+                      {/* A1: 原始证据 */}
+                      {row.source_evidence && (
+                        <div>
+                          <Text strong style={{ fontSize: 12 }}>原始证据：</Text>
+                          <pre style={{
+                            whiteSpace: "pre-wrap", fontFamily: "inherit", margin: "4px 0",
+                            fontSize: 12, color: "#555", background: "#f5f5f5",
+                            padding: "6px 8px", borderRadius: 4,
+                          }}>
+                            {row.source_evidence}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                  );
+                },
+              }}
+            />
+          )}
+        </>
+      ),
+    },
+    {
+      key: "history",
+      label: "已处理",
+      children: (
+        <Table
+          dataSource={historyItems}
+          columns={historyColumns}
+          rowKey="id"
+          loading={historyLoading}
+          size="small"
+          pagination={{ pageSize: 20, showSizeChanger: false }}
+          locale={{ emptyText: "暂无已处理记录" }}
+        />
+      ),
+    },
+  ];
+
   return (
     <div style={{ padding: "16px 0" }}>
       <div style={{ display: "flex", alignItems: "center", marginBottom: 12, gap: 8 }}>
         <Title level={5} style={{ margin: 0 }}>待批准规则</Title>
-        <Button icon={<ReloadOutlined />} size="small" onClick={load} loading={loading}>刷新</Button>
+        <Button
+          icon={<ReloadOutlined />} size="small"
+          loading={activeTab === "pending" ? loading : historyLoading}
+          onClick={() => activeTab === "pending" ? void load() : void loadHistory()}
+        >
+          刷新
+        </Button>
         <Text type="secondary" style={{ marginLeft: "auto", fontSize: 12 }}>
           批准后写入活动技能包；拒绝的条目不影响规则库
         </Text>
       </div>
-      {error && <Alert type="error" message={error} style={{ marginBottom: 12 }} />}
-      {!loading && items.length === 0 ? (
-        <Empty
-          description="暂无待批准规则。通过专家答问生成知识条目后，它们会出现在此处。"
-          style={{ padding: "40px 0" }}
-        />
-      ) : (
-        <Table
-          dataSource={items}
-          columns={columns}
-          rowKey="id"
-          loading={loading}
-          size="small"
-          pagination={{ pageSize: 15, showSizeChanger: false }}
-          expandable={{
-            expandedRowRender: (row) => (
-              <div style={{ padding: "8px 16px" }}>
-                <Text strong>完整内容：</Text>
-                <pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit", margin: "6px 0", fontSize: 13 }}>
-                  {row.content}
-                </pre>
-                {row.scope_note && (
-                  <div style={{ marginTop: 6 }}>
-                    <Text type="secondary">适用范围：{row.scope_note}</Text>
-                  </div>
-                )}
-              </div>
-            ),
-          }}
-        />
-      )}
+      <Tabs
+        activeKey={activeTab}
+        size="small"
+        onChange={(k) => {
+          setActiveTab(k);
+          if (k === "history" && historyItems.length === 0) void loadHistory();
+        }}
+        items={tabItems}
+      />
+      {/* 拒绝 Modal */}
       <Modal
         title="拒绝原因"
         open={!!rejectTarget}
         onCancel={() => { setRejectTarget(null); setRejectReason(""); }}
         onOk={() => void handleReject()}
         okText="确认拒绝"
-        okButtonProps={{ danger: true }}
+        okButtonProps={{ danger: true, loading: actionId === rejectTarget }}
         cancelText="取消"
       >
         <TextArea
@@ -655,6 +861,44 @@ export function PendingRulesTab() {
           placeholder="请说明拒绝原因（可选）"
           rows={3}
         />
+      </Modal>
+      {/* B2: 编辑后批准 Modal */}
+      <Modal
+        title="编辑后批准"
+        open={!!editTarget}
+        onCancel={() => setEditTarget(null)}
+        onOk={() => void handleEditApprove()}
+        okText="保存并批准"
+        okButtonProps={{ loading: editSaving }}
+        cancelText="取消"
+        width={600}
+        destroyOnClose
+      >
+        {editTarget && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>关注点：</Text>
+              <Tag>{editTarget.extraction_focus_id}</Tag>
+            </div>
+            <div>
+              <Text strong style={{ fontSize: 12, display: "block", marginBottom: 4 }}>规则内容</Text>
+              <TextArea
+                value={editContent}
+                onChange={(e) => setEditContent(e.target.value)}
+                rows={6}
+                autoFocus
+              />
+            </div>
+            <div>
+              <Text strong style={{ fontSize: 12, display: "block", marginBottom: 4 }}>适用范围</Text>
+              <Input
+                value={editScopeNote}
+                onChange={(e) => setEditScopeNote(e.target.value)}
+                placeholder="可选，描述规则的适用场景"
+              />
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );

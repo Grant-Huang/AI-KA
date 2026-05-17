@@ -341,6 +341,9 @@ export type ReviewQueueItem = {
 export type PendingRuleItem = {
   id: string; extraction_focus_id: string; title: string; content: string;
   confidence: string; status: string; source_role: string; source_type: string;
+  source_evidence: string;
+  applicable_when: Record<string, unknown>;
+  not_applicable_when: Record<string, unknown>;
   has_conflicts: boolean; conflict_with: Array<{focus_id: string; reason: string}>;
   scope_note?: string; created_at: string;
 };
@@ -366,7 +369,7 @@ export async function deleteReviewQueueItem(id: string): Promise<{ deleted: bool
 export async function getPendingRules(): Promise<{ items: PendingRuleItem[]; total: number }> {
   return apiJson("/api/v1/pending-rules");
 }
-export async function approvePendingRule(kid: string, body: { note?: string }): Promise<{ approved: string; written_to?: string }> {
+export async function approvePendingRule(kid: string, body: { note?: string; reviewed_by?: string }): Promise<{ approved: string; written_to?: string }> {
   return apiJson(`/api/v1/pending-rules/${encodeURIComponent(kid)}/approve`, { method: "POST", body: JSON.stringify(body) });
 }
 export async function rejectPendingRule(kid: string, body: { reason: string }): Promise<{ rejected: string }> {
