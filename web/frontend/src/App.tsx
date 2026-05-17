@@ -3473,7 +3473,7 @@ export default function App() {
               {/* 知识线索快捷入口 */}
               <div style={{ borderTop: "1px solid #f0f0f0", padding: "4px 0 2px", flexShrink: 0 }}>
                 <button
-                  className={`app-sidebar__section-header${reviewMainTab === "review_queue" ? " app-sidebar__section-header--active" : ""}`}
+                  className="app-sidebar__section-header"
                   style={{ width: "100%", fontSize: 12 }}
                   onClick={() => setReviewMainTab("review_queue")}
                 >
