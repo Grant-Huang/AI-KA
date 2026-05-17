@@ -1,5 +1,5 @@
 /** 与仓库根目录 helpme.md 中二级标题一致，用于拆分为帮助弹窗的 Tab */
-export const HELP_TAB_LABELS = ["功能简介", "项目审查", "知识提取", "审查域说明", "设置指南", "常见问题"] as const;
+export const HELP_TAB_LABELS = ["功能简介", "项目初始化", "项目审查", "知识归纳", "审查域说明", "设置指南", "常见问题"] as const;
 
 export type HelpTabLabel = (typeof HELP_TAB_LABELS)[number];
 
