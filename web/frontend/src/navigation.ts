@@ -18,7 +18,7 @@
 
 export type AppMode = "review" | "extraction";
 export type MainPanel = "analyze" | "ingest" | "review_domain" | "all_conversations";
-export type ReviewTab = "analyze" | "result_review";
+export type ReviewTab = "analyze" | "result_review" | "review_queue";
 
 export interface NavState {
   appMode: AppMode;
@@ -66,6 +66,10 @@ export function parseUrl(pathname: string): NavState {
       };
     }
 
+    if (seg === "clues") {
+      return { ...DEFAULT_NAV, reviewMainTab: "review_queue" };
+    }
+
     if (seg === "ingest") {
       return {
         ...DEFAULT_NAV,
@@ -109,6 +113,8 @@ export function buildUrl(state: NavState): string {
   }
 
   // review mode
+  if (reviewMainTab === "review_queue") return "/review/clues";
+
   if (reviewMainTab === "result_review") {
     if (selectedId != null) return `/review/rules/project/${selectedId}`;
     return "/review/rules";

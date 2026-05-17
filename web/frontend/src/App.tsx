@@ -551,7 +551,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<number | null>(() => parseUrl(window.location.pathname).selectedId);
   const [appMode, setAppMode] = useState<"review" | "extraction">(() => parseUrl(window.location.pathname).appMode);
   const [mainPanel, setMainPanel] = useState<"analyze" | "ingest" | "review_domain" | "all_conversations">(() => parseUrl(window.location.pathname).mainPanel);
-  const [reviewMainTab, setReviewMainTab] = useState<"analyze" | "result_review" | "review_queue">(() => (parseUrl(window.location.pathname).reviewMainTab as "analyze" | "result_review" | "review_queue") ?? "analyze");
+  const [reviewMainTab, setReviewMainTab] = useState<"analyze" | "result_review" | "review_queue">(() => parseUrl(window.location.pathname).reviewMainTab);
   const [projectIngest, setProjectIngest] = useState<
     Record<number, { initialized: boolean; chunk_count: number; has_review_records?: boolean }>
   >(
