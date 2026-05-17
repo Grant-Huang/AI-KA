@@ -9,7 +9,7 @@ Endpoints:
 """
 from __future__ import annotations
 
-import uuid
+import hashlib
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -34,7 +34,8 @@ class ReviewQueueCreate(BaseModel):
     suggestion: str
     source_role: str = "senior_expert"
     source_type: str = "extraction"
-    project_id: str | None = None
+    project_id: str | int | None = None
+    conversation_id: int | None = None
 
 
 _VALID_STATUSES = {"pending_review", "in_review", "approved", "rejected", "archived"}
@@ -91,8 +92,10 @@ def delete_review_queue_item(item_id: str) -> JSONResponse:
 
 @router.post("/api/v1/review-queue")
 def create_review_queue_item(body: ReviewQueueCreate) -> JSONResponse:
+    if not body.focus_id.strip() or not body.suggestion.strip():
+        return err("focus_id and suggestion required")
     conn = get_conn()
-    item_id = f"rq-{uuid.uuid4().hex[:12]}"
+    item_id = "rq-" + hashlib.sha1(f"{body.focus_id}|{body.suggestion}".encode()).hexdigest()[:12]
     dbm.upsert_review_queue_item(
         conn,
         id=item_id,
@@ -101,6 +104,7 @@ def create_review_queue_item(body: ReviewQueueCreate) -> JSONResponse:
         source_role=body.source_role,
         source_type=body.source_type,
         project_id=body.project_id,
+        conversation_id=body.conversation_id,
     )
     item = dbm.get_review_queue_item(conn, item_id)
     return ok(item)

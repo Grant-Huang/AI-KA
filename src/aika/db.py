@@ -467,6 +467,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _migrate_messages_metadata(conn)
     _migrate_chunks_embedding(conn)
     _migrate_review_queue_columns(conn)
+    _migrate_review_queue_dedup_index(conn)
     _migrate_review_knowledge_tables(conn)
     _migrate_users_tables(conn)
     _migrate_knowledge_cards_table(conn)
@@ -570,6 +571,14 @@ def _migrate_review_queue_columns(conn: sqlite3.Connection) -> None:
     # Tables are already created by SCHEMA_SQL via CREATE TABLE IF NOT EXISTS.
     # This migration only handles adding columns to pre-existing DBs that lack the tables.
     pass
+
+
+def _migrate_review_queue_dedup_index(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_review_queue_focus_suggestion "
+        "ON review_queue(focus_id, suggestion)"
+    )
+    conn.commit()
 
 
 def _migrate_review_knowledge_tables(conn: sqlite3.Connection) -> None:
@@ -2018,6 +2027,15 @@ def update_knowledge_card_content(
     return get_knowledge_card(conn, card_id)
 
 
+def _merge_project_ids_json(existing_json: str | None, new_pid_str: str | None) -> str | None:
+    if new_pid_str is None:
+        return existing_json
+    existing: list[str] = json.loads(existing_json) if existing_json else []
+    if new_pid_str not in existing:
+        existing.append(new_pid_str)
+    return json.dumps(existing)
+
+
 def upsert_review_queue_item(
     conn: sqlite3.Connection,
     *,
@@ -2030,25 +2048,34 @@ def upsert_review_queue_item(
     project_id: str | int | None = None,
     conversation_id: int | None = None,
 ) -> None:
-    """Insert or update a review queue item, incrementing occurrences on conflict."""
+    """Insert or update a review queue item, deduplicating on (focus_id, suggestion)."""
     pid_str = str(project_id) if project_id is not None else None
-    conn.execute(
-        """
-        INSERT INTO review_queue(id, focus_id, suggestion, source_role, source_type, status,
-                                  occurrences, project_ids_json, conversation_id)
-        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          suggestion=excluded.suggestion,
-          status=excluded.status,
-          occurrences=review_queue.occurrences + 1,
-          project_ids_json=CASE
-            WHEN review_queue.project_ids_json IS NULL THEN excluded.project_ids_json
-            ELSE review_queue.project_ids_json
-          END
-        """,
-        (id, focus_id, suggestion, source_role, source_type, status,
-         json.dumps([pid_str]) if pid_str else None, conversation_id),
-    )
+    try:
+        conn.execute(
+            """
+            INSERT INTO review_queue(id, focus_id, suggestion, source_role, source_type, status,
+                                      occurrences, project_ids_json, conversation_id)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """,
+            (id, focus_id, suggestion, source_role, source_type, status,
+             json.dumps([pid_str]) if pid_str else None, conversation_id),
+        )
+    except sqlite3.IntegrityError:
+        row = conn.execute(
+            "SELECT project_ids_json FROM review_queue WHERE focus_id=? AND suggestion=?",
+            (focus_id, suggestion),
+        ).fetchone()
+        merged = _merge_project_ids_json(row["project_ids_json"] if row else None, pid_str)
+        conn.execute(
+            """
+            UPDATE review_queue SET
+              occurrences = occurrences + 1,
+              project_ids_json = ?,
+              conversation_id = COALESCE(conversation_id, ?)
+            WHERE focus_id=? AND suggestion=?
+            """,
+            (merged, conversation_id, focus_id, suggestion),
+        )
     conn.commit()
 
 

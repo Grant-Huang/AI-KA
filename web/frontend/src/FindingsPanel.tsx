@@ -5,6 +5,7 @@ import {
   EyeOutlined,
   FileTextOutlined,
   MinusCircleOutlined,
+  PlusCircleOutlined,
 } from "@ant-design/icons";
 
 const { Text } = Typography;
@@ -25,6 +26,7 @@ interface FindingsPanelProps {
   onStatusChange: (findingId: string, status: Finding["status"]) => void;
   onGenerateReport: () => void;
   reportLoading: boolean;
+  onAddToQueue?: (finding: Finding) => void;
 }
 
 const SEVERITY_COLOR: Record<string, string> = {
@@ -44,6 +46,7 @@ export const FindingsPanel: React.FC<FindingsPanelProps> = ({
   onStatusChange,
   onGenerateReport,
   reportLoading,
+  onAddToQueue,
 }) => {
   const [collapsed, setCollapsed] = useState(false);
 
@@ -160,6 +163,16 @@ export const FindingsPanel: React.FC<FindingsPanelProps> = ({
               </div>
               {/* Status actions */}
               <Space size={4} style={{ flexShrink: 0 }}>
+                {onAddToQueue && f.status !== "resolved" && (
+                  <Tooltip title="加入知识线索">
+                    <Button
+                      size="small"
+                      type="text"
+                      icon={<PlusCircleOutlined style={{ color: "#1677ff" }} />}
+                      onClick={() => onAddToQueue(f)}
+                    />
+                  </Tooltip>
+                )}
                 {f.status === "open" && (
                   <Tooltip title="标记为已知悉">
                     <Button

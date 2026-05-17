@@ -89,6 +89,7 @@ import {
   registerVault,
   deleteVault,
   exportConversationToObsidian,
+  addToReviewQueue,
   type AuthUser,
   type ExpertProfile,
   type ObsidianVault,
@@ -4159,6 +4160,22 @@ export default function App() {
                         })();
                       }}
                       reportLoading={reportLoading}
+                      onAddToQueue={(finding) => {
+                        void (async () => {
+                          try {
+                            await addToReviewQueue({
+                              focus_id: finding.focus_id,
+                              suggestion: finding.title + (finding.evidence ? `: ${finding.evidence}` : ""),
+                              source_type: "post_review",
+                              project_id: selectedId,
+                              conversation_id: selectedConversationId,
+                            });
+                            void message.success("已加入知识线索");
+                          } catch (e) {
+                            void message.error(String(e));
+                          }
+                        })();
+                      }}
                     />
                   </div>
                 ) : null}
