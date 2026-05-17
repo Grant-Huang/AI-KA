@@ -144,7 +144,7 @@ async def init_project_from_upload(
             vault_row = dbm.get_obsidian_vault_by_id(conn, vault_id)
         if vault_row is None:
             raise HTTPException(status_code=404, detail=f"Vault #{vault_id} not found")
-        vault_path = Path(vault_row["path"])
+        vault_path = Path(vault_row.path)
         if not vault_path.is_dir():
             raise HTTPException(status_code=400, detail=f"Vault path not accessible: {vault_path}")
         ensure_vault_structure(vault_path)
