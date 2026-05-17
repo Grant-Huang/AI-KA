@@ -190,7 +190,7 @@ function ExpertQATab({
   const [phase, setPhase] = useState<"choosing" | "chatting">("choosing");
   const [strategy, setStrategy] = useState("gap_based");
   const [rqItems, setRqItems] = useState<ReviewQueueItem[]>([]);
-  const [rqItemId, setRqItemId] = useState<string | null>(null);
+  const [rqItemId, setRqItemId] = useState<string | null>(initialRqItem?.id ?? null);
   const [materialId, setMaterialId] = useState<string | null>(null);
   const [docName, setDocName] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -203,7 +203,13 @@ function ExpertQATab({
   const isPostReview = postReviewCtx != null;
   const isDocMode = materialId != null;
 
-  const makeInitialMessages = (postReview: boolean): ChatMsg[] => {
+  const makeInitialMessages = (postReview: boolean, rqItem?: ReviewQueueItem | null): ChatMsg[] => {
+    if (rqItem) {
+      return [{
+        role: "assistant",
+        content: `已关联知识线索：「${rqItem.suggestion}」（关注点：${rqItem.focus_id}）。\n\n请分享你在这个领域的相关经验，我会帮你把它提炼成可复用的规则。`,
+      }];
+    }
     const opening: ChatMsg = {
       role: "assistant",
       content: postReview
@@ -230,8 +236,8 @@ function ExpertQATab({
         },
       ]);
     } else {
-      setPhase("choosing");
-      setMessages(makeInitialMessages(isPostReview));
+      setPhase(initialRqItem ? "chatting" : "choosing");
+      setMessages(makeInitialMessages(isPostReview, initialRqItem));
     }
     setRoundNumber(1);
     setNewKiIds([]);
