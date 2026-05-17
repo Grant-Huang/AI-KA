@@ -3739,13 +3739,13 @@ export default function App() {
             />
           ) : appMode === "review" && mainPanel === "review_domain" ? (
             reviewDomainPageNode
-          ) : appMode === "review" && !showMainOutput ? (
+          ) : appMode === "review" && mainPanel === "analyze" && reviewMainTab === "analyze" && !showMainOutput ? (
             <div className="chat-bubble-row chat-bubble-row--assistant">
               <div className="chat-bubble chat-bubble--assistant">
                 <ThinkableMarkdown markdown="你好！今天想做哪些方面的项目审查？" />
               </div>
             </div>
-          ) : appMode === "review" && showMainOutput ? (
+          ) : appMode === "review" && mainPanel === "analyze" && reviewMainTab === "analyze" && showMainOutput ? (
             <>
               <div className="page-header">
                 <span className="page-header__title">项目审查</span>
@@ -4656,15 +4656,10 @@ export default function App() {
               <div className="page-header">
                 <Button type="text" size="small" icon={<ArrowLeftOutlined />}
                   onClick={() => { navPush({ appMode: "review", mainPanel: "analyze", reviewMainTab: "analyze", selectedId, selectedConversationId }); setReviewMainTab("analyze"); }} title="返回" style={{ marginRight: 4 }} />
-                <span className="page-header__title">知识线索</span>
+                <span className="page-header__title">待批准规则</span>
               </div>
               <div style={{ padding: "0 24px" }}>
-                <ReviewQueueTab
-                  projectId={selectedId}
-                  onStartExtraction={(item) => {
-                    void handleStartFromReviewQueue(item);
-                  }}
-                />
+                <PendingRulesTab reviewedBy={currentUser?.display_name} />
               </div>
             </div>
           ) : (
