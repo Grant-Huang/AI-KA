@@ -512,6 +512,16 @@ def _migrate_projects_vault_columns(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def _migrate_projects_vault_columns(conn: sqlite3.Connection) -> None:
+    cols = _table_column_names(conn, "projects")
+    if "vault_id" not in cols:
+        conn.execute("ALTER TABLE projects ADD COLUMN vault_id INTEGER REFERENCES obsidian_vaults(id) ON DELETE SET NULL")
+        conn.commit()
+    if "vault_subfolder" not in cols:
+        conn.execute("ALTER TABLE projects ADD COLUMN vault_subfolder TEXT")
+        conn.commit()
+
+
 def _migrate_conversations_preset_id(conn: sqlite3.Connection) -> None:
     cols = _table_column_names(conn, "conversations")
     if "preset_id" not in cols:

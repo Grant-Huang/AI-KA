@@ -90,6 +90,7 @@ import {
   deleteVault,
   exportConversationToObsidian,
   addToReviewQueue,
+  initProjectFromUpload,
   type AuthUser,
   type ExpertProfile,
   type ObsidianVault,
@@ -599,7 +600,7 @@ export default function App() {
   >([]);
   const reportSplit = useMemo(() => splitReportFromAnalysis(finalMarkdown), [finalMarkdown]);
   const historyAssistantMarkdown = useMemo(() => {
-    // 历史回放：取最后一条 assistant 消息作为“最终结果/思考分析”来源
+    // 历史回放：取最后一条 assistant 消息作为"最终结果/思考分析"来源
     const last = [...conversationMessages].reverse().find((m) => m.role === "assistant");
     return String(last?.content || "");
   }, [conversationMessages]);
@@ -747,9 +748,29 @@ export default function App() {
   const [reportLoading, setReportLoading] = useState(false);
   const [nativePickerAvailable, setNativePickerAvailable] = useState(true);
   const [pickLoading, setPickLoading] = useState(false);
-  const [manualRootInput, setManualRootInput] = useState("");
-  const [manualLoadLoading, setManualLoadLoading] = useState(false);
-  const [manualPickOpen, setManualPickOpen] = useState(false);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [uploadModalMode, setUploadModalMode] = useState<"init" | "append">("init");
+  const [uploadStep, setUploadStep] = useState<1 | 2>(1);
+  const [uploadModalVaultId, setUploadModalVaultId] = useState<number | null>(null);
+  const [uploadFiles, setUploadFiles] = useState<File[]>([]);
+  const [uploadRelPaths, setUploadRelPaths] = useState<string[]>([]);
+  const [uploadProjectName, setUploadProjectName] = useState("");
+  const [uploadLoading, setUploadLoading] = useState(false);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+
+  // Derived: file type summary for upload preview
+  const uploadFileSummary = React.useMemo(() => {
+    const pass = new Set(["md", "txt", "markdown"]);
+    const conv = new Set(["docx", "doc", "pdf", "xlsx", "xls", "pptx", "ppt", "html", "htm"]);
+    let passCount = 0, convCount = 0, otherCount = 0;
+    for (const f of uploadFiles) {
+      const ext = (f.name.split(".").pop() || "").toLowerCase();
+      if (pass.has(ext)) passCount++;
+      else if (conv.has(ext)) convCount++;
+      else otherCount++;
+    }
+    return { passCount, convCount, otherCount };
+  }, [uploadFiles]);
   const [focusPoints, setFocusPoints] = useState<string[]>([]);
   const [focusDefs, setFocusDefs] = useState<FocusPoint[]>([]);
   const [focusPresets, setFocusPresets] = useState<FocusPreset[]>([]);
@@ -1201,7 +1222,7 @@ export default function App() {
 
   const findReusableEmptyConversationForPreset = useCallback(
     async (projectId: number, presetId: string): Promise<number | null> => {
-      // D2：该预设无“审查历史”（count==0）时，优先复用空会话，避免无限新建
+      // D2：该预设无"审查历史"（count==0）时，优先复用空会话，避免无限新建
       try {
         const pair = await getConversationsByPair(projectId, presetId);
         const items = Array.isArray(pair.conversations) ? pair.conversations : [];
@@ -1356,7 +1377,8 @@ export default function App() {
       await onPickDirectory();
       return;
     }
-    setManualPickOpen(true);
+    // Native picker unavailable (e.g. Docker) — fall back to upload modal
+    openUploadModal("init");
   };
 
   const onPickDirectory = async () => {
@@ -1371,19 +1393,59 @@ export default function App() {
     }
   };
 
-  const onLoadManualPath = async () => {
-    const p = manualRootInput.trim();
-    if (!p) {
-      message.warning("请先填写项目根路径");
+  const openUploadModal = (mode: "init" | "append") => {
+    setUploadModalMode(mode);
+    setUploadFiles([]);
+    setUploadRelPaths([]);
+    setUploadStep(mode === "append" ? 2 : 1);
+    setUploadModalVaultId(selectedVaultId);
+    if (mode === "init") setUploadProjectName("");
+    setUploadModalOpen(true);
+  };
+
+  const onUploadFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = Array.from(e.target.files || []);
+    if (!fileList.length) return;
+    setUploadFiles(fileList);
+    const paths = fileList.map((f) => (f as any).webkitRelativePath || f.name);
+    setUploadRelPaths(paths);
+    if (uploadModalMode === "init" && !uploadProjectName) {
+      const topFolder = paths[0]?.split("/")[0];
+      if (topFolder && topFolder !== paths[0]) setUploadProjectName(topFolder);
+    }
+  };
+
+  const onDoUpload = async () => {
+    if (!uploadFiles.length) { message.warning("请先选择文件或目录"); return; }
+    if (uploadModalMode === "init" && !uploadProjectName.trim()) {
+      message.warning("请填写项目名称");
       return;
     }
-    setManualLoadLoading(true);
+    setUploadLoading(true);
     try {
-      await ensureProjectForPath(p);
+      const isInit = uploadModalMode === "init";
+      const result = await initProjectFromUpload({
+        files: uploadFiles,
+        relPaths: uploadRelPaths,
+        mode: uploadModalMode,
+        projectName: isInit ? uploadProjectName.trim() : undefined,
+        vaultId: isInit ? uploadModalVaultId : undefined,
+        projectId: !isInit ? (selectedId ?? null) : undefined,
+      });
+      await loadProjects();
+      setSelectedId(result.id);
+      setUploadModalOpen(false);
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+      const errNote = result.errors.length ? `（${result.errors.length} 个文件跳过）` : "";
+      if (isInit) {
+        message.success(`已${result.created ? "创建" : "加载"}项目「${result.name}」，转换 ${result.files_written} 个文件${errNote}`);
+      } else {
+        message.success(`已向「${result.name}」追加 ${result.files_written} 个文件${errNote}`);
+      }
     } catch (e) {
       message.error(String((e as Error).message));
     } finally {
-      setManualLoadLoading(false);
+      setUploadLoading(false);
     }
   };
 
@@ -1740,7 +1802,7 @@ export default function App() {
             })();
             const target = currentStageKeyRef.current || "stage:Agent:routing";
             appendMilestoneDetail(target, `\n\n[agent_decision]\n${toFencedCodeBlock("json", pretty)}\n`);
-            // 动态更新「问题分析」：不重复回显用户输入正文，避免出现“两次回显”
+            // 动态更新「问题分析」：不重复回显用户输入正文，避免出现"两次回显"
             try {
               const intent = String((d as any)?.intent || "").trim();
               const focusIds = Array.isArray((d as any)?.focus_ids) ? (d as any).focus_ids.map(String) : [];
@@ -2439,7 +2501,7 @@ export default function App() {
   ]);
 
   const startNewConversationPage = useCallback(() => {
-    // 不弹窗、不强制选预设：进入”空白会话页”，由用户在该页选择预设与加载项目
+    // 不弹窗、不强制选预设：进入"空白会话页"，由用户在该页选择预设与加载项目
     setNewConversationOpen(false);
     setMainPanel("analyze");
     setSelectedConversationId(null);
@@ -3486,20 +3548,39 @@ export default function App() {
                 <span className="page-header__title">项目初始化</span>
               </div>
               <Text type="secondary">
-                这里用于注册项目目录并完成文档转换与索引。初始化完成后，请切回“分析”视图进行流式审查与多轮追问。
+                上传项目文档（支持 .docx / .pdf / .xlsx / .pptx / .html 自动转为 Markdown），
+                写入 Obsidian Vault 后建立索引，再切到「分析」视图进行审查。
               </Text>
 
               <Divider style={{ margin: "14px 0" }} />
 
-              <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                <div>
-                  <Text type="secondary" style={{ display: "block", marginBottom: 6 }}>
-                    已注册项目
-                  </Text>
+              {/* ── 建议 4：无 Vault 时提前警告 ── */}
+              {vaults.length === 0 && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginBottom: 14 }}
+                  message="尚未配置 Obsidian Vault"
+                  description="配置 Vault 后，项目文档将写入 Vault/Projects/ 目录，便于 Obsidian 管理和持久化。若跳过，文件将写入后端临时目录，重新部署后丢失。"
+                  action={
+                    <Button
+                      size="small"
+                      type="primary"
+                      onClick={() => { setVaultPickerOpen(true); setDiscoveredVaults([]); }}
+                    >
+                      配置 Vault →
+                    </Button>
+                  }
+                />
+              )}
+
+              <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                {/* ── 项目选择行 ── */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                   <Select
-                    style={{ minWidth: 380 }}
+                    style={{ minWidth: 340 }}
                     showSearch
-                    placeholder="选择项目"
+                    placeholder="选择已注册项目"
                     value={selectedId ?? undefined}
                     options={projects.map((p) => ({ value: p.id, label: p.name }))}
                     filterOption={(input, opt) =>
@@ -3513,116 +3594,139 @@ export default function App() {
                       setCorpusStaleReason("");
                     }}
                   />
-                  <Space style={{ marginLeft: 8 }}>
-                    <Button type="default" loading={pickLoading} onClick={() => void openProjectPicker()}>
-                      选择目录并注册
-                    </Button>
-                    <Button type="default" onClick={() => setManualPickOpen(true)}>
-                      手动输入路径
-                    </Button>
-                    <Button
-                      type="default"
-                      icon={<span style={{ marginRight: 4 }}>📒</span>}
-                      onClick={() => {
-                        setVaultPickerOpen(true);
-                        setDiscoveredVaults([]);
-                      }}
-                    >
-                      Obsidian Vault
-                    </Button>
-                    {selectedId != null &&
-                    projectIngest[selectedId]?.initialized &&
-                    !projectIngest[selectedId]?.has_review_records ? (
-                      <Button
-                        danger
-                        type="default"
-                        onClick={() => {
-                          const pid = selectedId;
-                          const p = projects.find((x) => x.id === pid);
-                          const name = p?.name || `项目 #${pid}`;
-                          Modal.confirm({
-                            title: "确认删除项目",
-                            content: `将删除项目「${name}」及其全部数据（索引/分块/会话/输出）。此操作不可撤销。`,
-                            okText: "删除",
-                            okButtonProps: { danger: true },
-                            cancelText: "取消",
-                            onOk: async () => {
-                              await deleteProject(pid);
-                              message.success("项目已删除");
-                              setSelectedId(null);
-                              setSelectedConversationId(null);
-                              setProjectViewOnlyReason("");
-                              setCorpusStaleReason("");
-                              await loadProjects();
-                              await loadConversations({ q: chatSearchQuery });
-                            },
-                          });
-                        }}
-                      >
-                        删除项目
-                      </Button>
-                    ) : selectedId != null && projectIngest[selectedId]?.initialized && projectIngest[selectedId]?.has_review_records ? (
-                      <Button
-                        type="default"
-                        onClick={() => {
-                          const pid = selectedId;
-                          const p = projects.find((x) => x.id === pid);
-                          const name = p?.name || `项目 #${pid}`;
-                          Modal.confirm({
-                            title: "归档项目",
-                            content: `将归档项目「${name}」。归档后该项目不再出现在选择列表，历史审查记录保留。可在设置中恢复。`,
-                            okText: "归档",
-                            cancelText: "取消",
-                            onOk: async () => {
-                              await apiJson(`/api/v1/projects/${pid}/archive`, { method: "POST" });
-                              message.success("项目已归档");
-                              setSelectedId(null);
-                              setSelectedConversationId(null);
-                              setProjectViewOnlyReason("");
-                              setCorpusStaleReason("");
-                              await loadProjects();
-                            },
-                          });
-                        }}
-                      >
-                        归档项目
-                      </Button>
-                    ) : null}
-                  </Space>
+                  {/* ── 主操作按钮 ── */}
+                  <Button
+                    type="primary"
+                    icon={<span style={{ marginRight: 4 }}>📤</span>}
+                    onClick={() => openUploadModal("init")}
+                  >
+                    上传文件初始化
+                  </Button>
+                  <Button
+                    type="default"
+                    icon={<span style={{ marginRight: 4 }}>📒</span>}
+                    onClick={() => { setVaultPickerOpen(true); setDiscoveredVaults([]); }}
+                  >
+                    Obsidian Vault
+                  </Button>
+                  {/* 选择目录注册：本机直接运行时有用，降为次要入口 */}
+                  <Button
+                    type="text"
+                    size="small"
+                    style={{ color: "#8c8c8c" }}
+                    loading={pickLoading}
+                    onClick={() => void openProjectPicker()}
+                  >
+                    选择目录注册
+                  </Button>
                 </div>
 
-                {selected ? (
-                  <div style={{ fontSize: 12 }}>
-                    <Text type="secondary">当前路径：</Text>{" "}
-                    <Text code style={{ wordBreak: "break-all" }}>
-                      {selected.root_path}
-                    </Text>
-                  </div>
-                ) : null}
+                {/* ── 选中项目的详情行 ── */}
+                {selected && (
+                  <div style={{
+                    background: "#fafafa", border: "1px solid #f0f0f0",
+                    borderRadius: 6, padding: "10px 14px",
+                  }}>
+                    <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <Text strong>{selected.name}</Text>
+                        <div style={{ fontSize: 12, marginTop: 2 }}>
+                          <Text type="secondary" code style={{ wordBreak: "break-all" }}>
+                            {selected.root_path}
+                          </Text>
+                        </div>
+                      </div>
+                      {/* ── 建议 3：追加文件移到此处 ── */}
+                      <Space size={6}>
+                        <Button
+                          size="small"
+                          icon={<span style={{ marginRight: 2 }}>➕</span>}
+                          onClick={() => openUploadModal("append")}
+                        >
+                          追加文件
+                        </Button>
+                        {projectIngest[selectedId!]?.initialized && !projectIngest[selectedId!]?.has_review_records ? (
+                          <Button
+                            danger size="small"
+                            onClick={() => {
+                              const pid = selectedId!;
+                              const name = selected.name || `项目 #${pid}`;
+                              Modal.confirm({
+                                title: "确认删除项目",
+                                content: `将删除项目「${name}」及其全部数据（索引/分块/会话/输出）。此操作不可撤销。`,
+                                okText: "删除",
+                                okButtonProps: { danger: true },
+                                cancelText: "取消",
+                                onOk: async () => {
+                                  await deleteProject(pid);
+                                  message.success("项目已删除");
+                                  setSelectedId(null);
+                                  setSelectedConversationId(null);
+                                  setProjectViewOnlyReason("");
+                                  setCorpusStaleReason("");
+                                  await loadProjects();
+                                  await loadConversations({ q: chatSearchQuery });
+                                },
+                              });
+                            }}
+                          >
+                            删除
+                          </Button>
+                        ) : projectIngest[selectedId!]?.has_review_records ? (
+                          <Button
+                            size="small"
+                            onClick={() => {
+                              const pid = selectedId!;
+                              const name = selected.name || `项目 #${pid}`;
+                              Modal.confirm({
+                                title: "归档项目",
+                                content: `将归档项目「${name}」。归档后不再出现在选择列表，历史审查记录保留。`,
+                                okText: "归档",
+                                cancelText: "取消",
+                                onOk: async () => {
+                                  await apiJson(`/api/v1/projects/${pid}/archive`, { method: "POST" });
+                                  message.success("项目已归档");
+                                  setSelectedId(null);
+                                  setSelectedConversationId(null);
+                                  setProjectViewOnlyReason("");
+                                  setCorpusStaleReason("");
+                                  await loadProjects();
+                                },
+                              });
+                            }}
+                          >
+                            归档
+                          </Button>
+                        ) : null}
+                      </Space>
+                    </div>
 
-                {vaults.length > 0 ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                    <Text type="secondary" style={{ fontSize: 12 }}>📒 Vault：</Text>
-                    <Select
-                      size="small"
-                      allowClear
-                      placeholder="关联 Obsidian Vault（可选）"
-                      style={{ minWidth: 240 }}
-                      value={selectedVaultId ?? undefined}
-                      onChange={(v) => setSelectedVaultId(v ?? null)}
-                      options={vaults.map((v) => ({
-                        value: v.id,
-                        label: `${v.name} (${v.role})`,
-                      }))}
-                    />
-                    <Checkbox
-                      checked={indexResolveWikilinks}
-                      onChange={(e) => setIndexResolveWikilinks(e.target.checked)}
-                    >
-                      <Text style={{ fontSize: 12 }}>解析 Wikilinks</Text>
-                    </Checkbox>
+                    {/* Vault 关联行 */}
+                    {vaults.length > 0 && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
+                        <Text type="secondary" style={{ fontSize: 12 }}>📒 Vault：</Text>
+                        <Select
+                          size="small"
+                          allowClear
+                          placeholder="关联 Obsidian Vault（可选）"
+                          style={{ minWidth: 220 }}
+                          value={selectedVaultId ?? undefined}
+                          onChange={(v) => setSelectedVaultId(v ?? null)}
+                          options={vaults.map((v) => ({
+                            value: v.id,
+                            label: `${v.name} (${v.role})`,
+                          }))}
+                        />
+                        <Checkbox
+                          checked={indexResolveWikilinks}
+                          onChange={(e) => setIndexResolveWikilinks(e.target.checked)}
+                        >
+                          <Text style={{ fontSize: 12 }}>解析 Wikilinks</Text>
+                        </Checkbox>
+                      </div>
+                    )}
                   </div>
-                ) : null}
+                )}
 
                 <Space wrap>
                   <Button
@@ -4334,23 +4438,174 @@ export default function App() {
       </Modal>
       {/* 新对话：已改为直接进入空白会话页（startNewConversationPage），保留 state 兼容历史但不再使用弹窗 */}
 
+      {/* ── 上传文件 Modal（初始化两步 / 追加单步）── */}
       <Modal
-        title="加载项目目录"
-        open={manualPickOpen}
-        onCancel={() => setManualPickOpen(false)}
-        okText="加载"
-        onOk={() => void onLoadManualPath().then(() => setManualPickOpen(false))}
-        confirmLoading={manualLoadLoading}
-        width={620}
+        title={
+          uploadModalMode === "init"
+            ? (uploadStep === 1 ? "📤 上传文件初始化项目  —  步骤 1/2：选择 Vault" : "📤 上传文件初始化项目  —  步骤 2/2：上传文件")
+            : "➕ 向项目追加文件"
+        }
+        open={uploadModalOpen}
+        onCancel={() => { setUploadModalOpen(false); if (uploadInputRef.current) uploadInputRef.current.value = ""; }}
+        footer={
+          <Space>
+            {uploadModalMode === "init" && uploadStep === 1 ? (
+              <>
+                <Button onClick={() => setUploadModalOpen(false)}>取消</Button>
+                <Button
+                  type="primary"
+                  disabled={uploadModalVaultId === null && vaults.length > 0}
+                  onClick={() => setUploadStep(2)}
+                >
+                  下一步 →
+                </Button>
+              </>
+            ) : (
+              <>
+                {uploadModalMode === "init"
+                  ? <Button onClick={() => setUploadStep(1)}>← 上一步</Button>
+                  : <Button onClick={() => setUploadModalOpen(false)}>取消</Button>
+                }
+                <Button type="primary" loading={uploadLoading} onClick={() => void onDoUpload()}>
+                  {uploadModalMode === "init" ? "上传并初始化" : "上传并追加"}
+                </Button>
+              </>
+            )}
+          </Space>
+        }
+        width={580}
       >
-        <Space direction="vertical" style={{ width: "100%" }} size={10}>
-          <Text type="secondary">请输入后端可见的项目根路径（容器内路径）。</Text>
-          <Input
-            value={manualRootInput}
-            onChange={(e) => setManualRootInput(e.target.value)}
-            onPressEnter={() => void onLoadManualPath().then(() => setManualPickOpen(false))}
-          />
-        </Space>
+        <input ref={uploadInputRef} type="file" style={{ display: "none" }} onChange={onUploadFileChange} />
+
+        {/* ── Step 1：Vault 选择（仅 init 模式）── */}
+        {uploadModalMode === "init" && uploadStep === 1 && (
+          <Space direction="vertical" style={{ width: "100%" }} size={16}>
+            <Text type="secondary">
+              选择文件要写入的 Obsidian Vault。Vault 下将创建{" "}
+              <Text code>Projects/&lt;项目名&gt;/</Text> 子目录存放转换后的 Markdown。
+            </Text>
+            {vaults.length > 0 ? (
+              <div>
+                <Text strong style={{ display: "block", marginBottom: 8 }}>选择目标 Vault</Text>
+                <Select
+                  style={{ width: "100%" }}
+                  placeholder="选择已注册的 Vault"
+                  value={uploadModalVaultId ?? undefined}
+                  allowClear
+                  onChange={(v) => setUploadModalVaultId(v ?? null)}
+                  options={vaults
+                    .filter((v) => v.role === "project" || v.role === "both")
+                    .map((v) => ({ value: v.id, label: `${v.name}  (${v.path})` }))}
+                />
+                {uploadModalVaultId == null && (
+                  <Alert
+                    style={{ marginTop: 10 }}
+                    type="warning"
+                    showIcon
+                    message="未选择 Vault，文件将写入后端临时目录，重新部署后丢失。"
+                  />
+                )}
+              </div>
+            ) : (
+              <Alert
+                type="warning"
+                showIcon
+                message="尚未注册任何 Vault"
+                description="文件将写入后端临时目录。建议先关闭此弹窗，点击「Obsidian Vault」按钮完成配置。"
+                action={
+                  <Button size="small" onClick={() => { setUploadModalOpen(false); setVaultPickerOpen(true); setDiscoveredVaults([]); }}>
+                    去配置
+                  </Button>
+                }
+              />
+            )}
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              没有合适的 Vault？先{" "}
+              <a onClick={() => { setUploadModalOpen(false); setVaultPickerOpen(true); setDiscoveredVaults([]); }} style={{ cursor: "pointer" }}>
+                注册新 Vault
+              </a>
+              ，完成后再回来上传。
+            </Text>
+          </Space>
+        )}
+
+        {/* ── Step 2：文件选择 ── */}
+        {(uploadModalMode !== "init" || uploadStep === 2) && (
+          <Space direction="vertical" style={{ width: "100%" }} size={14}>
+            {uploadModalMode === "init" ? (
+              uploadModalVaultId != null ? (
+                <div style={{ background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 6, padding: "8px 12px" }}>
+                  <Text>📒 目标 Vault：<Text strong>{vaults.find((v) => v.id === uploadModalVaultId)?.name}</Text></Text>
+                  <br />
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    文件将写入 <Text code>{vaults.find((v) => v.id === uploadModalVaultId)?.name}/Projects/&lt;项目名&gt;/</Text>
+                  </Text>
+                </div>
+              ) : (
+                <Alert type="warning" showIcon message="文件将写入后端临时目录（无 Vault）" />
+              )
+            ) : (
+              <div style={{ background: "#f0f5ff", border: "1px solid #adc6ff", borderRadius: 6, padding: "8px 12px" }}>
+                <Text>➕ 追加到项目：<Text strong>{selected?.name}</Text></Text>
+                <br />
+                <Text type="secondary" style={{ fontSize: 12, wordBreak: "break-all" }}>
+                  写入目录：<Text code>{selected?.root_path}</Text>
+                </Text>
+              </div>
+            )}
+
+            <div>
+              <Text strong style={{ display: "block", marginBottom: 8 }}>选择文件</Text>
+              <Space size={8}>
+                <Button onClick={() => {
+                  if (!uploadInputRef.current) return;
+                  (uploadInputRef.current as any).webkitdirectory = true;
+                  uploadInputRef.current.removeAttribute("multiple");
+                  uploadInputRef.current.click();
+                }}>📁 选择文件夹</Button>
+                <Button onClick={() => {
+                  if (!uploadInputRef.current) return;
+                  (uploadInputRef.current as any).webkitdirectory = false;
+                  uploadInputRef.current.setAttribute("multiple", "");
+                  uploadInputRef.current.click();
+                }}>🗂 选择多个文件</Button>
+              </Space>
+              <div style={{ marginTop: 4 }}>
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  支持格式：.md .txt（直接写入）/ .docx .pdf .xlsx .pptx .html（自动转为 Markdown）
+                </Text>
+              </div>
+            </div>
+
+            {uploadFiles.length > 0 && (
+              <div style={{ background: "#fafafa", borderRadius: 6, padding: "8px 12px", fontSize: 13 }}>
+                <Text strong>已选 {uploadFiles.length} 个文件：</Text>
+                <ul style={{ margin: "4px 0 0 0", paddingLeft: 20 }}>
+                  {uploadFileSummary.passCount > 0 && (
+                    <li><Text type="secondary">{uploadFileSummary.passCount} 个 Markdown/文本 → 直接写入</Text></li>
+                  )}
+                  {uploadFileSummary.convCount > 0 && (
+                    <li><Text style={{ color: "#1677ff" }}>{uploadFileSummary.convCount} 个 Office/PDF → 将自动转为 Markdown</Text></li>
+                  )}
+                  {uploadFileSummary.otherCount > 0 && (
+                    <li><Text type="warning">{uploadFileSummary.otherCount} 个未知格式 → 尝试转换，失败跳过</Text></li>
+                  )}
+                </ul>
+              </div>
+            )}
+
+            {uploadModalMode === "init" && (
+              <div>
+                <Text strong style={{ display: "block", marginBottom: 6 }}>项目名称</Text>
+                <Input
+                  value={uploadProjectName}
+                  onChange={(e) => setUploadProjectName(e.target.value)}
+                  placeholder="从文件夹名自动识别，也可手动修改"
+                />
+              </div>
+            )}
+          </Space>
+        )}
       </Modal>
 
       {/* ── Obsidian Vault Picker Modal ── */}

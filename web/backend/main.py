@@ -45,6 +45,7 @@ from backend.routers.extraction import router as extraction_router
 from backend.routers.pending_rules import router as pending_rules_router
 from backend.routers.review_knowledge import router as review_knowledge_router
 from backend.routers.vaults import router as vaults_router
+from backend.routers.project_init import router as project_init_router
 from backend.run_metadata import build_run_metadata, sha256_short
 from backend.memory_recall import iter_memory_candidate_files, memory_root_under_repo, recall_combined, recall_memory_snippets
 from backend.conversation_models import (
@@ -155,6 +156,7 @@ app.include_router(extraction_router)
 app.include_router(pending_rules_router)
 app.include_router(review_knowledge_router)
 app.include_router(vaults_router)
+app.include_router(project_init_router)
 
 register_builtin_hooks()
 

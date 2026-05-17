@@ -5,22 +5,40 @@ services:
     ports:
       - "8765:8765"
     environment:
-      # 必须：仓库根（SQLite、.tmp、review_skill_packages 等路径）
+      # 必须：仓库根（SQLite、.aika/、review_skill_packages 等路径基准）
       AIKA_REPO_ROOT: /app
-      # 浏览器从宿主机访问时的来源（按需增删）
+      # 浏览器访问来源（按需调整端口）
       AIKA_CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8765,http://127.0.0.1:8765"
       # 可选：审查技能包根目录（默认 $AIKA_REPO_ROOT/review_skill_packages）
       # AIKA_REVIEW_SKILL_PACKAGES_ROOT: "/app/review_skill_packages"
-      # 可选：LLM（也可在容器外通过 app_settings.md 配置，需挂载卷）
+      # 可选：LLM（也可在 Web UI 的应用设置页配置）
       # AIKA_LLM_BASE_URL: ""
       # AIKA_LLM_API_KEY: ""
       # AIKA_LLM_PROVIDER: "openai_compatible"
     volumes:
-      # 持久化：项目索引、转换产物、SQLite
+      # ── 必须：持久化 SQLite 索引与临时产物 ──────────────────────────
       - ai-ka-data:/app/.tmp
-      # 可选：挂载审查技能包与应用设置
+
+      # ── 推荐：挂载 Obsidian Vault ─────────────────────────────────
+      # 将宿主机的 Obsidian Vault 挂载到容器内 /vault。
+      # 挂载后在 AI-KA Web UI → Vault 管理 → 注册路径 /vault 即可，
+      # 之后所有项目通过 Vault 子目录自动发现，无需手动输入路径。
+      #
+      # macOS / Linux 示例：
+      #   - ~/Documents/MyVault:/vault
+      # Windows 示例：
+      #   - C:\Users\user\Documents\MyVault:/vault
+      # - ~/ObsidianVault:/vault
+
+      # ── 可选：挂载多个独立项目目录 ────────────────────────────────
+      # 如果项目不在 Obsidian Vault 中，可单独挂载：
+      # - ~/Projects:/projects          # 宿主机目录 → 容器内 /projects
+      # - /data/work:/work
+
+      # ── 可选：挂载审查技能包与应用设置（便于宿主机直接编辑） ──────
       # - ./review_skill_packages:/app/review_skill_packages
       # - ./app_settings.md:/app/app_settings.md
+
     restart: unless-stopped
 
 volumes:
