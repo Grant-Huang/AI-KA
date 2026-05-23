@@ -682,11 +682,11 @@ export default function App() {
               : "system";
         ensureMilestone(key, name, kind);
         currentStageKeyRef.current = key;
-        if (state === "start") {
+        if (state === "active") {
           const detail = typeof obj.detail === "string" ? String(obj.detail) : "";
           const d = detail.trim();
           if (d && !/^model=/i.test(d)) appendMilestoneDetail(key, `${detail}\n`);
-        } else if (state === "end") {
+        } else if (state === "done") {
           setMilestoneStatus(key, "done");
         } else if (state === "error") {
           setMilestoneStatus(key, "error");
@@ -1778,7 +1778,7 @@ export default function App() {
         convId,
         { message: text },
         (ev) => {
-          if (ev.type === "assistant_delta" && typeof (ev as any).text === "string") {
+          if (ev.type === "delta" && typeof (ev as any).text === "string") {
             appendAnalyzeDelta(String((ev as any).text));
           }
           if (ev.type === "agent_stage" && typeof (ev as any).stage === "string") {
@@ -1791,7 +1791,7 @@ export default function App() {
             }
             ensureMilestone(key, name, "system");
             currentStageKeyRef.current = key;
-            if (state === "end") setMilestoneStatus(key, "done");
+            if (state === "done") setMilestoneStatus(key, "done");
           }
           if (ev.type === "agent_decision") {
             const d = (ev as any).decision;
@@ -2009,11 +2009,11 @@ export default function App() {
                   : "system";
             ensureMilestone(key, name, kind);
             currentStageKeyRef.current = key;
-            if (state === "start") {
+            if (state === "active") {
               const detail = typeof (ev as any).detail === "string" ? String((ev as any).detail) : "";
               const d = detail.trim();
               if (d && !/^model=/i.test(d)) appendMilestoneDetail(key, `${detail}\n`);
-            } else if (state === "end") {
+            } else if (state === "done") {
               setMilestoneStatus(key, "done");
             }
           }
@@ -2147,11 +2147,11 @@ export default function App() {
                   : "system";
             ensureMilestone(key, name, kind);
             currentStageKeyRef.current = key;
-            if (state === "start") {
+            if (state === "active") {
               const detail = typeof (ev as any).detail === "string" ? String((ev as any).detail) : "";
               const d = detail.trim();
               if (d && !/^model=/i.test(d)) appendMilestoneDetail(key, `${detail}\n`);
-            } else if (state === "end") {
+            } else if (state === "done") {
               setMilestoneStatus(key, "done");
             }
           }
