@@ -1796,7 +1796,13 @@ export default function App() {
             }
             ensureMilestone(key, name, "system");
             currentStageKeyRef.current = key;
-            if (state === "done") setMilestoneStatus(key, "done");
+            if (state === "active") {
+              const detail = typeof (ev as any).detail === "string" ? String((ev as any).detail) : "";
+              const d = detail.trim();
+              if (d && !/^model=/i.test(d)) appendMilestoneDetail(key, `${detail}\n`);
+            } else if (state === "done") {
+              setMilestoneStatus(key, "done");
+            }
           }
           if (ev.type === "agent_decision") {
             const d = (ev as any).decision;

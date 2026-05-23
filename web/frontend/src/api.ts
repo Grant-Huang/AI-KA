@@ -16,7 +16,8 @@ function mesoToFlat(ev: SSEEvent): Record<string, unknown> | null {
     case "memory":
       return { type: "memory", ...payload };
     case "extension": {
-      const name = payload.name as string;
+      const name = payload.name;
+      if (typeof name !== "string") return null;
       const data = ((payload.data ?? {}) as Record<string, unknown>);
       return { type: name, ...data };
     }
