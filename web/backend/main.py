@@ -23,7 +23,7 @@ from aika.paths import db_path
 
 from backend.config import get_settings
 from backend.deps import get_conn as _conn, get_project_or_404 as _get_project_or_404, get_conversation_or_404 as _get_conversation_or_404
-from backend.streaming import sse_event as _sse_line, sse_stage as _sse_stage
+from backend.streaming import sse_event as _sse_line, sse_stage as _sse_stage, sse_done as _sse_done
 from backend.llm_utils import stream_and_collect_iter as _llm_stream
 from backend.folder_picker import FolderPickerError, pick_folder_native
 from backend.epic_mapper import analysis_to_epic_doc_config, dump_epic_config_json
@@ -2384,6 +2384,7 @@ def analyze_conversation_stream(project_id: int, conversation_id: int, payload: 
             ev = {"type": "stage", "stage": "呈现结果", "status": "end"}
             append_milestone_event(milestones_path, ev)
             yield _sse_stage("呈现结果", "end")
+            yield _sse_done()
         except LLMError as e:
             append_milestone_event(
                 milestones_path,
