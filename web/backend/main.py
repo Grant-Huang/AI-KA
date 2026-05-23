@@ -2549,6 +2549,7 @@ def followup_conversation_stream(project_id: int, conversation_id: int, payload:
                 },
             )
             yield _sse_line({"type": "final", "markdown": body})
+            yield _sse_done()
         except LLMError as e:
             append_milestone_event(milestones_path, {"type": "error", "message": str(e)})
             yield _sse_line(
@@ -2639,6 +2640,7 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
             yield _agent_event("agent_stage", {"stage": "routing", "state": "end"})
             yield _agent_event("assistant_delta", {"text": f"路由失败：{str(e)}\n请尝试换一种表述，或先完成项目初始化。"})
             yield _agent_event("final", {"ok": False})
+            yield _sse_done()
             return
         yield _agent_event("agent_stage", {"stage": "routing", "state": "end"})
 
@@ -2689,6 +2691,7 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
                 content="语料未初始化或已过期：请先进入「项目初始化」完成转换与索引，然后再发起审查/追问。",
             )
             yield _agent_event("final", {"ok": True})
+            yield _sse_done()
             return
 
         if intent == "clarify" or (not focus_ids and intent == "analyze"):
@@ -2701,6 +2704,7 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
             yield _agent_event("agent_stage", {"stage": "clarifying", "state": "end"})
             dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=text)
             yield _agent_event("final", {"ok": True})
+            yield _sse_done()
             return
 
         # 3) execute analyze/followup（第一版：默认 analyze；followup 需要存在 last_run）
@@ -2736,6 +2740,7 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
             dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=body)
             yield _agent_event("agent_stage", {"stage": "executing", "state": "end", "kind": "followup"})
             yield _agent_event("final", {"ok": True, "markdown": body})
+            yield _sse_done()
             return
 
         # analyze
@@ -2745,6 +2750,7 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
             yield _agent_event("assistant_delta", {"text": text})
             dbm.insert_message(conn, conversation_id=conversation_id, role="assistant", content=text)
             yield _agent_event("final", {"ok": False})
+            yield _sse_done()
             return
 
         entries = dbm.list_chunk_entries(conn, project_id=project_id, limit=_get_chunk_limit())
@@ -2757,6 +2763,7 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
                 },
             )
             yield _agent_event("final", {"ok": True})
+            yield _sse_done()
             return
 
         # 记忆召回：若路由给了 memory_query，用它；否则用关注点 id 拼接
@@ -2853,6 +2860,7 @@ def agent_conversation_stream(project_id: int, conversation_id: int, payload: Ag
         )
         yield _agent_event("agent_stage", {"stage": "executing", "state": "end", "kind": "analyze"})
         yield _agent_event("final", {"ok": True, "markdown": body})
+        yield _sse_done()
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
