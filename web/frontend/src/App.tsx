@@ -674,7 +674,10 @@ export default function App() {
     for (const obj of replay.milestones.events as any[]) {
       if (obj?.type === "stage" && typeof obj.stage === "string" && typeof obj.status === "string") {
         const name = String(obj.stage);
-        const state = String(obj.status);
+        // Milestones on disk may use legacy "start"/"end" (written before the
+        // Meso shim) or normalized "active"/"done" (written after). Accept both.
+        const _rawState = String(obj.status);
+        const state = (_rawState === "start" ? "active" : _rawState === "end" ? "done" : _rawState);
         const key = `stage:${name}`;
         const kind: LogGroupKind =
           name.includes("错误")

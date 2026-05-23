@@ -75,6 +75,10 @@ def sse_event(obj: dict[str, Any]) -> str:
         # become Meso extension events.
         meso_type = "extension"
         data = {k: v for k, v in obj.items() if k != "type"}
+        # Normalize any "state" field so agent_stage events use active/done
+        # vocabulary, matching what the frontend expects after mesoToFlat.
+        if "state" in data:
+            data = {**data, "state": _normalize_state(data["state"])}
         payload = {"name": event_type, "data": data}
 
     return _meso_wrap(meso_type, payload)

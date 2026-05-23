@@ -18,8 +18,7 @@
       "types": "./dist/runtime/index.d.ts"
     },
     "./tokens.css": "./dist/tokens.css",
-    "./dist/style.css": "./dist/style.css",
-    "./dist/tokens.css": "./dist/tokens.css"
+    "./style.css": "./dist/style.css"
   },
   "files": [
     "dist"
