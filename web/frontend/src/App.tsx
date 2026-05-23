@@ -105,6 +105,8 @@ import SystemSettingPage from "./pages/system_setting";
 import ExtractionPage, { ReviewQueueTab, PendingRulesTab } from "./ExtractionPage";
 import { FindingsPanel, type Finding } from "./FindingsPanel";
 import type { ReviewQueueItem } from "./api";
+import { StageTimeline } from "@meso/ui";
+import type { Stage } from "@meso/ui";
 
 const { Text, Title } = Typography;
 
@@ -672,7 +674,10 @@ export default function App() {
     for (const obj of replay.milestones.events as any[]) {
       if (obj?.type === "stage" && typeof obj.stage === "string" && typeof obj.status === "string") {
         const name = String(obj.stage);
-        const state = String(obj.status);
+        // Milestones on disk may use legacy "start"/"end" (written before the
+        // Meso shim) or normalized "active"/"done" (written after). Accept both.
+        const _rawState = String(obj.status);
+        const state = (_rawState === "start" ? "active" : _rawState === "end" ? "done" : _rawState);
         const key = `stage:${name}`;
         const kind: LogGroupKind =
           name.includes("错误")
@@ -682,11 +687,11 @@ export default function App() {
               : "system";
         ensureMilestone(key, name, kind);
         currentStageKeyRef.current = key;
-        if (state === "start") {
+        if (state === "active") {
           const detail = typeof obj.detail === "string" ? String(obj.detail) : "";
           const d = detail.trim();
           if (d && !/^model=/i.test(d)) appendMilestoneDetail(key, `${detail}\n`);
-        } else if (state === "end") {
+        } else if (state === "done") {
           setMilestoneStatus(key, "done");
         } else if (state === "error") {
           setMilestoneStatus(key, "error");
@@ -1778,7 +1783,7 @@ export default function App() {
         convId,
         { message: text },
         (ev) => {
-          if (ev.type === "assistant_delta" && typeof (ev as any).text === "string") {
+          if (ev.type === "delta" && typeof (ev as any).text === "string") {
             appendAnalyzeDelta(String((ev as any).text));
           }
           if (ev.type === "agent_stage" && typeof (ev as any).stage === "string") {
@@ -1791,7 +1796,13 @@ export default function App() {
             }
             ensureMilestone(key, name, "system");
             currentStageKeyRef.current = key;
-            if (state === "end") setMilestoneStatus(key, "done");
+            if (state === "active") {
+              const detail = typeof (ev as any).detail === "string" ? String((ev as any).detail) : "";
+              const d = detail.trim();
+              if (d && !/^model=/i.test(d)) appendMilestoneDetail(key, `${detail}\n`);
+            } else if (state === "done") {
+              setMilestoneStatus(key, "done");
+            }
           }
           if (ev.type === "agent_decision") {
             const d = (ev as any).decision;
@@ -2009,11 +2020,11 @@ export default function App() {
                   : "system";
             ensureMilestone(key, name, kind);
             currentStageKeyRef.current = key;
-            if (state === "start") {
+            if (state === "active") {
               const detail = typeof (ev as any).detail === "string" ? String((ev as any).detail) : "";
               const d = detail.trim();
               if (d && !/^model=/i.test(d)) appendMilestoneDetail(key, `${detail}\n`);
-            } else if (state === "end") {
+            } else if (state === "done") {
               setMilestoneStatus(key, "done");
             }
           }
@@ -2147,11 +2158,11 @@ export default function App() {
                   : "system";
             ensureMilestone(key, name, kind);
             currentStageKeyRef.current = key;
-            if (state === "start") {
+            if (state === "active") {
               const detail = typeof (ev as any).detail === "string" ? String((ev as any).detail) : "";
               const d = detail.trim();
               if (d && !/^model=/i.test(d)) appendMilestoneDetail(key, `${detail}\n`);
-            } else if (state === "end") {
+            } else if (state === "done") {
               setMilestoneStatus(key, "done");
             }
           }
@@ -3998,6 +4009,18 @@ export default function App() {
                     </div>
                   ) : milestones.length ? (
                     <div className="milestone-timeline" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {pipelineRunning ? (
+                        <StageTimeline
+                          compact
+                          stages={milestones
+                            .filter((m) => m.id !== "sys:complete" && m.id !== "stage:呈现结果" && m.name !== "呈现结果")
+                            .map<Stage>((m) => ({
+                              id: m.id,
+                              label: m.name,
+                              status: m.status === "running" ? "active" : m.status === "done" ? "done" : m.status === "error" ? "done" : "pending",
+                            }))}
+                        />
+                      ) : null}
                       {milestones
                         .filter(
                           (m) =>

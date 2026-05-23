@@ -1,3 +1,31 @@
+import { parseSSELine } from "@meso/types";
+import type { SSEEvent } from "@meso/types";
+
+/** Translate a Meso v1.0 envelope into the flat event shape App.tsx expects. */
+function mesoToFlat(ev: SSEEvent): Record<string, unknown> | null {
+  const payload = ev.payload as Record<string, unknown>;
+  switch (ev.type) {
+    case "text":
+      return { type: "delta", text: payload.delta ?? "" };
+    case "stage":
+      return { type: "stage", ...payload };
+    case "error":
+      return { type: "error", ...payload };
+    case "done":
+      return null;
+    case "memory":
+      return { type: "memory", ...payload };
+    case "extension": {
+      const name = payload.name;
+      if (typeof name !== "string") return null;
+      const data = ((payload.data ?? {}) as Record<string, unknown>);
+      return { type: name, ...data };
+    }
+    default:
+      return { type: ev.type, ...payload };
+  }
+}
+
 function resolveApiBase(): string {
   // Prefer explicit Vite env var (build-time)
   const fromEnv = String((import.meta as any)?.env?.VITE_API_BASE || "").trim();
@@ -91,19 +119,15 @@ async function consumeSseFromResponse(
       const block = buf.slice(0, idx);
       buf = buf.slice(idx + 2);
       const line = block.trim();
-      if (!line.startsWith("data: ")) {
-        continue;
+      const mesoEv = parseSSELine(line);
+      if (!mesoEv) continue;
+      if (mesoEv.type === "error") {
+        const msg = ((mesoEv.payload as unknown as Record<string, unknown>).message as string) ?? "stream error";
+        throw new Error(msg);
       }
-      let obj: Record<string, unknown>;
-      try {
-        obj = JSON.parse(line.slice(6)) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-      if (obj.type === "error") {
-        throw new Error(String(obj.message ?? "stream error"));
-      }
-      onEvent(obj);
+      const flat = mesoToFlat(mesoEv);
+      if (flat === null) continue;
+      onEvent(flat);
     }
   }
 }

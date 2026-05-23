@@ -40,7 +40,7 @@ from pydantic import BaseModel
 from aika import db as dbm
 from aika.paths import db_path
 from backend.deps import get_conn
-from backend.streaming import sse_event as _sse_line
+from backend.streaming import sse_event as _sse_line, sse_done as _sse_done
 from backend.llm_utils import stream_and_collect_iter as _llm_stream
 from backend.knowledge_models import ExpertProfile, next_ki_id
 from backend.ki_parser import KI_INSTRUCTION, extract_clarify, extract_ki_items, extract_satisfaction
@@ -583,6 +583,7 @@ def post_review_extraction_stream(
             "satisfaction": satisfaction,
             "needs_followup": satisfaction is None or satisfaction < _SATISFACTION_THRESHOLD,
         })
+        yield _sse_done()
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -759,6 +760,7 @@ def active_extraction_stream(body: ActiveExtractionBody) -> StreamingResponse:
                     yield _sse_line({"type": "coach_hint", **coach_result})
             except Exception:
                 pass  # 教练分析失败不影响主流程
+        yield _sse_done()
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -971,6 +973,7 @@ def doc_extraction_stream(body: DocExtractionBody) -> StreamingResponse:
             "new_ki_count": len(new_kids),
             "satisfaction": satisfaction,
         })
+        yield _sse_done()
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -1075,6 +1078,7 @@ def expert_interview_stream(body: ExpertInterviewBody) -> StreamingResponse:
                 pass
 
         yield _sse_line({"type": "final"})
+        yield _sse_done()
 # Meta-Reflection Endpoint (Sprint 6 — Scale 2-B)
 # ---------------------------------------------------------------------------
 
