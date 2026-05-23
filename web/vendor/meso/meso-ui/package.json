@@ -17,7 +17,9 @@
       "require": "./dist/runtime.cjs",
       "types": "./dist/runtime/index.d.ts"
     },
-    "./tokens.css": "./dist/tokens.css"
+    "./tokens.css": "./dist/tokens.css",
+    "./dist/style.css": "./dist/style.css",
+    "./dist/tokens.css": "./dist/tokens.css"
   },
   "files": [
     "dist"

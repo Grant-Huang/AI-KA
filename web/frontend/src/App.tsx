@@ -105,6 +105,8 @@ import SystemSettingPage from "./pages/system_setting";
 import ExtractionPage, { ReviewQueueTab, PendingRulesTab } from "./ExtractionPage";
 import { FindingsPanel, type Finding } from "./FindingsPanel";
 import type { ReviewQueueItem } from "./api";
+import { StageTimeline } from "@meso/ui";
+import type { Stage } from "@meso/ui";
 
 const { Text, Title } = Typography;
 
@@ -3998,6 +4000,18 @@ export default function App() {
                     </div>
                   ) : milestones.length ? (
                     <div className="milestone-timeline" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {pipelineRunning ? (
+                        <StageTimeline
+                          compact
+                          stages={milestones
+                            .filter((m) => m.id !== "sys:complete" && m.id !== "stage:呈现结果" && m.name !== "呈现结果")
+                            .map<Stage>((m) => ({
+                              id: m.id,
+                              label: m.name,
+                              status: m.status === "running" ? "active" : m.status === "done" ? "done" : m.status === "error" ? "done" : "pending",
+                            }))}
+                        />
+                      ) : null}
                       {milestones
                         .filter(
                           (m) =>
