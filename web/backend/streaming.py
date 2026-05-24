@@ -29,13 +29,16 @@ def _normalize_state(state: str) -> str:
 # ---------------------------------------------------------------------------
 
 def sse_event(obj: dict[str, Any]) -> str:
-    """Convert any AI-KA event dict to a Meso v1.0 SSE data line.
+    """Convert any AI-KA event dict to a Meso SSE data line.
 
-    Already-wrapped events (schema_version == "1.0") pass through unchanged.
-    Legacy events are upgraded transparently.
+    Already-wrapped events (any schema_version) pass through unchanged so that
+    pre-wrapped v2.0+ events are never double-wrapped.
+    Legacy flat events are upgraded to the Meso v1.0 envelope transparently.
     """
-    # Already Meso v1.0 – pass through
-    if obj.get("schema_version") == "1.0":
+    # Already Meso-wrapped (any version) – pass through unchanged.
+    # Detect by structural check rather than a hard-coded version string so
+    # that v2.0+ events are forwarded correctly without re-wrapping.
+    if "schema_version" in obj and "payload" in obj and "type" in obj:
         return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
 
     event_type = obj.get("type", "extension")

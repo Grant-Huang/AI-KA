@@ -672,11 +672,14 @@ export default function App() {
     currentStageKeyRef.current = "";
     lastMilestoneIdRef.current = "";
     for (const obj of replay.milestones.events as any[]) {
-      if (obj?.type === "stage" && typeof obj.stage === "string" && typeof obj.status === "string") {
-        const name = String(obj.stage);
+      // Accept both legacy field names {stage, status} and Meso field names {name, state}.
+      const _replayName = obj?.stage ?? obj?.name;
+      const _replayStatus = obj?.status ?? obj?.state;
+      if (obj?.type === "stage" && typeof _replayName === "string" && typeof _replayStatus === "string") {
+        const name = String(_replayName);
         // Milestones on disk may use legacy "start"/"end" (written before the
         // Meso shim) or normalized "active"/"done" (written after). Accept both.
-        const _rawState = String(obj.status);
+        const _rawState = String(_replayStatus);
         const state = (_rawState === "start" ? "active" : _rawState === "end" ? "done" : _rawState);
         const key = `stage:${name}`;
         const kind: LogGroupKind =
@@ -1802,6 +1805,8 @@ export default function App() {
               if (d && !/^model=/i.test(d)) appendMilestoneDetail(key, `${detail}\n`);
             } else if (state === "done") {
               setMilestoneStatus(key, "done");
+            } else if (state === "error") {
+              setMilestoneStatus(key, "error");
             }
           }
           if (ev.type === "agent_decision") {
@@ -2026,6 +2031,8 @@ export default function App() {
               if (d && !/^model=/i.test(d)) appendMilestoneDetail(key, `${detail}\n`);
             } else if (state === "done") {
               setMilestoneStatus(key, "done");
+            } else if (state === "error") {
+              setMilestoneStatus(key, "error");
             }
           }
           if (ev.type === "finding") {
@@ -2164,6 +2171,8 @@ export default function App() {
               if (d && !/^model=/i.test(d)) appendMilestoneDetail(key, `${detail}\n`);
             } else if (state === "done") {
               setMilestoneStatus(key, "done");
+            } else if (state === "error") {
+              setMilestoneStatus(key, "error");
             }
           }
           if (ev.type === "final") {
