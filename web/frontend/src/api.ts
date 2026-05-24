@@ -3,26 +3,42 @@ import type { SSEEvent } from "@meso/types";
 
 /** Translate a Meso v1.0 envelope into the flat event shape App.tsx expects. */
 function mesoToFlat(ev: SSEEvent): Record<string, unknown> | null {
-  const payload = ev.payload as Record<string, unknown>;
   switch (ev.type) {
-    case "text":
-      return { type: "delta", text: payload.delta ?? "" };
-    case "stage":
-      return { type: "stage", ...payload };
-    case "error":
-      return { type: "error", ...payload };
+    case "text": {
+      // Access typed fields explicitly so a field rename in Meso causes a TS error.
+      const p = ev.payload;
+      return { type: "delta", text: typeof p.delta === "string" ? p.delta : "" };
+    }
+    case "stage": {
+      // Guard on field presence so a rename is caught at build time and fails
+      // gracefully at runtime rather than silently dropping the event.
+      const p = ev.payload;
+      if (typeof p.name !== "string" || typeof p.state !== "string") return null;
+      const out: Record<string, unknown> = { type: "stage", name: p.name, state: p.state };
+      if ("detail" in p && typeof (p as { detail?: unknown }).detail === "string") {
+        out.detail = (p as { detail?: unknown }).detail;
+      }
+      return out;
+    }
+    case "error": {
+      const p = ev.payload;
+      return { type: "error", message: p.message, ...(p.code !== undefined ? { code: p.code } : {}) };
+    }
     case "done":
       return null;
-    case "memory":
-      return { type: "memory", ...payload };
+    case "memory": {
+      const p = ev.payload;
+      return { type: "memory", snippets: p.snippets };
+    }
     case "extension": {
-      const name = payload.name;
+      const p = ev.payload as unknown as Record<string, unknown>;
+      const name = p.name;
       if (typeof name !== "string") return null;
-      const data = ((payload.data ?? {}) as Record<string, unknown>);
+      const data = ((p.data ?? {}) as Record<string, unknown>);
       return { type: name, ...data };
     }
     default:
-      return { type: ev.type, ...payload };
+      return { type: ev.type, ...(ev.payload as Record<string, unknown>) };
   }
 }
 
