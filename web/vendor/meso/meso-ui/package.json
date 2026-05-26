@@ -25,7 +25,6 @@
   ],
   "scripts": {
     "build": "vite build && tsc -p tsconfig.build.json",
-    "prepare": "pnpm run build",
     "dev": "vite build --watch",
     "type-check": "tsc --noEmit",
     "test": "vitest run",
