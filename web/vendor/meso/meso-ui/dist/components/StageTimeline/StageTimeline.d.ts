@@ -1,5 +1,5 @@
 import './StageTimeline.css';
-export type StageStatus = 'pending' | 'active' | 'done';
+export type StageStatus = 'pending' | 'active' | 'done' | 'error';
 export interface Stage {
     id: string;
     label: string;

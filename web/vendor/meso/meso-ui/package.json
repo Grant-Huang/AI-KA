@@ -25,10 +25,14 @@
   ],
   "scripts": {
     "build": "vite build && tsc -p tsconfig.build.json",
+    "prepare": "pnpm run build",
     "dev": "vite build --watch",
     "type-check": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "peerDependencies": {
     "@meso/types": "^1.0.0",

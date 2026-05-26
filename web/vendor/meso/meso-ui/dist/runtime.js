@@ -1,5 +1,5 @@
-const n = "1.0";
-function i() {
+const l = "1.0";
+function m() {
   return {
     status: "idle",
     availableCapabilities: null,
@@ -17,22 +17,24 @@ function i() {
     textContent: "",
     artifacts: {},
     artifactOrder: [],
+    workflowRuns: {},
+    workflowRunOrder: [],
     extensions: {},
     extensionLog: [],
     errorMessage: null
   };
 }
-function c(e, t) {
+function f(e, t) {
   switch (t.type) {
     case "capabilities":
       return { ...e, availableCapabilities: t.payload };
     case "stage": {
-      const { name: a, state: s } = t.payload;
+      const { name: a, state: o } = t.payload;
       return {
         ...e,
         stages: [
           ...e.stages.filter((r) => r.name !== a),
-          { name: a, state: s }
+          { name: a, state: o }
         ]
       };
     }
@@ -56,13 +58,13 @@ function c(e, t) {
       };
     }
     case "tool_result": {
-      const { tool_call_id: a } = t.payload, s = e.toolCalls[a], r = t.payload.error ? "error" : "done";
+      const { tool_call_id: a } = t.payload, o = e.toolCalls[a], r = t.payload.error ? "error" : "done";
       return {
         ...e,
         toolCalls: {
           ...e.toolCalls,
           [a]: {
-            call: (s == null ? void 0 : s.call) ?? { id: a, name: "(unknown)", args: {} },
+            call: (o == null ? void 0 : o.call) ?? { id: a, name: "(unknown)", args: {} },
             result: t.payload,
             status: r
           }
@@ -81,13 +83,13 @@ function c(e, t) {
       };
     }
     case "resource_content": {
-      const { resource_read_id: a } = t.payload, s = e.resourceReads[a], r = t.payload.error ? "error" : "done";
+      const { resource_read_id: a } = t.payload, o = e.resourceReads[a], r = t.payload.error ? "error" : "done";
       return {
         ...e,
         resourceReads: {
           ...e.resourceReads,
           [a]: {
-            read: (s == null ? void 0 : s.read) ?? { id: a, uri: "(unknown)" },
+            read: (o == null ? void 0 : o.read) ?? { id: a, uri: "(unknown)" },
             content: t.payload,
             status: r
           }
@@ -103,17 +105,35 @@ function c(e, t) {
     case "text":
       return { ...e, textContent: e.textContent + t.payload.delta };
     case "artifact": {
-      const { id: a, lang: s, delta: r, done: o } = t.payload, l = e.artifacts[a], d = e.artifactOrder.includes(a) ? e.artifactOrder : [...e.artifactOrder, a];
+      const { id: a, lang: o, delta: r, done: d } = t.payload, n = e.artifacts[a], i = e.artifactOrder.includes(a) ? e.artifactOrder : [...e.artifactOrder, a];
       return {
         ...e,
-        artifactOrder: d,
+        artifactOrder: i,
         artifacts: {
           ...e.artifacts,
           [a]: {
             id: a,
-            lang: s,
-            content: ((l == null ? void 0 : l.content) ?? "") + r,
-            done: o ?? !1
+            lang: o,
+            content: ((n == null ? void 0 : n.content) ?? "") + r,
+            done: d ?? !1
+          }
+        }
+      };
+    }
+    case "workflow_node": {
+      const { run_id: a, node_id: o, parent_id: r, name: d, state: n, started_at: i, duration_ms: c, metadata: u } = t.payload, s = e.workflowRuns[a] ?? { nodes: {}, nodeOrder: [] }, p = s.nodeOrder.includes(o) ? s.nodeOrder : [...s.nodeOrder, o];
+      return {
+        ...e,
+        workflowRunOrder: e.workflowRunOrder.includes(a) ? e.workflowRunOrder : [...e.workflowRunOrder, a],
+        workflowRuns: {
+          ...e.workflowRuns,
+          [a]: {
+            run_id: a,
+            nodes: {
+              ...s.nodes,
+              [o]: { node_id: o, run_id: a, parent_id: r, name: d, state: n, started_at: i, duration_ms: c, metadata: u }
+            },
+            nodeOrder: p
           }
         }
       };
@@ -141,11 +161,11 @@ function c(e, t) {
       return e;
   }
 }
-function u(e) {
+function O(e) {
   if (!e.startsWith("data: ")) return null;
   const t = e.slice(6).trim();
   if (t === "[DONE]")
-    return { type: "done", schema_version: n, payload: {} };
+    return { type: "done", schema_version: l, payload: {} };
   let a;
   try {
     a = JSON.parse(t);
@@ -153,12 +173,32 @@ function u(e) {
     return null;
   }
   if (!a || typeof a != "object" || Array.isArray(a)) return null;
-  const s = a;
-  return typeof s.type != "string" || !s.payload || typeof s.payload != "object" || Array.isArray(s.payload) ? null : (s.schema_version || (s.schema_version = n), s);
+  const o = a;
+  return typeof o.type != "string" || !o.payload || typeof o.payload != "object" || Array.isArray(o.payload) ? null : (o.schema_version || (o.schema_version = l), o);
+}
+function y(e) {
+  const [t] = l.split(".").map(Number), [a] = (e.schema_version ?? "").split(".").map(Number);
+  return a === t;
+}
+function _(e) {
+  if (!y(e))
+    throw new Error(
+      `Meso protocol version mismatch: runtime expects ${l}, received ${e.schema_version}. Upgrade @meso/types or your backend.`
+    );
+}
+function w(e, t) {
+  return {
+    id: t,
+    label: e.name,
+    status: e.state
+  };
 }
 export {
-  n as PROTOCOL_VERSION,
-  c as applyEvent,
-  i as createInitialStreamState,
-  u as parseSSELine
+  l as PROTOCOL_VERSION,
+  f as applyEvent,
+  _ as assertCompatibleVersion,
+  m as createInitialStreamState,
+  y as isCompatibleVersion,
+  O as parseSSELine,
+  w as stagePayloadToStage
 };
