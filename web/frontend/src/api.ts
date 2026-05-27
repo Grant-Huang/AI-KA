@@ -1,5 +1,5 @@
-import { parseSSELine } from "@meso/types";
-import type { SSEEvent } from "@meso/types";
+import { parseSSELine, isCompatibleVersion } from "@meso.ai/types";
+import type { SSEEvent } from "@meso.ai/types";
 
 /** Translate a Meso v1.0 envelope into the flat event shape App.tsx expects. */
 function mesoToFlat(ev: SSEEvent): Record<string, unknown> | null {
@@ -137,6 +137,10 @@ async function consumeSseFromResponse(
       const line = block.trim();
       const mesoEv = parseSSELine(line);
       if (!mesoEv) continue;
+      if (!isCompatibleVersion(mesoEv)) {
+        console.warn(`[Meso] protocol version mismatch: received schema_version="${mesoEv.schema_version}", expected major 1. Event skipped.`);
+        continue;
+      }
       if (mesoEv.type === "error") {
         const msg = ((mesoEv.payload as unknown as Record<string, unknown>).message as string) ?? "stream error";
         throw new Error(msg);
