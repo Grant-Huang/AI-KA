@@ -3,8 +3,8 @@ import ReactDOM from "react-dom/client";
 import { ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import App from "./App";
-import "@meso/ui/tokens.css";
-import "@meso/ui/style.css";
+import "@meso.ai/ui/tokens.css";
+import "@meso.ai/ui/style.css";
 import "./styles.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

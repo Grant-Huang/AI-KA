@@ -105,8 +105,8 @@ import SystemSettingPage from "./pages/system_setting";
 import ExtractionPage, { ReviewQueueTab, PendingRulesTab } from "./ExtractionPage";
 import { FindingsPanel, type Finding } from "./FindingsPanel";
 import type { ReviewQueueItem } from "./api";
-import { StageTimeline } from "@meso/ui";
-import type { Stage } from "@meso/ui";
+import { StageTimeline } from "@meso.ai/ui";
+import type { Stage } from "@meso.ai/ui";
 
 const { Text, Title } = Typography;
 

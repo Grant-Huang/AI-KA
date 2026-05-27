@@ -1,5 +1,5 @@
 {
-  "name": "@meso/types",
+  "name": "@meso.ai/types",
   "version": "1.0.0",
   "description": "Meso SSE protocol types and pure runtime functions — zero dependencies",
   "type": "module",

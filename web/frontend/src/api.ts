@@ -1,5 +1,5 @@
-import { parseSSELine, isCompatibleVersion } from "@meso/types";
-import type { SSEEvent } from "@meso/types";
+import { parseSSELine, isCompatibleVersion } from "@meso.ai/types";
+import type { SSEEvent } from "@meso.ai/types";
 
 /** Translate a Meso v1.0 envelope into the flat event shape App.tsx expects. */
 function mesoToFlat(ev: SSEEvent): Record<string, unknown> | null {

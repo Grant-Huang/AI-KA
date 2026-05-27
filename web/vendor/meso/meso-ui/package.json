@@ -1,5 +1,5 @@
 {
-  "name": "@meso/ui",
+  "name": "@meso.ai/ui",
   "version": "2.0.0",
   "description": "Meso streaming-first UI component library",
   "type": "module",
@@ -34,12 +34,12 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@meso/types": "^1.0.0",
+    "@meso.ai/types": "^1.0.0",
     "react": ">=18.0.0",
     "react-dom": ">=18.0.0"
   },
   "devDependencies": {
-    "@meso/types": "workspace:*",
+    "@meso.ai/types": "workspace:*",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
